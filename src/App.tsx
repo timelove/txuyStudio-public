@@ -5,6 +5,7 @@ import { listen } from "@tauri-apps/api/event";
 import { mockProjects } from "./mock/mockProjects";
 import { AppShell } from "./components/AppShell";
 import { I18nProvider } from "./i18n/I18nProvider";
+import { SettingsProvider } from "./settings/SettingsProvider";
 import { useTranslation } from "react-i18next";
 import type { BackendAppSnapshot } from "./domain/appState";
 import type { ProjectId, ProjectSnapshot } from "./domain/projects";
@@ -59,6 +60,8 @@ export default function App() {
   const [loadState, setLoadState] = useState<"loading" | "ready" | "error">("loading");
   /** 后端持久化的界面语言(hydrate 后传入 I18nProvider 作权威初始值;非 Tauri 兜底用 localStorage/系统)。 */
   const [locale, setLocale] = useState<string | null | undefined>(undefined);
+  /** 后端持久化的字体大小(hydrate 后传入 SettingsProvider 作权威初始值;undefined → 默认 13)。 */
+  const [terminalFontSize, setTerminalFontSize] = useState<number | undefined>(undefined);
 
   // 主窗口运行期标记：哪些项目已弹出为独立窗口（隐藏在主窗口列表里）。不持久化。
   const [detachedProjectIds, setDetachedProjectIds] = useState<Set<ProjectId>>(new Set());
@@ -96,6 +99,7 @@ export default function App() {
         setProjects(deriveProjects(snap));
         setActiveProjectId(snap.activeProjectId);
         setLocale(snap.locale ?? null);
+        setTerminalFontSize(snap.terminalFontSize);
         setLoadState("ready");
       })
       .catch((err) => {
@@ -217,17 +221,19 @@ export default function App() {
   // detachedProjectIds 仅主窗口有意义(标记哪些项目已弹出、应在主窗口隐藏)。
   return (
     <I18nProvider initialLocale={locale}>
-      <AppShell
-        projects={projects}
-        activeProjectId={activeProjectId}
-        onSelectProject={handleSelect}
-        onAddProject={mode.isMain ? handleAdd : undefined}
-        onCloseProject={mode.isMain ? handleCloseProject : undefined}
-        onDetachProject={mode.isMain ? handleDetach : undefined}
-        detachedProjectIds={mode.isMain ? detachedProjectIds : new Set()}
-        singleProjectMode={!mode.isMain}
-        onDockBack={mode.isMain ? undefined : handleDockBack}
-      />
+      <SettingsProvider initialFontSize={terminalFontSize}>
+        <AppShell
+          projects={projects}
+          activeProjectId={activeProjectId}
+          onSelectProject={handleSelect}
+          onAddProject={mode.isMain ? handleAdd : undefined}
+          onCloseProject={mode.isMain ? handleCloseProject : undefined}
+          onDetachProject={mode.isMain ? handleDetach : undefined}
+          detachedProjectIds={mode.isMain ? detachedProjectIds : new Set()}
+          singleProjectMode={!mode.isMain}
+          onDockBack={mode.isMain ? undefined : handleDockBack}
+        />
+      </SettingsProvider>
     </I18nProvider>
   );
 }

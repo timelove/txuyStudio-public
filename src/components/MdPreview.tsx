@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { useSettings } from "../settings/SettingsProvider";
 
 /**
  * Markdown 预览(探针右栏 md 文件 preview 态)。
@@ -18,6 +19,7 @@ import { useTranslation } from "react-i18next";
  */
 export function MdPreview({ content }: { content: string }) {
   const { t } = useTranslation();
+  const { fontSize } = useSettings();
   const [html, setHtml] = useState<string>("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -66,7 +68,8 @@ export function MdPreview({ content }: { content: string }) {
 
   return (
     <div
-      className="mx-md-preview mx-scroll-pretty h-full overflow-auto px-4 py-3 text-[12px] leading-relaxed text-[var(--mx-text)]"
+      className="mx-md-preview mx-scroll-pretty h-full overflow-auto px-4 py-3 leading-relaxed text-[var(--mx-text)]"
+      style={{ fontSize }}
       dangerouslySetInnerHTML={{ __html: html }}
     />
   );

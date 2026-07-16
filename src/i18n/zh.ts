@@ -110,6 +110,11 @@ const zh = {
   },
   settings: {
     title: "设置",
+    tab: {
+      general: "通用",
+      shortcuts: "快捷键",
+      about: "关于",
+    },
     shortcut: {
       title: "快捷键",
     },
@@ -118,6 +123,18 @@ const zh = {
       zh: "中文",
       en: "English",
     },
+    fontSize: {
+      title: "字体大小",
+      hint: "终端 + 编辑器",
+      decrease: "调小",
+      increase: "调大",
+      reset: "重置",
+    },
+  },
+  about: {
+    description: "面向 Windows 开发者的 AI CLI 终端工作台。并行管理 claude、codex、常规 shell、测试命令与项目任务。",
+    version: "版本",
+    viewOnGithub: "在 GitHub 查看",
   },
   statusbar: {
     settings: "设置",

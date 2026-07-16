@@ -49,6 +49,9 @@
   /* risk 模式:guarded cyan(安全),permissive 琥珀(更高风险提醒)。 */
   --mx-guarded: #22d3ee;
   --mx-permissive: #f59e0b;
+  /* 自绘标题栏高度(顶栏 grid 行高 + TopProjectBar + WindowControls 容器统一引用)。
+   * 收窄到 32px(贴近 VS Code/系统标题栏观感);改高度只动这一处,控件靠 items-center/h-full 自适应。 */
+  --mx-titlebar-h: 32px;
 }
 
 * {

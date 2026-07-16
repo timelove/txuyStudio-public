@@ -11,7 +11,7 @@ use pty::commands::{kill_pty, resize_pty, spawn_pty, write_pty};
 use pty::PtyRegistry;
 use state::commands::{
     close_project, hydrate_window, open_project, save_pane_tree, save_window_bounds,
-    set_active_project, set_locale,
+    set_active_project, set_locale, set_terminal_font_size,
 };
 use system::commands::{
     check_commands_installed, delete_ai_cli_session, get_ai_cli_session_messages, get_git_branch,
@@ -174,6 +174,7 @@ pub fn run() {
             close_project,
             set_active_project,
             set_locale,
+            set_terminal_font_size,
             save_window_bounds,
             save_pane_tree,
             // 独立项目窗口(阶段 4:右击项目「在新窗口打开」)

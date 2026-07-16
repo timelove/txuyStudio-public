@@ -100,6 +100,9 @@ pub struct AppSnapshot {
     /// 界面语言偏好("zh"/"en")。None = 跟随系统/默认,由前端按 navigator.language 推断。
     /// Option + serde default 天然兼容旧 state.json 缺字段(无 locale → None),无需迁移。
     pub locale: Option<String>,
+    /// 终端 + Monaco 编辑器字体大小(px)。None = 用前端默认值(13)。
+    /// Option + serde default 天然兼容旧 state.json 缺字段(无该字段 → None),无需迁移。
+    pub terminal_font_size: Option<u32>,
 }
 
 /// 全局应用状态容器:`State<Mutex<AppSnapshot>>`。

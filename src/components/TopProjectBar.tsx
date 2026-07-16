@@ -50,7 +50,7 @@ export function TopProjectBar({
   return (
     <header
       data-tauri-drag-region
-      className="grid h-[36px] grid-cols-[auto_1fr_auto] items-center gap-3 px-3"
+      className="grid h-[length:var(--mx-titlebar-h)] grid-cols-[auto_1fr_auto] items-center gap-3 px-3"
     >
       {/* 品牌区:纯展示,不 stopPropagation → 冒泡到 header,可作为拖拽把手。
           子元素 pointer-events-none → mousedown 命中带 attr 的父容器(该 Tauri 版本只看
@@ -139,7 +139,7 @@ export function TopProjectBar({
 
       {/* 窗口控制:交互按钮区,stopPropagation 避免被拖拽吞掉点击。 */}
       <div className="flex items-center" onMouseDown={(e) => e.stopPropagation()}>
-        <div className="-mr-3 ml-1 flex h-[36px] items-stretch">
+        <div className="-mr-3 ml-1 flex h-[length:var(--mx-titlebar-h)] items-stretch">
           <WindowControls />
         </div>
       </div>
