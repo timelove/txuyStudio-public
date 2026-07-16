@@ -1,0 +1,26 @@
+# 默认:所有文本文件用 LF 存储与检出(跨平台统一,消除 Windows CRLF 警告)
+* text=auto eol=lf
+
+# Windows 专用脚本必须保持 CRLF
+*.ps1   text eol=crlf
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+
+# 二进制资源:Git 不改其字节
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.webp  binary
+*.ico   binary
+*.icns  binary
+*.woff  binary
+*.woff2 binary
+*.ttf   binary
+*.otf   binary
+*.exe   binary
+*.dll   binary
+*.pdb   binary
+
+# lockfile 保持 LF(bun.lock)
+*.lock  text eol=lf

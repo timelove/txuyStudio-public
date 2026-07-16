@@ -1,0 +1,18 @@
+node_modules/
+dist/
+src-tauri/target/
+logs/
+.DS_Store
+*.log
+.env
+.env.*
+!.env.example
+.build-log.txt
+
+# IDE
+.idea/
+
+# 内置大文件资源（手动下载放入，不入库）
+# - src-tauri/resources/oh-my-posh.exe  （oh-my-posh releases: posh-windows-amd64.exe 重命名）
+# - src-tauri/resources/CaskaydiaCoveNF.ttf  （Cascadia Code Nerd Font）
+# - public/CaskaydiaCoveNF.ttf  （同上，前端 @font-face 用，走 Vite 管线）

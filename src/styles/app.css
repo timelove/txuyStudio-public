@@ -1,0 +1,397 @@
+@import "tailwindcss";
+
+/* ============================================================
+ * 基底：根元素、box-sizing、body、button 重置。
+ * 这些作用在根元素、无法用 Tailwind 原子类干净表达，保留为全局 CSS。
+ * ============================================================ */
+
+:root {
+  color: #e2e8f0;
+  background: #070a12;
+  font-family: Aptos, "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+  /* 全局根字号:浏览器默认 16px 偏大,降到 14px 对齐「终端工作台」紧凑基调。
+   * Tailwind v4 spacing 基于 rem(0.25rem/档),故全项目 rem 间距同步缩 12.5%;
+   * 但 xterm 字号是显式 px(fontSize:13)不受影响,chrome 层显式 text-[Npx] 也不受影响。 */
+  font-size: 14px;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+
+  /* ----------------------------------------------------------------
+   * 设计 token(chrome 层统一真源):顶/左/底/窗格共用同一套
+   * 边框 · 选中态 · surface · 圆角 · risk 配色。组件逐步引用,
+   * 避免颜色散落在各 JSX 的 arbitrary value 里漂移。
+   *
+   * 主题:深蓝/slate「终端工作台」——近黑蓝底 + cyan 强调 + violet 块面。
+   * 极简取向:结构性边框全部移除,仅保留 focused / 选中态 / 浮层的功能性边框。
+   * ---------------------------------------------------------------- */
+  --mx-bg: #070a12;
+  --mx-border: rgba(148, 163, 184, 0.14);
+  --mx-border-strong: rgba(148, 163, 184, 0.34);
+  --mx-surface: rgba(15, 23, 42, 0.96);
+  --mx-text: #cbd5e1;
+  --mx-muted: #94a3b8;
+  --mx-faint: #475569;
+  /* 品牌主色:cyan + violet(渐变两端)。 */
+  --mx-accent: #22d3ee;
+  --mx-accent-deep: #7c3aed;
+  --mx-brand-gradient: linear-gradient(135deg, #7c3aed, #22d3ee);
+  /* 统一选中态:soft accent 背景 + accent 边框(顶栏 tab / 左栏 shell / 窗格 focused 共用)。 */
+  --mx-selected-bg: rgba(34, 211, 238, 0.18);
+  --mx-selected-border: rgba(34, 211, 238, 0.55);
+  --mx-hover-bg: rgba(148, 163, 184, 0.10);
+  /* 圆角 token(全项目统一真源):sm 小图标容器/kbd,md 按钮/菜单项/chip,lg 卡片/浮层容器,full 小装饰色点。
+   * 配套语义 class(.mx-card/.mx-menu/.mx-chip/.mx-icon-tile)收口散落 rounded-none,见文件底部。 */
+  --mx-radius-sm: 4px;
+  --mx-radius-md: 6px;
+  --mx-radius-lg: 8px;
+  --mx-radius-full: 9999px;
+  /* risk 模式:guarded cyan(安全),permissive 琥珀(更高风险提醒)。 */
+  --mx-guarded: #22d3ee;
+  --mx-permissive: #f59e0b;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  overflow: hidden;
+}
+
+button {
+  font: inherit;
+}
+
+/* ============================================================
+ * 通用滚动条:隐藏原生滚动条(侧栏等列表区)。滚轮/触控滚动不受影响,仅不显示滑块。
+ * 与 xterm viewport 隐藏原生滚动条的做法一致(xterm.css L15-19)。
+ * xterm 自身滚动条不受影响(它走另一套 .xterm-scrollable-element)。
+ * ============================================================ */
+
+.mx-scroll {
+  scrollbar-width: none; /* Firefox */
+}
+
+.mx-scroll::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  background: transparent;
+  display: none;
+}
+
+/* ============================================================
+ * 圆角语义 class:把散落在各组件的 rounded-none 按用途收口到 radius token,
+ * 一处改全局生效。挂到对应元素上替代手写的 rounded-none 原子类。
+ *   .mx-card      — 卡片/浮层容器(modal、popover/dialog content):radius-lg(8px)
+ *   .mx-menu      — 下拉/菜单/右键菜单容器:radius-md(6px)
+ *   .mx-chip      — 项目 chip / dock 按钮 / 色条等胶囊态:radius-md(6px)
+ *   .mx-icon-tile — 图标徽章/glyph 背板/kbd 键帽等小方块:radius-sm(4px)
+ * 例外:装饰性小色点(h-1.5 w-1.5)直接用 rounded-full(圆形语义);分屏
+ * gap-px 缝隙的结构性边角(PaneSurface 空态/TerminalPane 容器)保持直角。
+ * ============================================================ */
+
+.mx-card {
+  border-radius: var(--mx-radius-lg);
+}
+
+.mx-menu {
+  border-radius: var(--mx-radius-md);
+}
+
+.mx-chip {
+  border-radius: var(--mx-radius-md);
+}
+
+.mx-icon-tile {
+  border-radius: var(--mx-radius-sm);
+}
+
+/* ============================================================
+ * 美化滚动条(非 xterm 区):文件树 / 文件预览等原生滚动区复用。
+ * 视觉对齐 xterm overlay 滚动条(xterm.css L34-58):平时滑块细(视觉 ~4px)
+ * 低调不抢眼,hover 展宽(视觉 ~8px)+ 加深,圆角半透明 slate,透明轨道,
+ * 隐藏上下箭头按钮。滚轮滚动不受影响。
+ *
+ * 容器恒定 8px 提供 hover 命中区(与 xterm 容器同宽);原生 webkit 滑块宽度
+ * 不可动画,故用透明 border + background-clip:padding-box 留内边距实现「细→展宽」
+ * (平时 border 2px→视觉 4px,hover border 0→视觉 8px)。颜色取 xterm 同款
+ * 0.28/0.5,三处(文件树 / 图片预览 / Monaco)滚动条视觉完全统一。
+ *
+ * 选择器含后代(*):文件树滚动元素是 react-arborist 内部 react-window div,
+ * 非 .mx-scroll-pretty 自身,故用后代选择器覆盖;图片预览滚动元素是自身,
+ * 由自身选择器覆盖。两者共用一套规则。
+ * ============================================================ */
+
+.mx-scroll-pretty,
+.mx-scroll-pretty * {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(148, 163, 184, 0.28) transparent;
+}
+
+.mx-scroll-pretty::-webkit-scrollbar,
+.mx-scroll-pretty *::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+  background: transparent;
+}
+
+.mx-scroll-pretty::-webkit-scrollbar-track,
+.mx-scroll-pretty *::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.mx-scroll-pretty::-webkit-scrollbar-thumb,
+.mx-scroll-pretty *::-webkit-scrollbar-thumb {
+  border-radius: 9999px;
+  background: rgba(148, 163, 184, 0.28);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+  transition: border-width 120ms ease-out, background 120ms ease-out;
+}
+
+.mx-scroll-pretty::-webkit-scrollbar-thumb:hover,
+.mx-scroll-pretty *::-webkit-scrollbar-thumb:hover {
+  background: rgba(148, 163, 184, 0.5);
+  border-width: 0;
+  background-clip: padding-box;
+}
+
+.mx-scroll-pretty::-webkit-scrollbar-button,
+.mx-scroll-pretty *::-webkit-scrollbar-button {
+  display: none;
+}
+
+/* ============================================================
+ * Monaco 编辑器滚动条:覆盖其自绘滑块,对齐 xterm overlay 样式
+ * (容器 8px,滑块平时 3px 贴右,hover 展宽 8px)。与 .mx-scroll-pretty
+ * 及 xterm 三处滚动条视觉完全统一。
+ *
+ * Monaco 用 JS 内联设 slider 的 width/left,故用 !important 覆盖(同 xterm 做法);
+ * options 已设 verticalScrollbarSize:8 让容器内联宽度即 8px,此处仅收窄 slider
+ * 并加 hover 展宽 + 过渡。颜色/过渡参数与 xterm.css L41-58 逐字一致。
+ * ============================================================ */
+
+.monaco-scrollable-element > .scrollbar.vertical {
+  background: transparent !important;
+}
+
+.monaco-scrollable-element > .scrollbar.vertical > .slider {
+  width: 3px !important;
+  left: auto !important;
+  right: 0 !important;
+  border-radius: 9999px !important;
+  background: rgba(148, 163, 184, 0.28) !important;
+  transition: width 120ms ease-out, background 120ms ease-out !important;
+}
+
+.monaco-scrollable-element > .scrollbar.vertical:hover > .slider,
+.monaco-scrollable-element > .scrollbar.vertical > .slider:hover {
+  width: 8px !important;
+  background: rgba(148, 163, 184, 0.5) !important;
+}
+
+.monaco-scrollable-element > .scrollbar.horizontal > .slider {
+  height: 3px !important;
+  top: auto !important;
+  bottom: 0 !important;
+  border-radius: 9999px !important;
+  background: rgba(148, 163, 184, 0.28) !important;
+  transition: height 120ms ease-out, background 120ms ease-out !important;
+}
+
+.monaco-scrollable-element > .scrollbar.horizontal:hover > .slider,
+.monaco-scrollable-element > .scrollbar.horizontal > .slider:hover {
+  height: 8px !important;
+  background: rgba(148, 163, 184, 0.5) !important;
+}
+
+/* 隐藏 Monaco 滚动条上下箭头按钮,保持简洁(同 xterm 隐藏 .scra)。 */
+.monaco-scrollable-element > .scrollbar .arrow {
+  display: none !important;
+}
+
+/* ============================================================
+ * CSS 变量 / 属性选择器片段：依赖运行时动态值，保留为具名类。
+ * ============================================================ */
+
+/* 项目风险灯：permissive 用橙色。 */
+.project-nav-orb[data-kind="permissive"] {
+  background: #f59e0b;
+}
+
+/* 会话类型过滤开关：开启态圆点全亮 + 名字主色 + 行高亮。 */
+.kind-filter-row[data-on="true"] .kind-filter-dot {
+  opacity: 1;
+}
+
+.kind-filter-row[data-on="true"] .kind-filter-name {
+  color: #cbd5e1;
+}
+
+.kind-filter-row[data-on="true"] {
+  background: rgba(148, 163, 184, 0.10);
+}
+
+/* ============================================================
+ * 启动 splash 动画：用于 App.LoadingSurface（hydrate 期间占位）。
+ * 配色沿用品牌 token（violet→cyan 渐变），不引入新色。
+ * index.html 的 #boot-splash 用内联 keyframes，与此处保持一致。
+ * ============================================================ */
+
+.mx-boot-logo {
+  animation: mx-boot-pulse 1.4s ease-in-out infinite;
+}
+
+.mx-boot-bar-fill {
+  width: 40%;
+  transform: translateX(-100%);
+  animation: mx-boot-sweep 1.2s ease-in-out infinite;
+}
+
+@keyframes mx-boot-pulse {
+  0%,
+  100% {
+    opacity: 0.85;
+    transform: scale(1);
+    box-shadow: 0 0 16px rgba(34, 211, 238, 0.25);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.06);
+    box-shadow: 0 0 28px rgba(34, 211, 238, 0.45);
+  }
+}
+
+@keyframes mx-boot-sweep {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(350%);
+  }
+}
+
+/* ============================================================
+ * Radix 浮层动画:Dialog/Popover/ContextMenu/Tooltip 共用,由 data-state=open/closed
+ * 驱动。不依赖 tailwindcss-animate 插件,纯 CSS transition。
+ *   - overlay:淡入淡出(opacity)
+ *   - content:缩放+淡入(overlay 的 Content 居中已 translate,故用 scale 而非 translate;
+ *     Popover/ContextMenu 的 Content 定位由 Radix 管,scale 不干扰)。
+ * ============================================================ */
+
+.mx-dialog-overlay[data-state="open"] {
+  animation: mx-fade-in 160ms ease-out;
+}
+.mx-dialog-overlay[data-state="closed"] {
+  animation: mx-fade-out 120ms ease-in;
+}
+
+.mx-dialog-content[data-state="open"] {
+  animation: mx-zoom-in 160ms ease-out;
+}
+.mx-dialog-content[data-state="closed"] {
+  animation: mx-zoom-out 120ms ease-in;
+}
+
+@keyframes mx-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes mx-fade-out {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+@keyframes mx-zoom-in {
+  from { opacity: 0; transform: translate(-50%, -50%) scale(0.96); }
+  to { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+}
+@keyframes mx-zoom-out {
+  from { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+  to { opacity: 0; transform: translate(-50%, -50%) scale(0.96); }
+}
+
+/* Popover/ContextMenu 内容:fade + 轻微缩放(不 translate,定位由 Radix side/align 管)。
+ * direction 变体由 data-side 提供进/出方向(Radix 自动加 data-side=top|bottom|left|right),
+ * 此处用统一淡入淡出,简洁且不与定位冲突。 */
+.mx-popover-content[data-state="open"] {
+  animation: mx-pop-in 140ms ease-out;
+}
+.mx-popover-content[data-state="closed"] {
+  animation: mx-pop-out 100ms ease-in;
+}
+
+@keyframes mx-pop-in {
+  from { opacity: 0; transform: scale(0.97); }
+  to { opacity: 1; transform: scale(1); }
+}
+@keyframes mx-pop-out {
+  from { opacity: 1; transform: scale(1); }
+  to { opacity: 0; transform: scale(0.97); }
+}
+
+/* Tooltip:统一淡入淡出 + 轻微缩放(与 popover 同观感)。z-300 高于 modal z-200。 */
+.mx-tooltip-content[data-state="open"] {
+  animation: mx-pop-in 120ms ease-out;
+}
+.mx-tooltip-content[data-state="closed"] {
+  animation: mx-pop-out 80ms ease-in;
+}
+
+/* ============================================================
+ * Markdown 预览(探针 MdPreview)。手写复用 --mx-* token,对齐深蓝/cyan chrome。
+ * marked 渲染的 HTML 经 dompurify sanitize 后注入,样式在此收口(不依赖外部 md css)。
+ * ============================================================ */
+.mx-md-preview h1,
+.mx-md-preview h2,
+.mx-md-preview h3,
+.mx-md-preview h4 {
+  color: var(--mx-text);
+  font-weight: 600;
+  line-height: 1.4;
+  margin: 1em 0 0.5em;
+}
+.mx-md-preview h1 { font-size: 1.5em; border-bottom: 1px solid var(--mx-border); padding-bottom: 0.3em; }
+.mx-md-preview h2 { font-size: 1.3em; }
+.mx-md-preview h3 { font-size: 1.15em; }
+.mx-md-preview h4 { font-size: 1em; }
+.mx-md-preview p { margin: 0.6em 0; }
+.mx-md-preview a { color: #22d3ee; text-decoration: none; }
+.mx-md-preview a:hover { text-decoration: underline; }
+.mx-md-preview code {
+  font-family: var(--mx-mono, Consolas, monospace);
+  font-size: 0.9em;
+  background: rgba(148, 163, 184, 0.14);
+  padding: 0.1em 0.35em;
+  border-radius: var(--mx-radius-sm);
+}
+.mx-md-preview pre {
+  background: rgba(2, 6, 23, 0.6);
+  border: 1px solid var(--mx-border);
+  border-radius: var(--mx-radius-md);
+  padding: 0.75em 1em;
+  overflow-x: auto;
+  margin: 0.8em 0;
+}
+.mx-md-preview pre code {
+  background: none;
+  padding: 0;
+  font-size: 0.88em;
+}
+.mx-md-preview blockquote {
+  border-left: 3px solid var(--mx-accent);
+  margin: 0.8em 0;
+  padding: 0.2em 0.9em;
+  color: var(--mx-muted);
+  background: rgba(34, 211, 238, 0.05);
+}
+.mx-md-preview ul,
+.mx-md-preview ol { margin: 0.6em 0; padding-left: 1.6em; }
+.mx-md-preview li { margin: 0.25em 0; }
+.mx-md-preview hr { border: none; border-top: 1px solid var(--mx-border); margin: 1.2em 0; }
+.mx-md-preview table { border-collapse: collapse; margin: 0.8em 0; }
+.mx-md-preview th,
+.mx-md-preview td { border: 1px solid var(--mx-border); padding: 0.35em 0.7em; }
+.mx-md-preview th { background: rgba(148, 163, 184, 0.1); }
+.mx-md-preview img { max-width: 100%; }

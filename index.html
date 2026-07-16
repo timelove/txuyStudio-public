@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>txuyStudio</title>
+    <!--
+      启动 splash：纯内联 HTML/CSS，不依赖 React/Tailwind。
+      作用是覆盖 JS 模块加载 + 首帧 CSS 解析期间的原生白屏。
+      React createRoot().render() 首帧会用 App 的 LoadingSurface 替换 #root 内容，
+      两者视觉一致（深色 + 居中渐变 M），切换不可见。
+    -->
+    <style>
+      html,
+      body {
+        margin: 0;
+        background: #070a12;
+      }
+      #boot-splash {
+        position: fixed;
+        inset: 0;
+        z-index: 9999;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 14px;
+        background: #070a12;
+        color: #94a3b8;
+        font-family: "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+      }
+      #boot-splash .bs-logo {
+        width: 30px;
+        height: 30px;
+        display: grid;
+        place-items: center;
+        border-radius: 3px;
+        background: linear-gradient(135deg, #7c3aed, #22d3ee);
+        color: #fff;
+        font-weight: 800;
+        font-size: 16px;
+        box-shadow: 0 0 24px rgba(34, 211, 238, 0.35);
+        animation: bs-pulse 1.4s ease-in-out infinite;
+      }
+      #boot-splash .bs-hint {
+        font-size: 12px;
+        opacity: 0.7;
+      }
+      @keyframes bs-pulse {
+        0%,
+        100% {
+          opacity: 0.85;
+          transform: scale(1);
+        }
+        50% {
+          opacity: 1;
+          transform: scale(1.06);
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root">
+      <div id="boot-splash">
+        <div class="bs-logo">M</div>
+        <div class="bs-hint">正在加载工作区…</div>
+      </div>
+    </div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

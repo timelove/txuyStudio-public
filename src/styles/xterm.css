@@ -1,0 +1,77 @@
+@import "@xterm/xterm/css/xterm.css";
+
+.xterm {
+  height: 100%;
+}
+
+.xterm .xterm-viewport {
+  height: 100%;
+  background-color: transparent !important;
+}
+
+/* 隐藏 .xterm-viewport 的原生滚动条:xterm v5 用 overlay 滚动条(.scrollbar)替代,
+   原生滚动条本应被盖住,但 viewport 透明后 WebView2 会在右下角露出原生滚动条角落白块。
+   Chromium 内核用 ::-webkit-scrollbar 设 0 宽彻底隐藏,滚轮滚动与 overlay 滑块不受影响。 */
+.xterm .xterm-viewport::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  background: transparent;
+}
+
+.xterm .xterm-screen {
+  height: 100%;
+}
+
+/* ============================================================
+ * 滚动条美化：xterm v5 用 overlay 滚动条（.xterm-scrollable-element > .scrollbar）,
+ * 其宽度/位置由 JS 内联控制。这里用 !important 覆盖。
+ *
+ * 交互：平时滑块收窄(5px)低调不抢眼;hover 滚动条区域时滑块展宽(12px)方便拖拽。
+ * 容器宽度恒定 12px 提供「易 hover 命中区」,滑块在容器内贴右对齐,展宽时向左扩展
+ * 不溢出右边界。圆角 + 半透明薄荷绿,隐藏上下箭头按钮。滚轮滚动不受影响。
+ * ============================================================ */
+
+/* 滚动条容器:恒定 12px 宽作为 hover 命中区(滑块在内部收窄/展宽),透明轨道。 */
+.xterm .xterm-scrollable-element > .scrollbar {
+  width: 8px !important;
+  background: transparent !important;
+}
+
+/* 滑块:平时 4px 贴右,hover 容器时展宽 12px。transition 让粗细变化平滑。 */
+.xterm .xterm-scrollable-element > .scrollbar .slider,
+.xterm .xterm-scrollable-element > .scrollbar > div {
+  border-radius: 9999px !important;
+  background: rgba(148, 163, 184, 0.28) !important;
+  width: 3px !important;
+  left: auto !important;
+  right: 0 !important;
+  transition: width 120ms ease-out, background 120ms ease-out !important;
+}
+
+/* hover 滚动条容器 → 滑块展宽 + 加深,方便拖拽。 */
+.xterm .xterm-scrollable-element > .scrollbar:hover .slider,
+.xterm .xterm-scrollable-element > .scrollbar:hover > div,
+.xterm .xterm-scrollable-element > .scrollbar .slider:hover,
+.xterm .xterm-scrollable-element > .scrollbar > div:hover {
+  width: 8px !important;
+  background: rgba(148, 163, 184, 0.5) !important;
+}
+
+/* 隐藏滚动条上下箭头按钮（.scra），让滚动条更简洁。 */
+.xterm .xterm-scrollable-element > .scrollbar .scra {
+  display: none !important;
+}
+
+/* ============================================================
+ * 内置 Nerd Font 字体：oh-my-posh 主题里的私有区图标(时钟/root/闪电/失败叉等)
+ * 依赖 Nerd Font，本机未装会渲染成方块。字体文件放 public/，走 Vite asset 管线，
+ * dev/build 两种模式下 /CaskaydiaCoveNF.ttf 都能正确解析。font-display: swap
+ * 让首屏先用回退字体渲染，字体加载完成后再切换，不阻塞终端首帧。
+ * ============================================================ */
+@font-face {
+  font-family: "CaskaydiaCoveNF";
+  src: url("/CaskaydiaCoveNF.ttf") format("truetype");
+  font-display: swap;
+}
+
+

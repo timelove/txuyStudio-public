@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <!-- 深空背景:深蓝黑 → 略带紫的深空色 -->
+    <linearGradient id="space" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#070a12"/>
+      <stop offset="1" stop-color="#0f1428"/>
+    </linearGradient>
+    <!-- 青色发光滤镜:T 和 > 共用,外发光晕 -->
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="16" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <!-- 弱发光:背景氛围光,弥散青紫 -->
+    <radialGradient id="ambient" cx="0.5" cy="0.5" r="0.6">
+      <stop offset="0" stop-color="#22d3ee" stop-opacity="0.18"/>
+      <stop offset="0.5" stop-color="#7c3aed" stop-opacity="0.08"/>
+      <stop offset="1" stop-color="#070a12" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <!-- 深空底 + 圆角 -->
+  <rect x="0" y="0" width="1024" height="1024" rx="224" ry="224" fill="url(#space)"/>
+  <!-- 氛围光:中心弥散青紫,造全息空间感 -->
+  <rect x="0" y="0" width="1024" height="1024" rx="224" ry="224" fill="url(#ambient)"/>
+
+  <!-- T 镂空:描边 18 + 青色发光。整体右移 78 居中(沿用上轮几何)。 -->
+  <g filter="url(#glow)">
+    <!-- T 横杆:中空矩形,只有描边 -->
+    <rect x="450" y="332" width="280" height="64" rx="8"
+          fill="none" stroke="#22d3ee" stroke-width="18"/>
+    <!-- T 竖杆:中空矩形 -->
+    <rect x="558" y="332" width="64" height="360" rx="8"
+          fill="none" stroke="#22d3ee" stroke-width="18"/>
+  </g>
+
+  <!-- >:白色发光线框,放 T 左下角,底部对齐 y=692 -->
+  <g filter="url(#glow)">
+    <path d="M 318 512 L 418 602 L 318 692"
+          fill="none" stroke="#e2e8f0" stroke-width="40"
+          stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+</svg>
