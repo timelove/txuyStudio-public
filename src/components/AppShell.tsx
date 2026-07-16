@@ -618,7 +618,7 @@ export function AppShell({
   const focusedProject = focused ? projects.find((p) => p.id === focused.projectId) ?? null : null;
 
   return (
-    <main className="grid h-screen min-h-0 grid-rows-[36px_1fr_26px] overflow-hidden bg-[#070a12]">
+    <main className="grid h-screen min-h-0 grid-rows-[var(--mx-titlebar-h)_1fr_26px] overflow-hidden bg-[#070a12]">
       <TopProjectBar
         projects={projects}
         activeProjectId={activeProjectId}

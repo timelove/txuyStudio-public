@@ -6,6 +6,7 @@ import type { ShellKind } from "../domain/paneTree";
 import { SHELL_KIND_META } from "../domain/shellKinds";
 import type { WorkspaceSession } from "../domain/sessions";
 import type { TerminalTransport } from "../domain/terminalTransport";
+import { useSettings } from "../settings/SettingsProvider";
 import { ShellMenu } from "./ShellMenu";
 import { Popover, PopoverTrigger } from "./ui/Popover";
 import { Button } from "./ui/Button";
@@ -69,6 +70,7 @@ export function TerminalPane({
   className,
 }: TerminalPaneProps) {
   const { t } = useTranslation();
+  const { fontSize } = useSettings();
   const surfaceRef = useRef<HTMLDivElement | null>(null);
   const paneRef = useRef<HTMLElement | null>(null);
   /** tab id → 常驻 xterm 资源。tab 首次可见时懒创建,切走不销毁。 */
@@ -134,7 +136,7 @@ export function TerminalPane({
       convertEol: false,
       cursorBlink: true,
       fontFamily: "CaskaydiaCoveNF, Cascadia Code, Cascadia Mono, Consolas, monospace",
-      fontSize: 13,
+      fontSize,
       lineHeight: 1.35,
       theme: terminalTheme,
       allowProposedApi: false,
@@ -257,6 +259,25 @@ export function TerminalPane({
       terminalsRef.current.clear();
     };
   }, []);
+
+  // 字体大小变化:对所有已建 xterm 更新 options.fontSize;可见 tab 立即 fit + resize 通知后端,
+  // 隐藏 tab 仅改 options(切回时由上方「切活动 tab」effect 重 fit)。xterm 改 fontSize 不自动
+  // reflow,必须 fit 重算 cols/rows 并 resize,否则光标定位错乱。
+  useEffect(() => {
+    for (const [tabId, tt] of terminalsRef.current) {
+      tt.terminal.options.fontSize = fontSize;
+      const container = tabContainerRefs.current.get(tabId);
+      if (!container || container.offsetParent === null) continue; // 隐藏 tab 跳过 fit
+      try {
+        tt.fitAddon.fit();
+      } catch {
+        /* fit 在尺寸为 0 时可能抛,忽略 */
+      }
+      const transport = getTransportRef.current(tabId);
+      void transport.resize(tabId, tt.terminal.cols, tt.terminal.rows);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fontSize]);
 
   // 新建/分屏菜单的 open/close 由 Radix Popover 管理(点外、Esc 内置),无需手写 effect。
 

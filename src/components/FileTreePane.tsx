@@ -16,6 +16,7 @@ import { basename, guessLang, isImage, formatBytes } from "./FilePreview";
 import { FileEditor } from "./FileEditor";
 import { MdPreview } from "./MdPreview";
 import type * as monaco from "monaco-editor";
+import { useSettings } from "../settings/SettingsProvider";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 
 type FileTreePaneProps = {
@@ -107,6 +108,9 @@ export function FileTreePane({
   onSetActiveTab,
 }: FileTreePaneProps) {
   const { t } = useTranslation();
+  const { fontSize } = useSettings();
+  // 文件树行高随字号联动(react-arborist rowHeight 固定,字号变大需加高否则文字被裁)。默认 13→22,与原固定值一致。
+  const treeRowHeight = fontSize + 9;
   // rootPath 由活动 tab 对应 session 的 cwd 派生(= 项目根,与 SessionBrowserPane 取法一致)。
   const activeSession = sessions.find((s) => s.id === activeTabId);
   const rootPath = activeSession?.cwd ?? "";
@@ -701,7 +705,7 @@ export function FileTreePane({
                   childrenAccessor={childrenAccessor}
                   openByDefault={false}
                   onToggle={handleToggle}
-                  rowHeight={22}
+                  rowHeight={treeRowHeight}
                   width={treeSize.width}
                   height={treeSize.height}
                   disableDrag
@@ -715,8 +719,8 @@ export function FileTreePane({
                       <Tooltip>
                       <TooltipTrigger asChild>
                       <div
-                        style={style}
-                        className={`flex cursor-pointer items-center gap-1 whitespace-nowrap px-1 leading-[22px] hover:bg-[rgba(148,163,184,0.1)] ${
+                        style={{ ...style, fontSize, lineHeight: `${treeRowHeight}px` }}
+                        className={`flex cursor-pointer items-center gap-1 whitespace-nowrap px-1 hover:bg-[rgba(148,163,184,0.1)] ${
                           isSel ? "bg-[var(--mx-selected-bg)]" : ""
                         }`}
                         // react-arborist 用 react-dnd,行 div 会被设 draggable=true。

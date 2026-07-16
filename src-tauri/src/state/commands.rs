@@ -199,6 +199,31 @@ pub async fn set_locale(
     Ok(snapshot)
 }
 
+/// 设置终端 + Monaco 编辑器字体大小(px),持久化到 state.json。
+///
+/// 仿 [[set_locale]] 三段式:短锁改 `terminal_font_size` + 克隆 + 释放锁 + save + 返回克隆。
+/// 前端已 clamp 到 `10..=22`;后端仅透传存储,不做范围校验(非 Tauri 环境 invoke 失败由前端
+/// catch 降级,本地仍切,不阻断)。
+#[tauri::command]
+pub async fn set_terminal_font_size(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    font_size: u32,
+) -> Result<AppSnapshot, String> {
+    let snapshot = {
+        let mut snap = state.inner.lock().map_err(|e| e.to_string())?;
+        snap.terminal_font_size = Some(font_size);
+        snap.clone()
+    };
+
+    log::info!("set_terminal_font_size: font_size = {font_size}");
+    if let Err(e) = persistence::save(&app, &snapshot) {
+        log::error!("set_terminal_font_size: persist failed: {e}");
+        return Err(e);
+    }
+    Ok(snapshot)
+}
+
 /// 持久化主窗口大小/位置。
 ///
 /// 阶段2 仅存 main 窗口 bounds;`windowLabel` 非 "main" 时忽略,

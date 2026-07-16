@@ -4,6 +4,7 @@ import type * as Monaco from "monaco-editor";
 import { useTranslation } from "react-i18next";
 import type { OpenFile } from "../domain/fileTree";
 import type { ModelPool } from "../domain/fileTree";
+import { useSettings } from "../settings/SettingsProvider";
 
 /**
  * 文件编辑器(探针右栏 text 态)。单 `<Editor>` 实例 + **model 池**:每个打开文件一个
@@ -38,6 +39,7 @@ type FileEditorProps = {
 
 export function FileEditor({ file, modelPool, mode, onViewStateChange, onContentChange }: FileEditorProps) {
   const { t } = useTranslation();
+  const { fontSize } = useSettings();
   const editorRef = useRef<Monaco.editor.IStandaloneCodeEditor | null>(null);
   const monacoRef = useRef<typeof Monaco | null>(null);
   // 当前 editor 挂载的 model path(用于 path 变化时 saveViewState 旧 model)。
@@ -130,7 +132,7 @@ export function FileEditor({ file, modelPool, mode, onViewStateChange, onContent
         scrollBeyondLastLine: false,
         renderLineHighlight: mode === "edit" ? "line" : "none",
         fontFamily: "var(--mx-mono, Consolas, monospace)",
-        fontSize: 12,
+        fontSize,
         lineNumbersMinChars: 4,
         scrollbar: { verticalScrollbarSize: 8, horizontalScrollbarSize: 8 },
         wordWrap: "on",

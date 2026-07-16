@@ -110,6 +110,11 @@ const en = {
   },
   settings: {
     title: "Settings",
+    tab: {
+      general: "General",
+      shortcuts: "Shortcuts",
+      about: "About",
+    },
     shortcut: {
       title: "Shortcuts",
     },
@@ -118,6 +123,18 @@ const en = {
       zh: "中文",
       en: "English",
     },
+    fontSize: {
+      title: "Font size",
+      hint: "Terminal + editor",
+      decrease: "Decrease",
+      increase: "Increase",
+      reset: "Reset",
+    },
+  },
+  about: {
+    description: "An AI CLI terminal workspace for Windows developers. Run claude, codex, regular shells, test commands and project tasks in parallel.",
+    version: "Version",
+    viewOnGithub: "View on GitHub",
   },
   statusbar: {
     settings: "Settings",

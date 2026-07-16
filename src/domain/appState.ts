@@ -42,4 +42,6 @@ export type BackendAppSnapshot = {
   mainWindowBounds?: WindowBounds;
   /** 界面语言偏好("zh"/"en");undefined/未设 = 跟随系统(前端按 navigator.language 推断)。 */
   locale?: string | null;
+  /** 终端 + Monaco 编辑器字体大小(px);undefined/未设 = 用前端默认值(13)。 */
+  terminalFontSize?: number;
 };
