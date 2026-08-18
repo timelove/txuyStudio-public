@@ -31,7 +31,7 @@ const ToggleGroup = React.forwardRef<
   <ToggleGroupPrimitive.Root
     ref={ref}
     className={cn(
-      "inline-flex items-center gap-0.5 rounded-[var(--mx-radius-md)] border border-[rgba(148,163,184,0.28)] bg-[rgba(2,6,23,0.4)] p-0.5",
+      "inline-flex items-center gap-0.5 rounded-[var(--mx-radius-md)] border border-[var(--mx-border-strong)] bg-[var(--mx-surface-2)] p-0.5",
       className,
     )}
     {...props}
@@ -49,7 +49,7 @@ const ToggleGroupItem = React.forwardRef<
       // 选中态 data-state=on 走 accent soft 底 + 前景高亮;off 透明 hover 出底色。
       "flex items-center justify-center rounded-[var(--mx-radius-sm)] px-2 py-[3px] text-[11px] text-[var(--mx-muted)] transition-colors cursor-pointer select-none",
       "hover:bg-[var(--mx-hover-bg)] hover:text-[var(--mx-text)]",
-      "data-[state=on]:bg-[rgba(34,211,238,0.16)] data-[state=on]:text-[#bae6fd] data-[state=on]:font-medium",
+      "data-[state=on]:bg-[var(--mx-accent-soft)] data-[state=on]:text-[var(--mx-accent-bright)] data-[state=on]:font-medium",
       "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--mx-accent)]",
       className,
     )}

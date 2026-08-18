@@ -1,7 +1,10 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useTranslation } from "react-i18next";
 import type { ProjectSnapshot } from "../domain/projects";
+import type { ClaudeStatusEntry } from "../domain/claudeStatusRegistry";
+import type { CodexStatusEntry } from "../domain/codexStatusRegistry";
+import type { ClaudeSessionKind } from "../domain/claudeStream";
 import { SettingsModal } from "./SettingsModal";
 import { Button } from "./ui/Button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/Tooltip";
@@ -11,6 +14,12 @@ type StatusBarProps = {
   focusedProject: ProjectSnapshot | null;
   /** 聚焦项目的 git 分支(由 AppShell 按 rootPath 去重拉取)。null=非 git;undefined=未查。 */
   gitBranch?: string | null;
+  /** 全部 claude tab 的对外状态汇总(供跨 tab 显示运行/等待/出错计数)。 */
+  claudeStatuses: ClaudeStatusEntry[];
+  /** 全部 codex tab 的对外状态汇总(与 claude 并列合并计数;kind 是 ClaudeSessionKind 子集)。 */
+  codexStatuses?: CodexStatusEntry[];
+  /** 点击某 AI 状态药丸 -> 跳到该状态第一个 claude/codex tab。 */
+  onFocusClaudeTab?: (projectId: string, tabId: string) => void;
 };
 
 /** 健康提醒的自然时间窗口长度(ms)。tip 按此时长对齐到墙上时钟轮换(默认 30min → :00 / :30 边界)。后续设置面板接入后改为从 settings 读取。 */
@@ -35,7 +44,7 @@ const HEALTH_TIPS: { tip: string; done: string }[] = [
  *
  * 生命周期:所有 interval 在卸载时清除,避免后台空转 invoke。
  */
-export function StatusBar({ focusedProject, gitBranch }: StatusBarProps) {
+export function StatusBar({ focusedProject, gitBranch, claudeStatuses, codexStatuses, onFocusClaudeTab }: StatusBarProps) {
   const { t } = useTranslation();
   const [mem, setMem] = useState<{ usedBytes: number; totalBytes: number } | null>(null);
   const [tipIdx, setTipIdx] = useState(0);
@@ -104,6 +113,21 @@ export function StatusBar({ focusedProject, gitBranch }: StatusBarProps) {
   const path = focusedProject?.rootPath ?? "";
   const entry = HEALTH_TIPS[tipIdx];
 
+  // AI 会话计数:按语义态分组(running/retrying/waiting/error/idle)。claude + codex 合并
+  // (codex 的 kind 是 ClaudeSessionKind 子集)。只显活跃态;全 idle 时不显(避免噪声)。
+  // 点击某态药丸 -> 跳该态第一个 tab。
+  const allAiStatuses = [...claudeStatuses, ...(codexStatuses ?? [])];
+  const aiCounts: Record<ClaudeSessionKind, number> = { error: 0, retrying: 0, waiting: 0, running: 0, idle: 0 };
+  for (const e of allAiStatuses) aiCounts[e.summary.kind]++;
+  // 活跃态药丸列表(显示顺序:error > retrying > waiting > running;idle 不显)。每态:label/颜色/计数。
+  const aiPills: { kind: ClaudeSessionKind; label: string; color: string }[] = [
+    { kind: "error", label: t("statusbar.aiError", { n: aiCounts.error }), color: "#f87171" },
+    { kind: "retrying", label: t("statusbar.aiRetrying", { n: aiCounts.retrying }), color: "#fb923c" },
+    { kind: "waiting", label: t("statusbar.aiWaiting", { n: aiCounts.waiting }), color: "#a78bfa" },
+    { kind: "running", label: t("statusbar.aiRunning", { n: aiCounts.running }), color: "#22d3ee" },
+  ];
+  const aiActive = aiCounts.running + aiCounts.retrying + aiCounts.waiting + aiCounts.error;
+
   return (
     <>
     <footer className="flex h-[26px] shrink-0 items-center justify-between gap-3 px-3 text-[11px] text-[var(--mx-muted)] select-none">
@@ -165,6 +189,39 @@ export function StatusBar({ focusedProject, gitBranch }: StatusBarProps) {
       </div>
 
       {/* 右:内存 已用/总量(GB) + 健康 tip。 */}
+      {/* 中:AI 会话状态汇总(所有 claude tab)。有活跃态(running/retrying/waiting/error)才显;
+          点击某态药丸跳该态第一个 claude tab。全 idle / 无 claude tab 不显。 */}
+      {aiActive > 0 && (
+        <div className="flex shrink-0 items-center gap-1.5">
+          {aiActive > 0 && (
+            <>
+              <span className="text-[var(--mx-faint)]">{t("statusbar.aiSessions")}</span>
+              {aiPills.filter((p) => aiCounts[p.kind] > 0).map((p) => {
+                const first = allAiStatuses.find((e) => e.summary.kind === p.kind);
+                return (
+                  <Tooltip key={p.kind}>
+                  <TooltipTrigger asChild>
+                  <button
+                    type="button"
+                    disabled={!onFocusClaudeTab || !first}
+                    onClick={() => {
+                      if (first && onFocusClaudeTab) onFocusClaudeTab(first.projectId, first.tabId);
+                    }}
+                    className="flex items-center gap-1 rounded px-1.5 py-0.5 tabular-nums transition-colors hover:bg-[var(--mx-border)] disabled:cursor-default disabled:hover:bg-transparent"
+                  >
+                    <span className="h-1.5 w-1.5 rounded-full" style={{ background: p.color }} />
+                    <span className="text-[var(--mx-text)]">{p.label}</span>
+                  </button>
+                  </TooltipTrigger>
+                  <TooltipContent>{t("statusbar.aiSessions")}</TooltipContent>
+                  </Tooltip>
+                );
+              })}
+            </>
+          )}
+        </div>
+      )}
+
       <div className="flex shrink-0 items-center gap-4">
         {mem !== null && mem.totalBytes > 0 && (
           <Tooltip>

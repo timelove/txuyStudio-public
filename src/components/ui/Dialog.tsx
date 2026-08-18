@@ -26,7 +26,7 @@ const DialogOverlay = React.forwardRef<
   <DialogPrimitive.Overlay
     ref={ref}
     className={cn(
-      "mx-dialog-overlay fixed inset-0 z-[200] bg-[rgba(2,6,23,0.6)]",
+      "mx-dialog-overlay fixed inset-0 z-[200] bg-[var(--mx-surface-2)]",
       className,
     )}
     {...props}
@@ -36,7 +36,9 @@ DialogOverlay.displayName = DialogPrimitive.Overlay.displayName;
 
 /**
  * 内容卡片:居中,`.mx-card` 圆角 + surface 背景 + 描边 + 阴影。
- * 缩放淡入淡出。点击内部不关闭(点遮罩才关,Radix 按 overlay 判定)。
+ * 居中用 `fixed inset-0 m-auto` + 固定宽高(不靠 translate,避免与 keyframe 的 transform
+ * translate 冲突致位移翻倍、出现「从左上角飞出」的错位)。动画走 data-state 驱动的淡入淡出 + 轻微缩放。
+ * 点击内部不关闭(点遮罩才关,Radix 按 overlay 判定)。
  */
 const DialogContent = React.forwardRef<
   React.ElementRef<typeof DialogPrimitive.Content>,
@@ -47,7 +49,7 @@ const DialogContent = React.forwardRef<
     <DialogPrimitive.Content
       ref={ref}
       className={cn(
-        "mx-dialog-content mx-card fixed left-1/2 top-1/2 z-[200] grid -translate-x-1/2 -translate-y-1/2 w-full border border-[rgba(148,163,184,0.22)] bg-[var(--mx-surface)] shadow-2xl",
+        "mx-dialog-content mx-card fixed inset-0 z-[200] m-auto h-fit w-fit grid border border-[var(--mx-border-strong)] bg-[var(--mx-surface)] shadow-2xl",
         className,
       )}
       {...props}

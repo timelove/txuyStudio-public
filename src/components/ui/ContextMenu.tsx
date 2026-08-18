@@ -24,7 +24,7 @@ const ContextMenuContent = React.forwardRef<
     <ContextMenuPrimitive.Content
       ref={ref}
       className={cn(
-        "mx-popover-content mx-menu z-[200] min-w-[160px] border border-[rgba(148,163,184,0.18)] bg-[var(--mx-surface)] py-1 shadow-lg",
+        "mx-popover-content mx-menu z-[200] min-w-[160px] border border-[var(--mx-border-strong)] bg-[var(--mx-surface)] py-1 shadow-lg",
         className,
       )}
       {...props}
@@ -49,7 +49,7 @@ const ContextMenuItem = React.forwardRef<
       "flex w-full items-center gap-2 px-3 py-[6px] text-left text-xs cursor-pointer outline-none select-none",
       "data-[highlighted]:bg-[var(--mx-hover-bg)] data-[disabled]:cursor-not-allowed data-[disabled]:opacity-40",
       variant === "danger"
-        ? "text-[#f87171] data-[highlighted]:bg-[rgba(244,63,94,0.18)]"
+        ? "text-[var(--mx-danger)] data-[highlighted]:bg-[var(--mx-danger-bg)]"
         : "text-[var(--mx-text)]",
       className,
     )}

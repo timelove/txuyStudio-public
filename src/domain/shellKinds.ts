@@ -17,7 +17,15 @@ export const SHELL_KIND_META: Record<
   { accent: string; glyph: string; label: string; defaultTitle: string }
 > = {
   claude: { accent: "#7c3aed", glyph: "C", label: "Claude", defaultTitle: "Claude" },
+  // claudepane:自渲染 claude 对话面板(stream-json wrapper,不走 xterm)。
+  // 与 claude(旧 xterm TUI)同色同字,作为唯一「Claude」新建入口;claude 退居兼容存量 tab,
+  // 移出 NEW_SHELL_GROUPS 不再作为新建入口(见下方)。详见 plan: ClaudePane。
+  claudepane: { accent: "#7c3aed", glyph: "C", label: "Claude", defaultTitle: "Claude" },
   codex: { accent: "#22d3ee", glyph: "X", label: "Codex", defaultTitle: "Codex" },
+  // codexpane:自渲染 codex 对话面板(每轮短命 codex exec --json + resume 续接,不走 xterm)。
+  // 与 codex(旧 xterm TUI)同色同字,作为唯一「Codex」新建入口;codex 退居兼容存量 tab,
+  // 移出 NEW_SHELL_GROUPS 不再作为新建入口(同 claude->claudepane 迁移)。详见 plan: CodexPane。
+  codexpane: { accent: "#22d3ee", glyph: "X", label: "Codex", defaultTitle: "Codex" },
   shell: { accent: "#94a3b8", glyph: ">", label: "PowerShell", defaultTitle: "PowerShell" },
   test: { accent: "#22c55e", glyph: "T", label: "Tests", defaultTitle: "Tests" },
   // TUI 工具:在 PTY 里启动对应 CLI,退出后回到 PowerShell(见 launch_command_for)。
@@ -29,6 +37,9 @@ export const SHELL_KIND_META: Record<
   sessionbrowser: { accent: "#a78bfa", glyph: "≡", label: "shellkind.sessionbrowser", defaultTitle: "shellkind.sessionbrowser" },
   // 文件树:纯 UI 面板(不走 PTY),react-arborist 懒加载 + notify 实时刷新,仅浏览(只读)。替代 yazi。
   filetree: { accent: "#34d399", glyph: "▤", label: "shellkind.filetree", defaultTitle: "shellkind.filetree" },
+  // HTML 预览:纯 UI 面板(不走 PTY),贴 HTML 源码即时 iframe srcdoc 沙箱预览。
+  // glyph 🌐(浏览器地球,表「网页预览」;与 filetree ▤ 等符号不同,用 emoji 直观表意)。
+  htmlpreview: { accent: "#fb7185", glyph: "🌐", label: "shellkind.htmlpreview", defaultTitle: "shellkind.htmlpreview" },
 };
 
 /**
@@ -43,10 +54,12 @@ export const SHELL_KIND_META: Record<
  */
 export const NEW_SHELL_GROUPS: { title: string; kinds: ShellKind[] }[] = [
   { title: "Shell", kinds: ["shell"] },
-  { title: "AI CLI", kinds: ["claude", "codex"] },
+  // AI CLI:Claude 走自渲染 ClaudePane(claudepane);codex 走自渲染 CodexPane(codexpane)。
+  // 旧 xterm TUI 版 claude/codex 退居兼容存量 tab、移出菜单(自渲染 pane 是唯一新建入口)。
+  { title: "AI CLI", kinds: ["claudepane", "codexpane"] },
   { title: "shellgroup.tui", kinds: ["lazygit", "yazi", "fresh"] },
   { title: "shellgroup.session", kinds: ["sessionbrowser"] },
-  { title: "shellgroup.browse", kinds: ["filetree"] },
+  { title: "shellgroup.browse", kinds: ["filetree", "htmlpreview"] },
 ];
 
 /** 新建菜单暴露的全部 shell 类型(NEW_SHELL_GROUPS 的扁平投影)。 */

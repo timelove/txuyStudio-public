@@ -33,7 +33,7 @@ export function InstallPromptModal({ prompt, onClose }: InstallPromptModalProps)
         <TooltipTrigger asChild>
         <button
           type="button"
-          className="group flex w-full items-stretch gap-0 border border-[rgba(148,163,184,0.18)] bg-[rgba(2,6,23,0.5)] text-left"
+          className="group flex w-full items-stretch gap-0 border border-[var(--mx-border-strong)] bg-[var(--mx-surface-2)] text-left"
           onClick={(e) => {
             const range = document.createRange();
             range.selectNodeContents(e.currentTarget.querySelector("[data-cmd]") as Node);
@@ -42,7 +42,7 @@ export function InstallPromptModal({ prompt, onClose }: InstallPromptModalProps)
             sel?.addRange(range);
           }}
         >
-          <span className="mx-icon-tile grid w-12 shrink-0 place-items-center bg-[rgba(148,163,184,0.1)] text-[10px] font-semibold uppercase text-[var(--mx-muted)]">
+          <span className="mx-icon-tile grid w-12 shrink-0 place-items-center bg-[var(--mx-hover-bg)] text-[10px] font-semibold uppercase text-[var(--mx-muted)]">
             {tag}
           </span>
           <code
@@ -72,7 +72,7 @@ export function InstallPromptModal({ prompt, onClose }: InstallPromptModalProps)
           <div className="flex items-center gap-2.5">
             <span
               className="mx-icon-tile grid h-6 w-6 shrink-0 place-items-center text-xs font-bold"
-              style={{ background: "var(--mx-accent)", color: "#0b1020" }}
+              style={{ background: "var(--mx-accent)", color: "var(--mx-editor-bg)" }}
             >
               {prompt.title.charAt(0).toUpperCase()}
             </span>
@@ -91,11 +91,11 @@ export function InstallPromptModal({ prompt, onClose }: InstallPromptModalProps)
 
           {/* 附加命令组(如 yazi 缺时连带依赖 file):分隔线下依次渲染,每组自带标题/说明/命令块 */}
           {prompt.extras?.map((group, idx) => (
-            <div key={idx} className="mt-4 border-t border-[rgba(148,163,184,0.18)] pt-3">
+            <div key={idx} className="mt-4 border-t border-[var(--mx-border-strong)] pt-3">
               <div className="flex items-center gap-2.5">
                 <span
                   className="mx-icon-tile grid h-6 w-6 shrink-0 place-items-center text-xs font-bold"
-                  style={{ background: "var(--mx-accent)", color: "#0b1020" }}
+                  style={{ background: "var(--mx-accent)", color: "var(--mx-editor-bg)" }}
                 >
                   {t(group.title).charAt(0).toUpperCase()}
                 </span>

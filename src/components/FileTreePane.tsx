@@ -2,10 +2,10 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProp
 import { useTranslation } from "react-i18next";
 import { Tree, type NodeApi, type TreeApi } from "react-arborist";
 import { Group as PanelGroup, Panel, Separator as PanelResizeHandle } from "react-resizable-panels";
-import type { ShellKind } from "../domain/paneTree";
-import { SHELL_KIND_META } from "../domain/shellKinds";
+import type { ShellKind, SplitDirection } from "../domain/paneTree";
 import type { WorkspaceSession } from "../domain/sessions";
 import { ShellMenu } from "./ShellMenu";
+import { SplitPaneButtons } from "./SplitPaneButtons";
 import { FilePreview } from "./FilePreview";
 import { Button } from "./ui/Button";
 import { Popover, PopoverTrigger } from "./ui/Popover";
@@ -30,7 +30,7 @@ type FileTreePaneProps = {
   projectId: string;
   onFocusPane?: (paneId: string) => void;
   onClosePane?: (paneId: string) => void;
-  onSplitPane?: (paneId: string, kind: ShellKind) => void;
+  onSplitPane?: (paneId: string, kind: ShellKind, direction: SplitDirection) => void;
   onAddTab?: (paneId: string, kind: ShellKind) => void;
   onCloseTab?: (paneId: string, tabId: string) => void;
   onSetActiveTab?: (paneId: string, tabId: string) => void;
@@ -130,7 +130,7 @@ export function FileTreePane({
   const rootsRef = useRef<FileNode[]>([]);
   rootsRef.current = roots;
   // 新建/分屏菜单:`"tab"`(+) / `"split"`(▥) / null(关)。open/close 由 Radix Popover 管。
-  const [menuMode, setMenuMode] = useState<"tab" | "split" | null>(null);
+  const [menuMode, setMenuMode] = useState<"tab" | null>(null);
 
   /** 打开文件上限(超则 LRU 淘汰最久未激活的)。 */
   const MAX_OPEN_FILES = 20;
@@ -522,22 +522,21 @@ export function FileTreePane({
 
   return (
     <article
-      className="grid h-full min-h-0 min-w-0 grid-rows-[28px_1fr] overflow-hidden bg-[#0b1020]"
+      className="grid h-full min-h-0 min-w-0 grid-rows-[28px_1fr] overflow-hidden bg-[var(--mx-editor-bg)]"
       onMouseDown={() => onFocusPane?.(paneId)}
     >
       {/* 顶部 header:tab 条 + 右侧按钮组(刷新 / + 新 tab / ▥ 分屏 / × 关 pane),与 TerminalPane/SessionBrowserPane 同构。 */}
       <header
         className={`flex min-w-0 shrink-0 items-center justify-between gap-2 px-2 text-xs transition-colors ${
-          focused ? "bg-[rgba(34,211,238,0.16)]" : "bg-[rgba(148,163,184,0.055)]"
+          "bg-[var(--mx-tabbar-bg)]"
         }`}
       >
         {/* tab 条:每个 tab 一个 chip,点击切换,× 关闭。 */}
         {/* tab 条:Radix Tabs 受控(value=activeTabId)。TabsTrigger 内置 onMouseDown→onValueChange,
             替代手写 chip onMouseDown 切 tab。× 关闭按钮 onMouseDown stopPropagation 防点 × 误切 tab。 */}
         <Tabs value={activeTabId} onValueChange={(id) => onSetActiveTab?.(paneId, id)}>
-        <TabsList className="flex min-w-0 items-center gap-1 overflow-x-auto [&::-webkit-scrollbar]:hidden">
+        <TabsList className="mx-tabs-list flex min-w-0 items-center gap-0 overflow-x-auto [&::-webkit-scrollbar]:hidden">
           {sessions.map((s) => {
-            const meta = SHELL_KIND_META[s.kind] ?? SHELL_KIND_META.filetree;
             const isActive = s.id === activeTabId;
             return (
               <Tooltip>
@@ -545,18 +544,12 @@ export function FileTreePane({
               <TabsTrigger asChild value={s.id}>
               <div
                 key={s.id}
-                className={`group/tab flex min-w-0 shrink cursor-pointer items-center gap-1 border-b-2 px-2 py-[3px] transition-colors ${
+                className={`mx-tab-item group/tab flex h-[24px] min-w-0 shrink cursor-pointer items-center gap-1 px-2 transition-colors ${
                   isActive
-                    ? "border-[#22d3ee] text-[#e2e8f0]"
-                    : "border-transparent text-[#64748b] hover:text-[#cbd5e1]"
+                    ? "text-[var(--mx-text-bright)]"
+                    : "text-[var(--mx-text-dim)] hover:text-[var(--mx-text)]"
                 }`}
               >
-                <span
-                  className="mx-icon-tile grid h-3.5 w-3.5 place-items-center text-[9px] font-bold"
-                  style={{ background: meta.accent, color: "#0b1020" }}
-                >
-                  {meta.glyph}
-                </span>
                 <span className="truncate text-[11px] font-[600]">{t(s.name)}</span>
                 {sessions.length > 1 && onCloseTab && (
                   <Tooltip>
@@ -564,7 +557,7 @@ export function FileTreePane({
                   <Button
                     variant="ghost"
                     size="icon-sm"
-                    className="h-3.5 w-3.5 text-[10px] text-[#64748b] opacity-0 transition-opacity hover:text-[#fca5a5] group-hover/tab:opacity-100 hover:bg-transparent"
+                    className="h-3.5 w-3.5 text-[10px] text-[var(--mx-text-dim)] opacity-0 transition-opacity hover:text-[var(--mx-danger-bright)] group-hover/tab:opacity-100 hover:bg-transparent"
                     onMouseDown={(e) => {
                       e.stopPropagation();
                       onCloseTab(paneId, s.id);
@@ -586,14 +579,14 @@ export function FileTreePane({
           })}
         </TabsList>
         </Tabs>
-        <div className="flex shrink-0 items-center gap-1 text-[#94a3b8]">
+        <div className="flex shrink-0 items-center gap-1 text-[var(--mx-muted)]">
           {/* 刷新:重拉根层(merge 保留展开子树)。 */}
           <Tooltip>
           <TooltipTrigger asChild>
           <Button
             variant="ghost"
             size="icon-sm"
-            className="text-[var(--mx-faint)] hover:bg-[rgba(148,163,184,0.14)] hover:text-[var(--mx-text)] disabled:opacity-40"
+            className="text-[var(--mx-faint)] hover:bg-[var(--mx-border)] hover:text-[var(--mx-text)] disabled:opacity-40"
             onMouseDown={(e) => e.stopPropagation()}
             onClick={loadRoot}
             disabled={loadingRoot}
@@ -615,7 +608,7 @@ export function FileTreePane({
                 <Button
                   variant="ghost"
                   size="icon-sm"
-                  className="text-[14px] text-[#94a3b8] hover:bg-[rgba(148,163,184,0.14)] hover:text-[#cbd5e1]"
+                  className="text-[14px] text-[var(--mx-muted)] hover:bg-[var(--mx-border)] hover:text-[var(--mx-text)]"
                   onMouseDown={(e) => e.stopPropagation()}
                 >
                   +
@@ -635,31 +628,7 @@ export function FileTreePane({
             </Popover>
           )}
           {onSplitPane && (
-            <Popover open={menuMode === "split"} onOpenChange={(o) => setMenuMode(o ? "split" : null)}>
-              <Tooltip>
-              <TooltipTrigger asChild>
-              <PopoverTrigger asChild>
-                <Button
-                  variant="ghost"
-                  size="icon-sm"
-                  className="text-[#94a3b8] hover:bg-[rgba(148,163,184,0.14)] hover:text-[#cbd5e1]"
-                  onMouseDown={(e) => e.stopPropagation()}
-                >
-                  ▥
-                </Button>
-              </PopoverTrigger>
-              </TooltipTrigger>
-              <TooltipContent>{t("shell.pane.split")}</TooltipContent>
-              </Tooltip>
-              {menuMode === "split" && (
-                <ShellMenu
-                  onSelect={(kind) => {
-                    setMenuMode(null);
-                    onSplitPane(paneId, kind);
-                  }}
-                />
-              )}
-            </Popover>
+            <SplitPaneButtons onSplit={(kind, direction) => onSplitPane(paneId, kind, direction)} />
           )}
           {onClosePane && (
             <Tooltip>
@@ -667,7 +636,7 @@ export function FileTreePane({
             <Button
               variant="ghost"
               size="icon-sm"
-              className="text-[13px] text-[#94a3b8] hover:bg-[rgba(239,68,68,0.14)] hover:text-[#fca5a5]"
+              className="text-[13px] text-[var(--mx-muted)] hover:bg-[var(--mx-danger-bg)] hover:text-[var(--mx-danger-bright)]"
               onMouseDown={(e) => {
                 e.stopPropagation();
                 onClosePane(paneId);
@@ -685,9 +654,9 @@ export function FileTreePane({
           bodyRef 保留(占位/空态测整体);Tree 尺寸由 treeBoxRef(左 Panel 内层)测。 */}
       <div ref={bodyRef} className="min-h-0 min-w-0 overflow-hidden font-mono text-xs">
         {loadingRoot && roots.length === 0 ? (
-          <div className="grid h-full place-items-center text-[#475569]">{t("common.loading")}</div>
+          <div className="grid h-full place-items-center text-[var(--mx-faint)]">{t("common.loading")}</div>
         ) : roots.length === 0 ? (
-          <div className="grid h-full place-items-center px-3 text-center text-[#475569]">
+          <div className="grid h-full place-items-center px-3 text-center text-[var(--mx-faint)]">
             {rootPath ? t("filetree.emptyDir") : t("filetree.noProjectPath")}
           </div>
         ) : (
@@ -720,7 +689,7 @@ export function FileTreePane({
                       <TooltipTrigger asChild>
                       <div
                         style={{ ...style, fontSize, lineHeight: `${treeRowHeight}px` }}
-                        className={`flex cursor-pointer items-center gap-1 whitespace-nowrap px-1 hover:bg-[rgba(148,163,184,0.1)] ${
+                        className={`flex cursor-pointer items-center gap-1 whitespace-nowrap px-1 hover:bg-[var(--mx-hover-bg)] ${
                           isSel ? "bg-[var(--mx-selected-bg)]" : ""
                         }`}
                         // react-arborist 用 react-dnd,行 div 会被设 draggable=true。
@@ -741,14 +710,14 @@ export function FileTreePane({
                         ) : (
                           // 文件选中指示用小三角 ▸(U+25B8,与目录箭头同尺寸变体),非标准 ▶(U+25B6,偏大)。
                           // 选中态配 cyan 高亮指示「当前预览项」,与目录绿色箭头区分;未选中用中点 · 淡化。
-                          <span className={`w-3 shrink-0 ${isSel ? "text-[#22d3ee]" : "text-[#64748b]"}`}>
+                          <span className={`w-3 shrink-0 ${isSel ? "text-[var(--mx-accent)]" : "text-[var(--mx-text-dim)]"}`}>
                             {isSel ? "▸" : "·"}
                           </span>
                         )}
-                        <span className={node.data.kind === "dir" ? "text-[#7dd3fc]" : isSel ? "text-[#e2e8f0]" : "text-[#cbd5e1]"}>
+                        <span className={node.data.kind === "dir" ? "text-[#7dd3fc]" : isSel ? "text-[var(--mx-text-bright)]" : "text-[var(--mx-text)]"}>
                           {node.data.name}
                         </span>
-                        {loadingId === node.id && <span className="text-[#475569]">…</span>}
+                        {loadingId === node.id && <span className="text-[var(--mx-faint)]">…</span>}
                       </div>
                       </TooltipTrigger>
                       <TooltipContent>{node.data.id}</TooltipContent>
@@ -764,7 +733,7 @@ export function FileTreePane({
               <div className="flex h-full min-h-0 flex-col">
                 {/* 打开文件标签栏:横向滚动,最多 20,LRU 淘汰。脏点 ● 批次5 编辑接入后显示。 */}
                 {openFiles.length > 0 && (
-                  <div className="flex shrink-0 items-stretch gap-0.5 overflow-x-auto border-b border-[var(--mx-border)] bg-[rgba(2,6,23,0.4)] px-1 py-1 [&::-webkit-scrollbar]:hidden">
+                  <div className="flex shrink-0 items-stretch gap-0.5 overflow-x-auto border-b border-[var(--mx-border)] bg-[var(--mx-surface-2)] px-1 py-1 [&::-webkit-scrollbar]:hidden">
                     {openFiles.map((f) => {
                       const isActive = f.path === activeFilePath;
                       return (
@@ -782,11 +751,11 @@ export function FileTreePane({
                             openOrActivate(f.path);
                           }}
                         >
-                          {f.dirty && <span className="text-[#f59e0b]">●</span>}
+                          {f.dirty && <span className="text-[var(--mx-permissive)]">●</span>}
                           <span className="max-w-[120px] truncate font-mono">{basename(f.path)}</span>
                           <button
                             type="button"
-                            className="ml-0.5 text-[10px] leading-none text-[var(--mx-faint)] opacity-0 transition-opacity hover:text-[#fca5a5] group-hover/ftab:opacity-100"
+                            className="ml-0.5 text-[10px] leading-none text-[var(--mx-faint)] opacity-0 transition-opacity hover:text-[var(--mx-danger-bright)] group-hover/ftab:opacity-100"
                             onMouseDown={(e) => {
                               e.stopPropagation();
                               closeFile(f.path);
@@ -818,7 +787,7 @@ export function FileTreePane({
                     <div className="flex h-full min-h-0 flex-col">
                       {/* truncated 提示(M1 已截断到 512KB 的文本)。 */}
                       {activeFile.truncated && (
-                        <div className="shrink-0 border-b border-[var(--mx-border)] bg-[rgba(245,158,11,0.08)] px-2 py-0.5 text-[10px] text-[#f59e0b]">
+                        <div className="shrink-0 border-b border-[var(--mx-border)] bg-[var(--mx-warning-soft)] px-2 py-0.5 text-[10px] text-[var(--mx-permissive)]">
                           {t("preview.truncated", { size: formatBytes(activeFile.size) })}
                         </div>
                       )}
@@ -826,11 +795,11 @@ export function FileTreePane({
                       <div className="flex shrink-0 items-center justify-between gap-2 border-b border-[var(--mx-border)] px-2 py-1 text-[10px] text-[var(--mx-muted)]">
                         <div className="flex min-w-0 items-center gap-1.5">
                           <span className="truncate font-mono">{basename(activeFile.path)}</span>
-                          {activeFile.dirty && <span className="shrink-0 text-[#f59e0b]" title={t("probe.unsaved")}>●</span>}
+                          {activeFile.dirty && <span className="shrink-0 text-[var(--mx-permissive)]" title={t("probe.unsaved")}>●</span>}
                           {activeFile.saveError && (
                             <Tooltip>
                             <TooltipTrigger asChild>
-                            <span className="shrink-0 text-[#f87171]">⚠</span>
+                            <span className="shrink-0 text-[var(--mx-danger)]">⚠</span>
                             </TooltipTrigger>
                             <TooltipContent>{activeFile.saveError}</TooltipContent>
                             </Tooltip>
@@ -839,7 +808,7 @@ export function FileTreePane({
                         <div className="flex shrink-0 items-center gap-1">
                           {/* md 文件 edit 模式:编辑/预览 toggle(切 Monaco 源码 vs 渲染 HTML)。 */}
                           {isMd && activeFile.mode === "edit" && (
-                            <div className="flex items-center rounded-[var(--mx-radius-sm)] border border-[rgba(148,163,184,0.28)]">
+                            <div className="flex items-center rounded-[var(--mx-radius-sm)] border border-[var(--mx-border-strong)]">
                               <button
                                 type="button"
                                 className={`px-1.5 py-[1px] text-[10px] transition-colors ${
@@ -869,7 +838,7 @@ export function FileTreePane({
                             className={`shrink-0 rounded-[var(--mx-radius-sm)] border px-1.5 py-[1px] text-[10px] transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
                               activeFile.mode === "edit"
                                 ? "border-[var(--mx-selected-border)] bg-[var(--mx-selected-bg)] text-[var(--mx-text)]"
-                                : "border-[rgba(148,163,184,0.28)] text-[var(--mx-muted)] hover:bg-[var(--mx-hover-bg)] hover:text-[var(--mx-text)]"
+                                : "border-[var(--mx-border-strong)] text-[var(--mx-muted)] hover:bg-[var(--mx-hover-bg)] hover:text-[var(--mx-text)]"
                             }`}
                             onMouseDown={(e) => e.stopPropagation()}
                             onClick={() => handleModeChange(activeFile.path, activeFile.mode === "edit" ? "preview" : "edit")}

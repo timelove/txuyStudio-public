@@ -131,7 +131,8 @@ export function FileEditor({ file, modelPool, mode, onViewStateChange, onContent
         minimap: { enabled: false },
         scrollBeyondLastLine: false,
         renderLineHighlight: mode === "edit" ? "line" : "none",
-        fontFamily: "var(--mx-mono, Consolas, monospace)",
+        // 等宽栈与 --mx-mono / TerminalPane 保持一致(MesloLGM NF -> CaskaydiaCoveNF -> Cascadia -> Consolas)。
+        fontFamily: '"CaskaydiaCoveNF", "MesloLGM NF", "Cascadia Code", "Cascadia Mono", Consolas, monospace',
         fontSize,
         lineNumbersMinChars: 4,
         scrollbar: { verticalScrollbarSize: 8, horizontalScrollbarSize: 8 },

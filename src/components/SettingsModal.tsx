@@ -1,8 +1,11 @@
 import { useTranslation } from "react-i18next";
+import { SANDBOX_MODES } from "../domain/codexSandbox";
 import { SHORTCUT_GROUPS } from "../domain/shortcuts";
 import { useI18n } from "../i18n/I18nProvider";
 import { SUPPORTED_LOCALES, type Locale } from "../i18n";
 import { useSettings } from "../settings/SettingsProvider";
+import { useTheme } from "../theme/ThemeProvider";
+import type { ThemeId } from "../domain/themes";
 import { DEFAULT_FONT_SIZE, FONT_SIZE_MAX, FONT_SIZE_MIN } from "../settings";
 import { Button } from "./ui/Button";
 import {
@@ -14,8 +17,6 @@ import { Slider, SliderRange, SliderThumb, SliderTrack } from "./ui/Slider";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./ui/Tabs";
 import { ToggleGroup, ToggleGroupItem } from "./ui/ToggleGroup";
 
-/** 应用版本(与 package.json / tauri.conf.json 同步,发版时一并改)。 */
-const APP_VERSION = "0.1.0";
 /** 公开仓库地址(私有 origin 不暴露,此处指向公开 mirror)。 */
 const GITHUB_URL = "https://github.com/timelove/txuyStudio-public";
 
@@ -39,7 +40,8 @@ type SettingsModalProps = {
 export function SettingsModal({ open, onClose }: SettingsModalProps) {
   const { t } = useTranslation();
   const { locale, changeLanguage } = useI18n();
-  const { fontSize, changeFontSize } = useSettings();
+  const { fontSize, changeFontSize, codexSandbox, changeCodexSandbox } = useSettings();
+  const { themeId, changeTheme, themes } = useTheme();
 
   return (
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
@@ -88,9 +90,26 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
           <div className="mx-scroll min-h-0 flex-1 overflow-y-auto px-4 py-3">
             {/* 通用 tab:语言 + 字体大小 */}
             <TabsContent value="general" className="focus-visible:outline-none">
+              {/* 主题分区:单选分段控件(ToggleGroup)。数据驱动 THEMES,切换即时生效(CSS data-theme + 终端热切)。 */}
+              <section className="mb-4">
+                <div className="mb-1 text-[10px] uppercase tracking-wide text-[var(--mx-faint)]">{t("settings.theme.title")}</div>
+                <ToggleGroup
+                  type="single"
+                  value={themeId}
+                  onValueChange={(v) => {
+                    if (v) changeTheme(v as ThemeId);
+                  }}
+                >
+                  {themes.map((th) => (
+                    <ToggleGroupItem key={th.id} value={th.id}>
+                      {t(th.labelKey)}
+                    </ToggleGroupItem>
+                  ))}
+                </ToggleGroup>
+              </section>
               {/* 语言分区:单选分段控件(ToggleGroup)。数据驱动 SUPPORTED_LOCALES。 */}
               <section className="mb-4">
-                <div className="mb-1 text-[10px] uppercase tracking-wide text-[#475569]">{t("settings.language.title")}</div>
+                <div className="mb-1 text-[10px] uppercase tracking-wide text-[var(--mx-faint)]">{t("settings.language.title")}</div>
                 <ToggleGroup
                   type="single"
                   value={locale}
@@ -110,7 +129,7 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
               {/* 字体大小分区:shadcn Slider(终端 + Monaco + md 预览统一一个值)+ 数值 + 重置。 */}
               <section>
                 <div className="mb-2 flex items-center justify-between">
-                  <span className="text-[10px] uppercase tracking-wide text-[#475569]">{t("settings.fontSize.title")}</span>
+                  <span className="text-[10px] uppercase tracking-wide text-[var(--mx-faint)]">{t("settings.fontSize.title")}</span>
                   <div className="flex items-center gap-2">
                     <span className="text-[11px] tabular-nums text-[var(--mx-text)]">{fontSize}px</span>
                     <button
@@ -142,6 +161,31 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
                 </div>
                 <div className="mt-1.5 text-[10px] text-[var(--mx-faint)]">{t("settings.fontSize.hint")}</div>
               </section>
+
+              {/* Codex 沙箱分区:默认档三选一(ToggleGroup,与 CodexPane 状态栏同源 SANDBOX_MODES)。
+                  只影响新建 codex 会话的初始 -s;已开会话不跟随(其状态栏单独切)。 */}
+              <section className="mt-4 border-t border-[var(--mx-border)] pt-3">
+                <div className="mb-1 text-[10px] uppercase tracking-wide text-[var(--mx-faint)]">{t("settings.codexSandbox.title")}</div>
+                <ToggleGroup
+                  type="single"
+                  value={codexSandbox}
+                  onValueChange={(v) => {
+                    // type="single" 点中已选中项回传 "",忽略(必有选中档)。
+                    if (v) changeCodexSandbox(v);
+                  }}
+                >
+                  {SANDBOX_MODES.map((m) => (
+                    <ToggleGroupItem key={m.id} value={m.id}>
+                      {m.label}
+                    </ToggleGroupItem>
+                  ))}
+                </ToggleGroup>
+                {/* 当前选中档的中文描述(随选择动态变),让用户知道每档含义而不只看短标签。 */}
+                <div className="mt-1.5 text-[10px] text-[var(--mx-faint)]">
+                  {t(SANDBOX_MODES.find((m) => m.id === codexSandbox)?.desc ?? "")}
+                </div>
+                <div className="mt-1.5 text-[10px] text-[var(--mx-faint)]">{t("settings.codexSandbox.hint")}</div>
+              </section>
             </TabsContent>
 
             {/* 快捷键 tab */}
@@ -157,7 +201,7 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
                           className="flex items-center justify-between gap-3 text-[12px]"
                         >
                           <span className="text-[var(--mx-text)]">{t(item.desc)}</span>
-                          <kbd className="mx-icon-tile shrink-0 border border-[rgba(148,163,184,0.28)] bg-[rgba(2,6,23,0.5)] px-1.5 py-[1px] font-mono text-[11px] text-[var(--mx-text)]">
+                          <kbd className="mx-icon-tile shrink-0 border border-[var(--mx-border-strong)] bg-[var(--mx-surface-2)] px-1.5 py-[1px] font-mono text-[11px] text-[var(--mx-text)]">
                             {item.keys}
                           </kbd>
                         </div>
@@ -172,12 +216,12 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
             <TabsContent value="about" className="focus-visible:outline-none">
               {/* 品牌标识:brand-gradient 方块 + 产品名 + 版本 */}
               <div className="mb-3 flex items-center gap-2.5">
-                <div className="grid h-10 w-10 shrink-0 place-items-center rounded-[var(--mx-radius-lg)] text-[18px] font-extrabold text-white bg-[var(--mx-brand-gradient)] shadow-[0_0_0_1px_rgba(34,211,238,0.45),0_1px_3px_rgba(0,0,0,0.4)]">
+                <div className="grid h-10 w-10 shrink-0 place-items-center rounded-[var(--mx-radius-lg)] text-[18px] font-extrabold text-white bg-[var(--mx-brand-gradient)] shadow-[0_0_0_1px_var(--mx-selected-border),0_1px_3px_rgba(0,0,0,0.4)]">
                   T
                 </div>
                 <div className="min-w-0">
                   <div className="text-[14px] font-[760] text-[var(--mx-text)]">txuyStudio</div>
-                  <div className="text-[11px] text-[var(--mx-muted)]">{t("about.version")} {APP_VERSION}</div>
+                  <div className="text-[11px] text-[var(--mx-muted)]">{t("about.version")} {__APP_VERSION__}</div>
                 </div>
               </div>
 
@@ -192,7 +236,7 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
                 target="_blank"
                 rel="noopener noreferrer"
                 aria-label={t("about.viewOnGithub")}
-                className="mx-chip mb-3 flex items-center gap-2 bg-[rgba(15,23,42,0.5)] px-3 py-2 text-[12px] text-[var(--mx-text)] transition-colors hover:bg-[var(--mx-hover-bg)]"
+                className="mx-chip mb-3 flex items-center gap-2 bg-[var(--mx-surface-soft)] px-3 py-2 text-[12px] text-[var(--mx-text)] transition-colors hover:bg-[var(--mx-hover-bg)]"
               >
                 <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden className="shrink-0">
                   <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z" />

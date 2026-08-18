@@ -193,6 +193,14 @@ export function findPane(root: PaneNode, paneId: string): PaneLeaf | null {
   return findPane(root.children[0], paneId) ?? findPane(root.children[1], paneId);
 }
 
+/** 按 tabId 反查所属 pane(供 StatusBar onFocusClaudeTab 从 tabId 定位 paneId)。无则 null。 */
+export function findPaneByTabId(root: PaneNode, tabId: string): PaneLeaf | null {
+  if (root.type === "pane") {
+    return root.tabs.some((t) => t.id === tabId) ? root : null;
+  }
+  return findPaneByTabId(root.children[0], tabId) ?? findPaneByTabId(root.children[1], tabId);
+}
+
 /** 取某 pane 的 tab 栈(找不到 pane 返回空数组)。 */
 export function listTabs(root: PaneNode, paneId: string): PaneTab[] {
   return findPane(root, paneId)?.tabs ?? [];

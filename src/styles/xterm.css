@@ -31,10 +31,13 @@
  * 不溢出右边界。圆角 + 半透明薄荷绿,隐藏上下箭头按钮。滚轮滚动不受影响。
  * ============================================================ */
 
-/* 滚动条容器:恒定 12px 宽作为 hover 命中区(滑块在内部收窄/展宽),透明轨道。 */
+/* 滚动条容器:恒定 8px 宽作为 hover 命中区(滑块在内部收窄/展宽),透明轨道。
+   TerminalPane 的 tab 容器有 pr-1.5(6px) 让文字右缩进;scrollbar 用 right:-6px
+   右移到 padding 区,贴 tab 容器右边缘且不盖文字。改 pr 值需同步此 6px。 */
 .xterm .xterm-scrollable-element > .scrollbar {
   width: 8px !important;
   background: transparent !important;
+  right: -6px !important;
 }
 
 /* 滑块:平时 4px 贴右,hover 容器时展宽 12px。transition 让粗细变化平滑。 */
@@ -60,6 +63,24 @@
 /* 隐藏滚动条上下箭头按钮（.scra），让滚动条更简洁。 */
 .xterm .xterm-scrollable-element > .scrollbar .scra {
   display: none !important;
+}
+
+/* 让 overlay 滚动条常驻可见(不淡出):xterm 默认滚动停止后给 .scrollbar 加 .invisible
+   (opacity:0 + 800ms fade,xterm.css L247-253),静止时滚动条淡出,观感像「终端没有滚动条」。
+   强制 invisible 态保持 opacity:1 + pointer-events:auto,内容超出时滚动条始终可见可拖,
+   与 ClaudePane 消息流 / 文件树的常驻滚动条体验一致。无 scrollback 时滑块满格静止(无可滚),无害。 */
+.xterm .xterm-scrollable-element > .scrollbar.invisible {
+  opacity: 1 !important;
+  pointer-events: auto !important;
+}
+
+/* 无 scrollback(内容未超出可视区)时隐藏滚动条:避免上方常驻规则让一个满格静止滑块长占右侧。
+   container 由 TerminalPane 的 onRender 按 buffer.length vs rows 切换 .mx-no-scrollback
+   (无 scrollback 时加上)。特异性(4 class)与常驻规则持平,源顺序在后故覆盖之;有 scrollback
+   时不加 → 常驻规则生效,滚动条可见。 */
+.mx-no-scrollback .xterm .xterm-scrollable-element > .scrollbar {
+  opacity: 0 !important;
+  pointer-events: none !important;
 }
 
 /* ============================================================

@@ -6,6 +6,7 @@ import { mockProjects } from "./mock/mockProjects";
 import { AppShell } from "./components/AppShell";
 import { I18nProvider } from "./i18n/I18nProvider";
 import { SettingsProvider } from "./settings/SettingsProvider";
+import { ThemeProvider } from "./theme/ThemeProvider";
 import { useTranslation } from "react-i18next";
 import type { BackendAppSnapshot } from "./domain/appState";
 import type { ProjectId, ProjectSnapshot } from "./domain/projects";
@@ -62,6 +63,10 @@ export default function App() {
   const [locale, setLocale] = useState<string | null | undefined>(undefined);
   /** 后端持久化的字体大小(hydrate 后传入 SettingsProvider 作权威初始值;undefined → 默认 13)。 */
   const [terminalFontSize, setTerminalFontSize] = useState<number | undefined>(undefined);
+  /** 后端持久化的主题 id(hydrate 后传入 ThemeProvider 作权威初始值;undefined -> 默认 midnight)。 */
+  const [themeId, setThemeId] = useState<string | null | undefined>(undefined);
+  /** 后端持久化的 Codex 默认 sandbox 档位(hydrate 后传入 SettingsProvider;undefined -> 默认档)。 */
+  const [codexSandbox, setCodexSandbox] = useState<string | null | undefined>(undefined);
 
   // 主窗口运行期标记：哪些项目已弹出为独立窗口（隐藏在主窗口列表里）。不持久化。
   const [detachedProjectIds, setDetachedProjectIds] = useState<Set<ProjectId>>(new Set());
@@ -100,6 +105,8 @@ export default function App() {
         setActiveProjectId(snap.activeProjectId);
         setLocale(snap.locale ?? null);
         setTerminalFontSize(snap.terminalFontSize);
+        setThemeId(snap.themeId ?? null);
+        setCodexSandbox(snap.codexSandbox ?? null);
         setLoadState("ready");
       })
       .catch((err) => {
@@ -221,7 +228,8 @@ export default function App() {
   // detachedProjectIds 仅主窗口有意义(标记哪些项目已弹出、应在主窗口隐藏)。
   return (
     <I18nProvider initialLocale={locale}>
-      <SettingsProvider initialFontSize={terminalFontSize}>
+      <ThemeProvider initialThemeId={themeId}>
+      <SettingsProvider initialFontSize={terminalFontSize} initialCodexSandbox={codexSandbox ?? undefined}>
         <AppShell
           projects={projects}
           activeProjectId={activeProjectId}
@@ -234,6 +242,7 @@ export default function App() {
           onDockBack={mode.isMain ? undefined : handleDockBack}
         />
       </SettingsProvider>
+      </ThemeProvider>
     </I18nProvider>
   );
 }
@@ -247,15 +256,15 @@ export default function App() {
 function LoadingSurface() {
   const { t } = useTranslation();
   return (
-    <div className="mx-boot grid min-h-screen place-items-center bg-[#070a12]">
+    <div className="mx-boot grid min-h-screen place-items-center bg-[var(--mx-bg)]">
       <div className="flex flex-col items-center gap-3">
-        <div className="mx-boot-logo grid h-7 w-7 place-items-center rounded-none font-extrabold text-white bg-[linear-gradient(135deg,#7c3aed,#22d3ee)]">
+        <div className="mx-boot-logo grid h-7 w-7 place-items-center rounded-none font-extrabold text-white bg-[var(--mx-brand-gradient)]">
           M
         </div>
         <div className="mx-boot-bar h-[2px] w-28 overflow-hidden bg-white/5">
-          <div className="mx-boot-bar-fill h-full bg-[linear-gradient(90deg,transparent,#22d3ee,transparent)]" />
+          <div className="mx-boot-bar-fill h-full bg-[linear-gradient(90deg,transparent,var(--mx-accent),transparent)]" />
         </div>
-        <div className="text-xs text-[#94a3b8]">{t("app.loadingWorkspace")}</div>
+        <div className="text-xs text-[var(--mx-muted)]">{t("app.loadingWorkspace")}</div>
       </div>
     </div>
   );

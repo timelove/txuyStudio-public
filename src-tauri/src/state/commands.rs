@@ -8,7 +8,8 @@ use tauri::{AppHandle, State};
 use tauri_plugin_dialog::DialogExt;
 
 use super::persistence;
-use super::{default_pane_tree, now_ms, AppState, AppSnapshot, PaneNode, ProjectRecord, WindowBounds};
+use super::{collect_tab_ids, default_pane_tree, now_ms, AppState, AppSnapshot, PaneNode, ProjectRecord, WindowBounds};
+use crate::claude::ClaudeRegistry;
 use crate::pty::PtyRegistry;
 
 /// 启动 hydrate:按 `windowLabel` 返回权威快照。
@@ -89,6 +90,8 @@ pub async fn open_project(
         root_path,
         last_opened_ms: now_ms(),
         pane_tree: Some(default_pane_tree()),
+        claude_allowed_tools: Vec::new(),
+        claude_tab_sessions: Default::default(),
     };
     let new_active = record.id.clone();
 
@@ -107,17 +110,20 @@ pub async fn open_project(
     Ok(snapshot)
 }
 
-/// 关闭(移除)一个项目,并 kill 该项目下所有 PTY 会话。
+/// 关闭(移除)一个项目,并 kill 该项目下所有 PTY 会话与 claude 会话。
 ///
-/// 顺序:先落盘后 kill——落盘快速且确定,保证崩溃一致(重启后项目不复活、PTY 无归属);
-/// kill 是慢操作(spawn_blocking kill+wait),先 kill 再落盘会留「项目仍在但 PTY 已死」中间态。
-/// kill 失败仅 warn 不阻断返回(PTY 残留为孤儿,不影响功能,重启后 registry 空)。
+/// 顺序:先落盘后 kill——落盘快速且确定,保证崩溃一致(重启后项目不复活、PTY/claude 无归属);
+/// kill 是慢操作(spawn_blocking kill+wait),先 kill 再落盘会留「项目仍在但会话已死」中间态。
+/// kill 失败仅 warn 不阻断返回(残留为孤儿,不影响功能,重启后 registry 空)。
 /// 若移除的是当前 active,则 active 落到列表首项或 None。
 #[tauri::command]
 pub async fn close_project(
     app: AppHandle,
     state: State<'_, AppState>,
     pty: State<'_, PtyRegistry>,
+    claude: State<'_, ClaudeRegistry>,
+    codex: State<'_, crate::codex::CodexRegistry>,
+    shell: State<'_, crate::shell_run::ShellRunRegistry>,
     project_id: String,
 ) -> Result<AppSnapshot, String> {
     let snapshot = {
@@ -144,6 +150,18 @@ pub async fn close_project(
     // kill 该项目所有 PTY(短锁 remove 桶 + spawn_blocking kill/wait)。失败不阻断。
     if let Err(e) = pty.kill_project(&project_id).await {
         log::warn!("close_project: kill_project failed for {project_id}: {e}");
+    }
+    // 同步 kill 该项目所有 claude 自渲染会话(与 PTY 同模式)。失败不阻断。
+    if let Err(e) = claude.kill_project(&project_id).await {
+        log::warn!("close_project: claude kill_project failed for {project_id}: {e}");
+    }
+    // 同步 kill 该项目所有 codex 自渲染会话(与 claude 同模式)。失败不阻断。
+    if let Err(e) = codex.kill_project(&project_id).await {
+        log::warn!("close_project: codex kill_project failed for {project_id}: {e}");
+    }
+    // 同步 kill 该项目所有 `!` 命令进程(与 PTY/claude 同模式)。失败不阻断。
+    if let Err(e) = shell.kill_project(&project_id).await {
+        log::warn!("close_project: shell kill_project failed for {project_id}: {e}");
     }
 
     Ok(snapshot)
@@ -224,6 +242,56 @@ pub async fn set_terminal_font_size(
     Ok(snapshot)
 }
 
+/// 设置界面主题 id("midnight"/"one-dark"),持久化到 state.json。
+///
+/// 仿 [[set_locale]] 三段式:短锁改 `theme_id` + 克隆 + 释放锁 + save + 返回。
+/// 不做白名单校验(前端只给已知 id;后端仅透传存储;非 Tauri 环境 invoke 失败由前端
+/// catch 降级,本地仍切,不阻断)。
+#[tauri::command]
+pub async fn set_theme(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    theme_id: String,
+) -> Result<AppSnapshot, String> {
+    let snapshot = {
+        let mut snap = state.inner.lock().map_err(|e| e.to_string())?;
+        snap.theme_id = Some(theme_id.clone());
+        snap.clone()
+    };
+
+    log::info!("set_theme: theme_id = {theme_id}");
+    if let Err(e) = persistence::save(&app, &snapshot) {
+        log::error!("set_theme: persist failed: {e}");
+        return Err(e);
+    }
+    Ok(snapshot)
+}
+
+/// 设置 Codex 会话默认 sandbox 档位(codex exec -s),持久化到 state.json。
+///
+/// 仿 [[set_theme]] 三段式:短锁改 `codex_sandbox` + 克隆 + 释放锁 + save + 返回。
+/// 不做白名单校验(前端只给已知档位;后端仅透传存储)。仅影响新建 codex 会话的初始档,
+/// 已开会话不跟随(transport 内部档位独立,状态栏可单独切)。
+#[tauri::command]
+pub async fn set_codex_sandbox(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    sandbox: String,
+) -> Result<AppSnapshot, String> {
+    let snapshot = {
+        let mut snap = state.inner.lock().map_err(|e| e.to_string())?;
+        snap.codex_sandbox = Some(sandbox.clone());
+        snap.clone()
+    };
+
+    log::info!("set_codex_sandbox: sandbox = {sandbox}");
+    if let Err(e) = persistence::save(&app, &snapshot) {
+        log::error!("set_codex_sandbox: persist failed: {e}");
+        return Err(e);
+    }
+    Ok(snapshot)
+}
+
 /// 持久化主窗口大小/位置。
 ///
 /// 阶段2 仅存 main 窗口 bounds;`windowLabel` 非 "main" 时忽略,
@@ -273,7 +341,11 @@ pub async fn save_pane_tree(
                 log::error!("save_pane_tree: project not found: {project_id}");
                 format!("project not found: {project_id}")
             })?;
+        let live_ids: std::collections::HashSet<String> =
+            collect_tab_ids(&pane_tree).into_iter().collect();
         project.pane_tree = Some(pane_tree);
+        // 修剪 claude_tab_sessions:移除新 tree 中已不存在的 tab(关 tab 后其 session_id 不再需要)。
+        project.claude_tab_sessions.retain(|tid, _| live_ids.contains(tid));
         snap.clone()
     };
 
@@ -282,5 +354,40 @@ pub async fn save_pane_tree(
         return Err(e);
     }
     log::info!("save_pane_tree: updated tree for {project_id}");
+    Ok(())
+}
+
+/// 给某项目累加一个 Claude 工具白名单条目(用户在确认框点「批准且不再问」时调用)。
+///
+/// 仿 [[save_pane_tree]] 三段式:短锁找项目 + push(去重)+ 克隆 + 释放锁 + save + 返回。
+/// 下次 `start_claude_session`(重启)会读 `claude_allowed_tools` 拼成 `--allowedTools`,该工具免确认。
+#[tauri::command]
+pub async fn add_claude_allowed_tool(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    project_id: String,
+    tool: String,
+) -> Result<(), String> {
+    let snapshot = {
+        let mut snap = state.inner.lock().map_err(|e| e.to_string())?;
+        let project = snap
+            .projects
+            .iter_mut()
+            .find(|p| p.id == project_id)
+            .ok_or_else(|| {
+                log::error!("add_claude_allowed_tool: project not found: {project_id}");
+                format!("project not found: {project_id}")
+            })?;
+        if !project.claude_allowed_tools.contains(&tool) {
+            project.claude_allowed_tools.push(tool.clone());
+        }
+        snap.clone()
+    };
+
+    if let Err(e) = persistence::save(&app, &snapshot) {
+        log::error!("add_claude_allowed_tool: persist failed: {e}");
+        return Err(e);
+    }
+    log::info!("add_claude_allowed_tool: {project_id} += {tool}");
     Ok(())
 }

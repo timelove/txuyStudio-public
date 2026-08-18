@@ -63,6 +63,9 @@ pub async fn open_project_window(
     // 建新窗:加载同一前端入口,带 query hint 告知前端进入单项目模式。
     // 关闭事件监听统一在 `lib.rs` 的 `Builder::on_window_event` 全局挂载,
     // 过滤 `project-` 前缀窗口 emit `project-window-closed`(覆盖叉窗/dock-back/app 退出)。
+    // visible:false:消除独立窗口的白屏(与主窗口同策略),由前端首帧 show_window 显示。
+    // 复用 lib.rs 的兜底机制目前仅覆盖 main,独立窗口依赖前端首帧 show——
+    // 独立窗口前端 bundle 已被主窗口加载过(WebView2 缓存),首帧极快,无需兜底定时器。
     let url = WebviewUrl::App(format!("?mode=project&projectId={project_id}").into());
     let builder = WebviewWindowBuilder::new(&app, &label, url)
         .title(&project_name)
@@ -70,7 +73,7 @@ pub async fn open_project_window(
         .min_inner_size(640.0, 480.0)
         .decorations(false)
         .center()
-        .visible(true);
+        .visible(false);
 
     builder
         .build()

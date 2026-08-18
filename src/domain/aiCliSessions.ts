@@ -146,6 +146,39 @@ export function isCurrentProjectGroup(group: SessionProjectGroup, currentCwd?: s
 }
 
 /**
+ * 规范化 cwd 供比较:去 Windows verbatim 前缀 `\\?\`(claude/codex 写入 jsonl 的 cwd 可能带,
+ * 如 `\\?\D:\work\rust\muxy_rust`)+ trim + 小写。统一后再比,避免同目录因前缀差异匹配失败。
+ */
+export function normalizeCwdForCompare(cwd: string | null | undefined): string {
+  if (!cwd) return "";
+  let s = cwd.trim();
+  // Windows verbatim 前缀(4 字符):\\?\ 或 \\.\,去之让 D:\... 与 \\?\D:\... 视作同目录。
+  if (s.length >= 4 && (s.startsWith("\\\\?\\") || s.startsWith("\\\\.\\"))) {
+    s = s.slice(4);
+  }
+  return s.toLowerCase();
+}
+
+/**
+ * 取**当前工作空间(cwd)下**最近一条会话(同目录才纳入,跨项目不混)。
+ *
+ * 设计原则(用户明确):「当前工作空间下统一性」--自动恢复 / ↻「恢复上一次」都必须是同目录的会话,
+ * 不能取到别的项目的最近会话。cwd 比较走 [[normalizeCwdForCompare]](去 verbatim 前缀 + 小写),
+ * 容忍 `\\?\D:\...` 与 `D:\...` 形态差异。无匹配返回 null(调用方降级为不恢复/显示空)。
+ */
+export function mostRecentSessionInCwd(
+  items: AiCliSessionListItem[],
+  cwd: string | null | undefined,
+): AiCliSessionListItem | null {
+  const key = normalizeCwdForCompare(cwd);
+  if (!key) return null;
+  const same = items.filter((it) => normalizeCwdForCompare(it.cwd) === key);
+  if (same.length === 0) return null;
+  same.sort((a, b) => (b.lastAt ?? "").localeCompare(a.lastAt ?? ""));
+  return same[0];
+}
+
+/**
  * provider → 续接(restore)某历史会话的 CLI 命令(供会话列表详情展示 `claude --resume <id>` 文本,用户手动复制粘贴)。
  * - claude: `claude -r <sessionId>`(--resume 短写)。
  * - codex: `codex resume <sessionId>`。

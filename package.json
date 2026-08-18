@@ -1,7 +1,7 @@
 {
   "name": "txuy-studio",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.2",
   "type": "module",
   "scripts": {
     "dev": "volta run --node 22.14.0 node node_modules/vite/bin/vite.js",
@@ -19,10 +19,14 @@
     "@radix-ui/react-toggle-group": "^1.1.15",
     "@radix-ui/react-tooltip": "^1.2.12",
     "@tauri-apps/api": "latest",
+    "@tauri-apps/plugin-dialog": "^2.7.2",
+    "@tauri-apps/plugin-opener": "^2.5.4",
     "@xterm/addon-fit": "latest",
+    "@xterm/addon-webgl": "^0.19.0",
     "@xterm/xterm": "latest",
     "clsx": "^2.1.1",
     "dompurify": "^3.4.12",
+    "highlight.js": "^11.11.1",
     "i18next": "^26.3.6",
     "marked": "^18.0.6",
     "monaco-editor": "^0.55.1",

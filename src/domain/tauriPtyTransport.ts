@@ -23,9 +23,18 @@ export class TauriPtyTransport implements TerminalTransport {
   private readonly maxTranscriptLength = 1_000_000;
   /** 进行中的 spawn（去重用）：React StrictMode 双 mount 或并发 start 只会真正 spawn 一次。 */
   private startingPromise: Promise<void> | null = null;
+  /** 首次 spawn 的启动命令覆盖(AppShell 从 pendingResumeRef 注入,如 "codex resume <id>")。
+   *  优先于 launch_command_for(kind);仅首次 spawn 生效,doStart 消费后清空(已有 session 只 resize)。 */
+  private launchOverride: string | null = null;
 
   constructor(projectId: string) {
     this.projectId = projectId;
+  }
+
+  /** 注入首次 spawn 的启动命令覆盖(AppShell 池化创建 transport 时调,从 pendingResumeRef 读)。
+   *  仅首次 spawn 生效:doStart 消费后清空。 */
+  setLaunchOverride(command: string): void {
+    this.launchOverride = command;
   }
 
   start(sessionId: string, opts?: TerminalStartOpts): Promise<void> {
@@ -69,8 +78,11 @@ export class TauriPtyTransport implements TerminalTransport {
       }
 
       // 2) 再 spawn 后端会话，拿到对应的 pty sessionId。cwd 传项目根目录 / 继承目录；
-      // shellKind 让后端在 PowerShell 内自动启动 claude/codex。
-      this.ptySessionId = await invoke<string>("spawn_pty", { projectId: this.projectId, rows, cols, cwd: cwd ?? null, shellKind });
+      // shellKind 让后端在 PowerShell 内自动启动 claude/codex。launchOverride(如 "codex resume <id>")
+      // 优先于 shellKind 的静态启动命令,仅首次 spawn 生效,消费后清空(已有 session 只 resize)。
+      const launchOverride = this.launchOverride;
+      this.ptySessionId = await invoke<string>("spawn_pty", { projectId: this.projectId, rows, cols, cwd: cwd ?? null, shellKind, launchOverride: launchOverride ?? null });
+      this.launchOverride = null;
     } finally {
       this.startingPromise = null;
     }

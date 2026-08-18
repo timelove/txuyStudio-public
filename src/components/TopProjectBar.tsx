@@ -62,7 +62,7 @@ export function TopProjectBar({
           height="20"
           viewBox="0 0 1024 1024"
           aria-hidden
-          className="pointer-events-none rounded-[5px] shadow-[0_0_0_1px_rgba(34,211,238,0.45),0_1px_3px_rgba(0,0,0,0.4)]"
+          className="pointer-events-none rounded-[5px] shadow-[0_0_0_1px_var(--mx-selected-border),0_1px_3px_rgba(0,0,0,0.4)]"
         >
           <defs>
             <linearGradient id="mxLogoBg" x1="0" y1="0" x2="1" y2="1">
@@ -98,7 +98,7 @@ export function TopProjectBar({
         {singleProjectMode ? (
           <div className="flex min-w-0 items-center gap-2">
             <span className="mx-chip flex h-[24px] min-w-0 items-center gap-[6px] bg-[var(--mx-selected-bg)] px-[10px] text-xs text-white">
-              <span aria-hidden className="h-1.5 w-1.5 shrink-0 bg-[#22d3ee]" />
+              <span aria-hidden className="h-1.5 w-1.5 shrink-0 bg-[var(--mx-accent)]" />
               {/* 拖拽区(data-tauri-drag-region)内:Radix Tooltip 依赖 pointermove/hover,
                   纯 hover 应触发;但拖拽按下时失效,故保留原生 title 兜底(≤5 处保留之一)。 */}
               <span className="truncate" title={activeProject?.rootPath ?? ""}>
@@ -113,7 +113,7 @@ export function TopProjectBar({
                 size="icon-md"
                 onClick={onDockBack}
                 onMouseDown={(e) => e.stopPropagation()}
-                className="mx-chip h-[24px] gap-1 bg-[rgba(15,23,42,0.5)] px-[10px] text-xs text-[var(--mx-muted)] hover:bg-[var(--mx-hover-bg)] hover:text-[var(--mx-text)]"
+                className="mx-chip h-[24px] gap-1 bg-[var(--mx-surface-soft)] px-[10px] text-xs text-[var(--mx-muted)] hover:bg-[var(--mx-hover-bg)] hover:text-[var(--mx-text)]"
               >
                 {t("topbar.backToMainBtn")}
               </Button>

@@ -1,5 +1,11 @@
 @import "tailwindcss";
 
+/* 统一等宽字体栈:让 Tailwind 的 font-mono class 引用 --mx-mono,
+ * 与 xterm / Monaco 编辑器一致(避免 UI 代码块走系统 mono、终端走 Nerd Font 的割裂)。 */
+@theme {
+  --font-mono: "CaskaydiaCoveNF", "MesloLGM NF", "Cascadia Code", "Cascadia Mono", Consolas, monospace;
+}
+
 /* ============================================================
  * 基底：根元素、box-sizing、body、button 重置。
  * 这些作用在根元素、无法用 Tailwind 原子类干净表达，保留为全局 CSS。
@@ -9,6 +15,11 @@
   color: #e2e8f0;
   background: #070a12;
   font-family: Aptos, "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+  /* 等宽字体栈(单一源:上方 @theme --font-mono;终端/编辑器/markdown code/UI font-mono 共用)。
+     首选 CaskaydiaCoveNF(@font-face 加载,笔画细 + Nerd Font 图标),MesloLGM NF(本机)降为后备--
+     Meslo 笔画偏粗;再退 Cascadia Code/Mono(Windows Terminal 默认),最后 Consolas。
+     TerminalPane/FileEditor 硬编码栈与此保持一致。 */
+  --mx-mono: var(--font-mono);
   /* 全局根字号:浏览器默认 16px 偏大,降到 14px 对齐「终端工作台」紧凑基调。
    * Tailwind v4 spacing 基于 rem(0.25rem/档),故全项目 rem 间距同步缩 12.5%;
    * 但 xterm 字号是显式 px(fontSize:13)不受影响,chrome 层显式 text-[Npx] 也不受影响。 */
@@ -52,6 +63,92 @@
   /* 自绘标题栏高度(顶栏 grid 行高 + TopProjectBar + WindowControls 容器统一引用)。
    * 收窄到 32px(贴近 VS Code/系统标题栏观感);改高度只动这一处,控件靠 items-center/h-full 自适应。 */
   --mx-titlebar-h: 32px;
+  /* 扩展语义 token:收口高频硬编码色,主题切换时随 [data-theme] 一并覆盖。
+   * 值 = 改动前的硬编码值,故默认(midnight)观感零变化。 */
+  --mx-editor-bg: #0b1020;
+  --mx-card-bg: #0e1424;
+  --mx-text-bright: #e2e8f0;
+  --mx-text-dim: #64748b;
+  --mx-accent-bright: #cffafe;
+  --mx-accent-soft: rgba(34, 211, 238, 0.16);
+  --mx-violet: #a78bfa;
+  --mx-danger: #f87171;
+  --mx-danger-bright: #fca5a5;
+  --mx-danger-bg: rgba(239, 68, 68, 0.14);
+  --mx-danger-border: rgba(248, 113, 113, 0.5);
+  --mx-success: #4ade80;
+  --mx-success-bright: #86efac;
+  --mx-success-soft: rgba(34, 197, 94, 0.16);
+  --mx-warning: #fb923c;
+  --mx-warning-bright: #fdba74;
+  --mx-warning-soft: rgba(245, 158, 11, 0.16);
+  --mx-surface-2: rgba(2, 6, 23, 0.5);
+  --mx-surface-soft: rgba(15, 23, 42, 0.5);
+  --mx-border-soft: rgba(148, 163, 184, 0.055);
+  /* pane tab header(条)背景:5 个 pane(Terminal/Claude/SessionBrowser/FileTree/HtmlPreview)统一引用。
+   * One Dark 用经典 chrome 色 #21252b(比内容区暗,Atom/VS Code One Dark 层级);midnight 搬
+   * border-soft 现值,观感零变化。 */
+  --mx-tabbar-bg: rgba(148, 163, 184, 0.055);
+  /* 工具卡片强调色(ClaudePane 工具类型分类):violet/indigo/orange/accent-deep 的 soft/border 变体。 */
+  --mx-violet-soft: rgba(167, 139, 250, 0.08);
+  --mx-violet-border: rgba(167, 139, 250, 0.28);
+  --mx-indigo-soft: rgba(129, 140, 248, 0.08);
+  --mx-indigo-border: rgba(129, 140, 248, 0.28);
+  --mx-orange-soft: rgba(249, 115, 22, 0.08);
+  --mx-orange-border: rgba(249, 115, 22, 0.28);
+  --mx-accent-deep-soft: rgba(124, 58, 237, 0.12);
+}
+
+/* ============================================================
+ * One Dark 主题:覆盖全部 --mx-* token。html[data-theme="one-dark"] 生效。
+ * 添加新主题仿此:新建 [data-theme="<id>"] 块覆盖变量 + themes.ts 加条目。
+ * ============================================================ */
+[data-theme="one-dark"] {
+  color: #abb2bf;
+  background: #282c34;
+  --mx-bg: #282c34;
+  --mx-border: rgba(171, 178, 191, 0.14);
+  --mx-border-strong: rgba(171, 178, 191, 0.34);
+  --mx-surface: rgba(44, 49, 58, 0.96);
+  --mx-text: #abb2bf;
+  --mx-muted: #5c6370;
+  --mx-faint: #4b5263;
+  --mx-accent: #61afef;
+  --mx-accent-deep: #c678dd;
+  --mx-brand-gradient: linear-gradient(135deg, #c678dd, #61afef);
+  --mx-selected-bg: rgba(97, 175, 239, 0.18);
+  --mx-selected-border: rgba(97, 175, 239, 0.55);
+  --mx-hover-bg: rgba(171, 178, 191, 0.10);
+  --mx-guarded: #56b6c2;
+  --mx-permissive: #e5c07b;
+  --mx-editor-bg: #1e2127;
+  --mx-card-bg: #2c313a;
+  --mx-text-bright: #d7dae0;
+  --mx-text-dim: #5c6370;
+  --mx-accent-bright: #cdd9e5;
+  --mx-accent-soft: rgba(97, 175, 239, 0.16);
+  --mx-violet: #c678dd;
+  --mx-danger: #e06c75;
+  --mx-danger-bright: #e06c75;
+  --mx-danger-bg: rgba(224, 108, 117, 0.14);
+  --mx-danger-border: rgba(224, 108, 117, 0.5);
+  --mx-success: #98c379;
+  --mx-success-bright: #b3e07a;
+  --mx-success-soft: rgba(152, 195, 121, 0.16);
+  --mx-warning: #d19a66;
+  --mx-warning-bright: #e5c07b;
+  --mx-warning-soft: rgba(209, 154, 102, 0.16);
+  --mx-surface-2: rgba(44, 49, 58, 0.5);
+  --mx-surface-soft: rgba(44, 49, 58, 0.5);
+  --mx-border-soft: rgba(171, 178, 191, 0.055);
+  --mx-tabbar-bg: #21252b;
+  --mx-violet-soft: rgba(198, 120, 221, 0.08);
+  --mx-violet-border: rgba(198, 120, 221, 0.28);
+  --mx-indigo-soft: rgba(97, 175, 239, 0.08);
+  --mx-indigo-border: rgba(97, 175, 239, 0.28);
+  --mx-orange-soft: rgba(209, 154, 102, 0.08);
+  --mx-orange-border: rgba(209, 154, 102, 0.28);
+  --mx-accent-deep-soft: rgba(198, 120, 221, 0.12);
 }
 
 * {
@@ -292,10 +389,10 @@ button {
 }
 
 .mx-dialog-content[data-state="open"] {
-  animation: mx-zoom-in 160ms ease-out;
+  animation: mx-dialog-in 180ms cubic-bezier(0.16, 1, 0.3, 1);
 }
 .mx-dialog-content[data-state="closed"] {
-  animation: mx-zoom-out 120ms ease-in;
+  animation: mx-dialog-out 120ms ease-in;
 }
 
 @keyframes mx-fade-in {
@@ -306,13 +403,15 @@ button {
   from { opacity: 1; }
   to { opacity: 0; }
 }
-@keyframes mx-zoom-in {
-  from { opacity: 0; transform: translate(-50%, -50%) scale(0.96); }
-  to { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+/* Dialog 内容:纯 opacity + scale(居中靠 inset-0 m-auto,不靠 translate,避免与 Tailwind
+ * translate 属性叠加致位移翻倍「从左上角飞出」)。cubic-bezier 带轻微回弹,比原 zoom 更柔和。 */
+@keyframes mx-dialog-in {
+  from { opacity: 0; transform: scale(0.92); }
+  to { opacity: 1; transform: scale(1); }
 }
-@keyframes mx-zoom-out {
-  from { opacity: 1; transform: translate(-50%, -50%) scale(1); }
-  to { opacity: 0; transform: translate(-50%, -50%) scale(0.96); }
+@keyframes mx-dialog-out {
+  from { opacity: 1; transform: scale(1); }
+  to { opacity: 0; transform: scale(0.96); }
 }
 
 /* Popover/ContextMenu 内容:fade + 轻微缩放(不 translate,定位由 Radix side/align 管)。
@@ -360,6 +459,9 @@ button {
 .mx-md-preview h3 { font-size: 1.15em; }
 .mx-md-preview h4 { font-size: 1em; }
 .mx-md-preview p { margin: 0.6em 0; }
+/* 首块元素去 margin-top:行内嵌入对话流(ClaudePane)时,首 p/h 的 margin-top 会把第一行下推,
+   导致与行首圆点图标错位(图标固定对齐容器顶)。探针预览(block 态)有 py-3 padding 不受影响。 */
+.mx-md-preview > :first-child { margin-top: 0; }
 .mx-md-preview a { color: #22d3ee; text-decoration: none; }
 .mx-md-preview a:hover { text-decoration: underline; }
 .mx-md-preview code {
@@ -398,3 +500,21 @@ button {
 .mx-md-preview td { border: 1px solid var(--mx-border); padding: 0.35em 0.7em; }
 .mx-md-preview th { background: rgba(148, 163, 184, 0.1); }
 .mx-md-preview img { max-width: 100%; }
+
+/* ── pane tabitem(扁平无底线,选中仅靠文字色区分) ───────────────────
+ * 去除所有底部线条(选中下划线 + tab 条基线均移除),tab 之间无缝隙边框,选中仅文字提亮。
+ * 依赖 Radix TabsTrigger 的 data-state="active"(经 asChild 合并到 .mx-tab-item)。
+ * ───────────────────────────────────────────────────────────────── */
+.mx-tab-item {
+  border: none;
+  background: transparent;
+  border-radius: 0;
+  box-shadow: none;
+  transition: color 120ms ease-out, background 120ms ease-out;
+}
+.mx-tab-item[data-state="active"] {
+  color: var(--mx-text-bright);
+}
+.mx-tab-item:hover:not([data-state="active"]) {
+  color: var(--mx-text);
+}

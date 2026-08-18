@@ -343,6 +343,78 @@ fn flush(app: &AppHandle, project_id: &str, pending: &mut HashSet<String>) {
 }
 
 /// 路径校验:绝对路径 + 词法 `..` 拒绝(与 `system::commands::get_git_branch` 同思路,不 canonicalize)。
+/// 递归列出指定目录下的所有文件(@文件引用用),跳过 .git/node_modules/target 等忽略目录,
+/// 限深度(默认 4,上限 8)+ 限总数 2000(巨项目保护)。返回 DirEntry(id=绝对路径, kind="file")。
+#[tauri::command]
+pub async fn list_files(path: String, max_depth: Option<usize>) -> Result<Vec<DirEntry>, String> {
+    let root = validate_path(&path)?;
+    let max = max_depth.unwrap_or(4).min(8);
+    tokio::task::spawn_blocking(move || -> Result<Vec<DirEntry>, String> {
+        let mut out: Vec<DirEntry> = Vec::new();
+        collect_files(&root, &root, 0, max, &mut out);
+        Ok(out)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// list_files 的递归收集(同步,spawn_blocking 内)。
+fn collect_files(
+    root: &std::path::Path,
+    dir: &std::path::Path,
+    depth: usize,
+    max: usize,
+    out: &mut Vec<DirEntry>,
+) {
+    if depth > max || out.len() >= 2000 {
+        return;
+    }
+    let rd = match std::fs::read_dir(dir) {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+    for entry in rd.flatten() {
+        if out.len() >= 2000 {
+            return;
+        }
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if IGNORED_DIRS.contains(&name.as_str()) {
+            continue;
+        }
+        let ft = match entry.file_type() {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        if ft.is_dir() {
+            collect_files(root, &path, depth + 1, max, out);
+        } else {
+            let id = path.to_string_lossy().into_owned();
+            let size = entry.metadata().ok().map(|m| m.len());
+            out.push(DirEntry {
+                id,
+                name,
+                kind: "file".to_string(),
+                size,
+                modified: None,
+            });
+        }
+    }
+}
+
+/// list_files 递归时跳过的目录(体积大/无关,避免巨项目卡)。
+const IGNORED_DIRS: &[&str] = &[
+    ".git",
+    "node_modules",
+    "target",
+    "dist",
+    ".next",
+    ".cache",
+    "__pycache__",
+    ".venv",
+    ".claude",
+];
+
 fn validate_path(raw: &str) -> Result<std::path::PathBuf, String> {
     let p = Path::new(raw);
     if !p.is_absolute() {

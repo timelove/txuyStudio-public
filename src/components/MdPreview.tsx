@@ -1,6 +1,8 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useSettings } from "../settings/SettingsProvider";
+// highlight.js github-dark 主题(随 md-render 分包加载,首屏不拉)。
+import "highlight.js/styles/github-dark.css";
 
 /**
  * Markdown 预览(探针右栏 md 文件 preview 态)。
@@ -17,12 +19,33 @@ import { useSettings } from "../settings/SettingsProvider";
  * 旧实现 catch 吞错后 html="" → 渲染空 div(深色底)→ 看似「黑屏」。必须先 `default(window)`
  * 取实例再 sanitize。
  */
-export function MdPreview({ content }: { content: string }) {
+export function MdPreview({ content, inline = false }: { content: string; inline?: boolean }) {
   const { t } = useTranslation();
   const { fontSize } = useSettings();
   const [html, setHtml] = useState<string>("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const ref = useRef<HTMLDivElement>(null);
+
+  // html 更新后对 pre code 做 highlight.js 着色(后处理,不依赖 marked renderer API,兼容 marked@18)。
+  // highlight.js 懒加载(分包);未知语言忽略。
+  useEffect(() => {
+    if (!html || !ref.current) return;
+    let cancelled = false;
+    void import("highlight.js").then((mod) => {
+      if (cancelled || !ref.current) return;
+      ref.current.querySelectorAll("pre code").forEach((code) => {
+        try {
+          mod.default.highlightElement(code as HTMLElement);
+        } catch {
+          /* 未知语言,保持纯文本 */
+        }
+      });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [html]);
 
   useEffect(() => {
     let alive = true;
@@ -60,15 +83,20 @@ export function MdPreview({ content }: { content: string }) {
   }, [content]);
 
   if (loading) {
-    return <div className="grid h-full place-items-center text-[11px] text-[var(--mx-faint)]">{t("common.loading")}</div>;
+    return inline ? null : <div className="grid h-full place-items-center text-[11px] text-[var(--mx-faint)]">{t("common.loading")}</div>;
   }
   if (error) {
-    return <div className="grid h-full place-items-center px-4 text-center text-[11px] text-[#f87171]">{error}</div>;
+    return inline ? null : <div className="grid h-full place-items-center px-4 text-center text-[11px] text-[var(--mx-danger)]">{error}</div>;
   }
 
   return (
     <div
-      className="mx-md-preview mx-scroll-pretty h-full overflow-auto px-4 py-3 leading-relaxed text-[var(--mx-text)]"
+      ref={ref}
+      className={
+        inline
+          ? "mx-md-preview mx-scroll-pretty break-words leading-relaxed text-[var(--mx-text)]"
+          : "mx-md-preview mx-scroll-pretty h-full overflow-auto px-4 py-3 leading-relaxed text-[var(--mx-text)]"
+      }
       style={{ fontSize }}
       dangerouslySetInnerHTML={{ __html: html }}
     />
