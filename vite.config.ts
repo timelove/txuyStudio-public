@@ -1,9 +1,15 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
+import { version } from "./package.json";
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
+  // 注入 package.json 版本号为全局常量,SettingsModal 等处直接引用,
+  // 版本号单一真相源在 package.json,发版无需再改前端代码。
+  define: {
+    __APP_VERSION__: JSON.stringify(version),
+  },
   clearScreen: false,
   server: {
     port: 1420,

@@ -1,5 +1,6 @@
 import type { ProjectId } from "./projects";
 import type { PaneNode } from "./paneTree";
+import type { SessionKind } from "./sessions";
 
 /**
  * 后端 `AppSnapshot` 的前端镜像（与 Rust `state::mod` 类型对齐，camelCase）。
@@ -9,11 +10,11 @@ import type { PaneNode } from "./paneTree";
  * 的运行时模型供 UI 消费。
  */
 
-/** 单个终端面板的持久化配置。kind 见 [[SessionKind]]。 */
+/** 单个终端面板的持久化配置。kind 见 [[SessionKind]](单一真源,勿再内联联合防滞后)。 */
 export type PaneConfig = {
   paneId: string;
   name: string;
-  kind: "claude" | "codex" | "shell" | "test" | "lazygit" | "fresh" | "yazi" | "sessionbrowser";
+  kind: SessionKind;
   command: string;
 };
 
@@ -44,4 +45,8 @@ export type BackendAppSnapshot = {
   locale?: string | null;
   /** 终端 + Monaco 编辑器字体大小(px);undefined/未设 = 用前端默认值(13)。 */
   terminalFontSize?: number;
+  /** 界面主题 id;undefined/未设 = 默认(midnight)。 */
+  themeId?: string | null;
+  /** Codex 会话默认 sandbox 档位(codex exec -s);undefined/未设 = 前端默认(workspace-write)。 */
+  codexSandbox?: string | null;
 };

@@ -24,14 +24,14 @@ type ShellSidebarProps = {
 };
 
 /**
- * 左栏(窄,52px):**按项目分组**列出所有可见项目的 shell。
+ * 左栏(窄,44px):**按项目分组**列出所有可见项目的 shell。
  * 每组一个项目色小标头(项目名首字) + 该项目叶子图标列;点击图标设焦点并把该项目设 active;
  * 底部 `+` 打开新建菜单(作用于焦点项目)。
  *
  * 多项目并排时左栏成为「项目→shell」二级导航;单项目时退化为原来的单列。
  *
  * 新建菜单用 `createPortal` 渲染到 body 并以 fixed 定位:
- * 左栏 52px,容器有 `overflow-y-auto`(裁切),若用 absolute 定位,
+ * 左栏 44px,容器有 `overflow-y-auto`(裁切),若用 absolute 定位,
  * 宽 124px 的菜单会被裁掉(「点不到/看不到」)。Portal 脱离裁切容器。
  */
 export function ShellSidebar({
@@ -53,8 +53,8 @@ export function ShellSidebar({
     <>
       {NEW_SHELL_GROUPS.map((group, gi) => (
         <div key={group.title}>
-          {gi > 0 && <div className="my-1 border-t border-[rgba(148,163,184,0.18)]" />}
-          <div className="px-3 pb-0.5 text-[10px] uppercase tracking-wide text-[#475569]">{t(group.title)}</div>
+          {gi > 0 && <div className="my-1 border-t border-[var(--mx-border-strong)]" />}
+          <div className="px-3 pb-0.5 text-[10px] uppercase tracking-wide text-[var(--mx-faint)]">{t(group.title)}</div>
           {group.kinds.map((kind) => (
             <button
               key={kind}
@@ -117,10 +117,10 @@ export function ShellSidebar({
                         size="icon-md"
                         onClick={() => onFocusPane({ projectId: project.id, paneId: pane.id })}
                         className={[
-                          "h-9 w-9 text-[13px] font-bold",
+                          "h-8 w-8 text-[13px] font-bold",
                           isFocused
                             ? "bg-[var(--mx-selected-bg)] text-white hover:bg-[var(--mx-selected-bg)]"
-                            : "bg-[rgba(15,23,42,0.5)] text-[var(--mx-text)] hover:bg-[rgba(148,163,184,0.06)]",
+                            : "bg-[var(--mx-surface-soft)] text-[var(--mx-text)] hover:bg-[var(--mx-border-soft)]",
                         ].join(" ")}
                       >
                         <span className="grid place-items-center" style={{ color: isFocused ? "#fff" : meta.accent }}>
@@ -129,7 +129,7 @@ export function ShellSidebar({
                         {/* 左侧色条:区分 shellKind,聚焦时点亮。 */}
                         <span
                           aria-hidden
-                          className="absolute bottom-[5px] h-[2px] w-4 rounded-none"
+                          className="absolute bottom-[4px] h-[2px] w-3.5 rounded-none"
                           style={{ background: meta.accent, opacity: isFocused ? 0.95 : 0.4 }}
                         />
                       </Button>
@@ -147,7 +147,7 @@ export function ShellSidebar({
                             onClosePane(project.id, pane.id);
                           }}
                           onMouseDown={(e) => e.stopPropagation()}
-                          className="absolute top-[-4px] right-[2px] h-[16px] w-[16px] bg-[rgba(15,23,42,0.95)] text-[10px] text-[#94a3b8] opacity-0 transition-opacity duration-100 hover:text-[#fca5a5] group-hover:opacity-100"
+                          className="absolute top-[-4px] right-[2px] h-[16px] w-[16px] bg-[var(--mx-surface)] text-[10px] text-[var(--mx-muted)] opacity-0 transition-opacity duration-100 hover:text-[var(--mx-danger-bright)] group-hover:opacity-100"
                         >
                           ×
                         </Button>
@@ -174,7 +174,7 @@ export function ShellSidebar({
                 variant="accent"
                 size="icon-md"
                 onMouseDown={(e) => e.stopPropagation()}
-                className="h-9 w-9 text-[17px] text-[#bae6fd]"
+                className="h-8 w-8 text-[16px] text-[var(--mx-accent-bright)]"
               >
                 +
               </Button>

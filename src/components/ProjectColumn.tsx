@@ -1,8 +1,11 @@
 import { useMemo } from "react";
 import type { ProjectSnapshot } from "../domain/projects";
-import type { PaneNode, ShellKind } from "../domain/paneTree";
+import type { PaneNode, ShellKind, SplitDirection } from "../domain/paneTree";
 import { deriveSessions } from "../domain/projectDeriver";
 import type { TerminalTransport } from "../domain/terminalTransport";
+import type { ClaudeTransport } from "../domain/claudeTransport";
+import type { CodexTransport } from "../domain/codexTransport";
+import type { ShellRunTransport } from "../domain/shellRunTransport";
 import { PaneSurface } from "./PaneSurface";
 
 type ProjectColumnProps = {
@@ -13,9 +16,16 @@ type ProjectColumnProps = {
   onFocusPane: (paneId: string) => void;
   /** 按复合键取该项目某 pane 某 tab 的 transport(由 AppShell 闭包注入 projectId)。 */
   getTransport: (paneId: string, tabId: string) => TerminalTransport;
-  onSplitPane: (paneId: string, kind: ShellKind) => void;
+  /** 按复合键取该项目某 pane 某 tab 的 ClaudeTransport(claudepane 用)。 */
+  getClaudeTransport: (paneId: string, tabId: string) => ClaudeTransport;
+  /** 按复合键取该项目某 pane 某 tab 的 CodexTransport(codexpane 用)。 */
+  getCodexTransport: (paneId: string, tabId: string) => CodexTransport;
+  /** 按复合键取该项目某 pane 某 tab 的 ShellRunTransport(`!` 命令用)。 */
+  getShellRunTransport: (paneId: string, tabId: string) => ShellRunTransport;
+  onSplitPane: (paneId: string, kind: ShellKind, direction: SplitDirection) => void;
   onClosePane: (paneId: string) => void;
   onAddTab: (paneId: string, kind: ShellKind) => void;
+  onResumeSession: (provider: "claude" | "codex", sessionId: string, cwd?: string | null) => void;
   onCloseTab: (paneId: string, tabId: string) => void;
   onSetActiveTab: (paneId: string, tabId: string) => void;
   onMeasurePane?: (paneId: string, size: { width: number; height: number }) => void;
@@ -33,9 +43,13 @@ export function ProjectColumn({
   focusedPaneId,
   onFocusPane,
   getTransport,
+  getClaudeTransport,
+  getCodexTransport,
+  getShellRunTransport,
   onSplitPane,
   onClosePane,
   onAddTab,
+  onResumeSession,
   onCloseTab,
   onSetActiveTab,
   onMeasurePane,
@@ -52,9 +66,13 @@ export function ProjectColumn({
           focusedPaneId={focusedPaneId}
           onFocusPane={onFocusPane}
           getTransport={getTransport}
+          getClaudeTransport={getClaudeTransport}
+          getCodexTransport={getCodexTransport}
+          getShellRunTransport={getShellRunTransport}
           onSplitPane={onSplitPane}
           onClosePane={onClosePane}
           onAddTab={onAddTab}
+          onResumeSession={onResumeSession}
           onCloseTab={onCloseTab}
           onSetActiveTab={onSetActiveTab}
           onMeasurePane={onMeasurePane}

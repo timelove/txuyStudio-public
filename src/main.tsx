@@ -38,3 +38,25 @@ ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
     </ErrorBoundary>
   </React.StrictMode>,
 );
+
+// 消除打包后启动白屏:窗口默认 hidden(tauri.conf.json visible:false),
+// 等到 React 首帧(App 的 LoadingSurface 或 #boot-splash)真正上屏后再通知后端 show 窗口,
+// 用户看到的第一帧即深色 splash 而非 WebView2 冷启动白屏。
+//
+// 时机:两层 requestAnimationFrame——render() 调度首帧 commit,第一层 rAF 在该帧绘制前回调
+// (此时 DOM 已 commit 但未绘制),第二层 rAF 确保浏览器已完成本次绘制,splash 已可见,
+// 此时 show 窗口才不会闪白。非 Tauri 环境(纯浏览器 dev)invoke 抛错被吞,无副作用。
+//
+// 与后端 2.5s 兜底定时器配合:正常路径先于此触发;若 JS 崩溃调不到此处,后端兜底强制 show。
+try {
+  // 动态 import 避免非 Tauri 环境顶层引入 @tauri-apps/api/core 报错;亦使本逻辑不进首屏主 bundle。
+  void import("@tauri-apps/api/core").then(({ invoke }) =>
+    requestAnimationFrame(() =>
+      requestAnimationFrame(() => {
+        invoke("show_window").catch(() => {});
+      }),
+    ),
+  );
+} catch {
+  // 非 Tauri 环境兜底,忽略。
+}

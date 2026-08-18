@@ -32,7 +32,7 @@ const SliderTrack = React.forwardRef<
   <SliderPrimitive.Track
     ref={ref}
     className={cn(
-      "relative h-1.5 w-full grow overflow-hidden rounded-[var(--mx-radius-full)] bg-[rgba(148,163,184,0.18)]",
+      "relative h-1.5 w-full grow overflow-hidden rounded-[var(--mx-radius-full)] bg-[var(--mx-border-strong)]",
       className,
     )}
     {...props}
@@ -59,7 +59,7 @@ const SliderThumb = React.forwardRef<
   <SliderPrimitive.Thumb
     ref={ref}
     className={cn(
-      "block h-3.5 w-3.5 rounded-[var(--mx-radius-full)] bg-[var(--mx-accent)] shadow-[0_0_0_1px_rgba(34,211,238,0.45)] transition-transform hover:scale-110 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--mx-accent)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--mx-bg)] disabled:pointer-events-none disabled:opacity-50",
+      "block h-3.5 w-3.5 rounded-[var(--mx-radius-full)] bg-[var(--mx-accent)] shadow-[0_0_0_1px_var(--mx-selected-border)] transition-transform hover:scale-110 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--mx-accent)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--mx-bg)] disabled:pointer-events-none disabled:opacity-50",
       className,
     )}
     {...props}

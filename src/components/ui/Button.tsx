@@ -67,17 +67,17 @@ const SIZE: Record<ButtonSize, string> = {
 /** 各变体的颜色表达,全部基于 --mx-* token。 */
 const VARIANT: Record<ButtonVariant, string> = {
   default:
-    "bg-[var(--mx-accent)] text-[#0b1020] font-semibold hover:brightness-110",
+    "bg-[var(--mx-accent)] text-[var(--mx-editor-bg)] font-semibold hover:brightness-110",
   outline:
-    "border border-[rgba(148,163,184,0.28)] text-[var(--mx-text)] hover:bg-[var(--mx-hover-bg)]",
+    "border border-[var(--mx-border-strong)] text-[var(--mx-text)] hover:bg-[var(--mx-hover-bg)]",
   ghost:
     "text-[var(--mx-muted)] hover:text-[var(--mx-text)] hover:bg-[var(--mx-hover-bg)]",
   selected:
-    "border border-[var(--mx-accent)] bg-[rgba(34,211,238,0.12)] text-[var(--mx-text)]",
+    "border border-[var(--mx-accent)] bg-[var(--mx-accent-soft)] text-[var(--mx-text)]",
   danger:
-    "border border-[rgba(248,113,113,0.5)] text-[#f87171] hover:bg-[rgba(248,113,113,0.12)]",
+    "border border-[var(--mx-danger-border)] text-[var(--mx-danger)] hover:bg-[var(--mx-danger-bg)]",
   accent:
-    "bg-[rgba(34,211,238,0.12)] text-[#bae6fd] hover:bg-[rgba(34,211,238,0.22)]",
+    "bg-[var(--mx-accent-soft)] text-[var(--mx-accent-bright)] hover:bg-[var(--mx-accent-soft)]",
 };
 
 export function Button({

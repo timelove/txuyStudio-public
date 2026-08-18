@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useTranslation } from "react-i18next";
+import { useSettings } from "../settings/SettingsProvider";
 import type { ProjectId, ProjectSnapshot } from "../domain/projects";
 import type { ShellKind, PaneNode, PaneLeaf, PaneRef, SplitDirection, PaneTab } from "../domain/paneTree";
 import {
@@ -10,6 +11,7 @@ import {
   createTab,
   defaultPaneTree,
   findPane,
+  findPaneByTabId,
   focusPane,
   getActiveTab,
   listPanes,
@@ -22,6 +24,11 @@ import { SHELL_KIND_META } from "../domain/shellKinds";
 import { isTuiTool, TUI_TOOLS, toolPromptSpec, YAZI_DEPS, type PromptSpec } from "../domain/toolInstall";
 import type { TerminalTransport } from "../domain/terminalTransport";
 import { TauriPtyTransport } from "../domain/tauriPtyTransport";
+import { ClaudeTransport } from "../domain/claudeTransport";
+import { useClaudeStatuses } from "../domain/claudeStatusRegistry";
+import { CodexTransport } from "../domain/codexTransport";
+import { useCodexStatuses } from "../domain/codexStatusRegistry";
+import { ShellRunTransport } from "../domain/shellRunTransport";
 import { ProjectColumn } from "./ProjectColumn";
 import { ShellSidebar } from "./ShellSidebar";
 import { StatusBar } from "./StatusBar";
@@ -72,6 +79,8 @@ export function AppShell({
   onDockBack,
 }: AppShellProps) {
   const { t } = useTranslation();
+  // 全局设置:Codex 默认 sandbox 档位(新建 codex 会话的初始 -s;已开会话不跟随,其状态栏单独切)。
+  const { codexSandbox } = useSettings();
   // 每项目一棵 pane tree(从 workspace.paneTree 初始化;deriver 已迁移旧形态到 tabs)。
   const [treesByProject, setTreesByProject] = useState<Record<string, PaneNode>>(() => {
     const init: Record<string, PaneNode> = {};
@@ -91,6 +100,17 @@ export function AppShell({
 
   // transport 池:transportKey(projectId,paneId,tabId) → transport。一个 tab 一个 PTY,存活期复用。
   const transportsRef = useRef<Map<string, TerminalTransport>>(new Map());
+  // claude transport 池:同 triple key → ClaudeTransport。claudepane tab 专用,与 PTY 池并列。
+  // messages 存 transport 实例(跨 ClaudePane unmount 存活),切 tab 不丢(onEvents 回放)。
+  const claudeTransportsRef = useRef<Map<string, ClaudeTransport>>(new Map());
+  // codex transport 池:同 triple key -> CodexTransport。codexpane tab 专用,与 claude 池并列。
+  // messages 存 transport 实例(跨 CodexPane unmount 存活),切 tab 不丢(onEvents 回放)。
+  const codexTransportsRef = useRef<Map<string, CodexTransport>>(new Map());
+  // `!` 命令 transport 池:同 triple key → ShellRunTransport。与 claude 池并列,生命周期同管。
+  const shellRunTransportsRef = useRef<Map<string, ShellRunTransport>>(new Map());
+  const pendingResumeRef = useRef<
+    Map<string, { provider: "claude" | "codex"; sessionId: string; cwd: string | null }>
+  >(new Map());
 
   // pane 实际尺寸(由 TerminalPane 的 ResizeObserver 上报,按 pane 复合键存):供分屏方向自适应。
   const paneRectsRef = useRef<Map<string, { width: number; height: number }>>(new Map());
@@ -161,12 +181,6 @@ export function AppShell({
     };
   }, [visibleProjects, gitBranchByRoot]);
 
-  /** 按某 pane 当前尺寸决定分屏方向:宽 ≥ 高 → 左右,否则上下。无尺寸默认左右。 */
-  const autoDirection = useCallback((projectId: string, paneId: string): SplitDirection => {
-    const rect = paneRectsRef.current.get(surfaceKey(projectId, paneId));
-    if (!rect) return "horizontal";
-    return rect.width >= rect.height ? "horizontal" : "vertical";
-  }, []);
 
   // transport 池取/建:triple key 不变则复用同一实例。一个 tab = 一个 transport = 一个 PTY。
   const getTransport = useCallback(
@@ -175,12 +189,89 @@ export function AppShell({
       const key = transportKey(projectId, paneId, tabId);
       let t = pool.get(key);
       if (!t) {
-        t = new TauriPtyTransport(projectId);
+        const transport = new TauriPtyTransport(projectId);
+        // codex 已迁移到自渲染 CodexPane(codexpane),pendingResume 的 codex 分支在
+        // getCodexTransport 消费(注入 transport.setResumeSessionId),PTY 不再处理。
+        pool.set(key, transport);
+        return transport;
+      }
+      return t;
+    },
+    [],
+  );
+
+  // claude transport 池取/建:同 triple key 复用同一实例。一个 claudepane tab = 一个 ClaudeTransport。
+  // tab 存活期复用,移除时 stop(unlisten)+ invoke kill_claude(后端 kill 子进程)。
+  const getClaudeTransport = useCallback(
+    (projectId: string, paneId: string, tabId: string): ClaudeTransport => {
+      const pool = claudeTransportsRef.current;
+      const key = transportKey(projectId, paneId, tabId);
+      let t = pool.get(key);
+      if (!t) {
+        // 传项目根作 claude 进程 cwd:否则 claude 跑在应用启动目录(muxy_rust),
+        // meta.cwd 回填错误 → `!命令` 也跑错目录。
+        const rootPath = projects.find((p) => p.id === projectId)?.rootPath;
+        // registryKey 传给 transport,使 emit 出口据此上报 summary 到 claudeStatusRegistry(供
+        // StatusBar 跨 tab 汇总);paneId 由 transport 创建后补全(setRegistryPaneId)。
+        const pending = pendingResumeRef.current.get(key);
+        const cwd = pending?.provider === "claude" ? pending.cwd : rootPath;
+        t = new ClaudeTransport(projectId, tabId, cwd, key);
+        t.setRegistryPaneId(paneId);
+        if (pending?.provider === "claude") {
+          t.setResumeSessionId(pending.sessionId);
+          pendingResumeRef.current.delete(key);
+        }
+        pool.set(key, t);
+      } else {
+        // 复用实例时确保 paneId 已补全(detach/重连等场景 key 不变但 paneId 可能缺失)。
+        t.setRegistryPaneId(paneId);
+      }
+      return t;
+    },
+    [projects],
+  );
+
+  // `!` 命令 transport 池取/建:同 triple key 复用同一实例。与 getClaudeTransport 同构。
+  const getShellRunTransport = useCallback(
+    (projectId: string, paneId: string, tabId: string): ShellRunTransport => {
+      const pool = shellRunTransportsRef.current;
+      const key = transportKey(projectId, paneId, tabId);
+      let t = pool.get(key);
+      if (!t) {
+        t = new ShellRunTransport(projectId, tabId);
         pool.set(key, t);
       }
       return t;
     },
     [],
+  );
+
+  // codex transport 池取/建:同 triple key 复用同一实例。一个 codexpane tab = 一个 CodexTransport。
+  // 与 getClaudeTransport 同构:传项目根作 cwd(-C 参数)、registryKey 上报 codexStatusRegistry、
+  // 消费 pendingResume(codex 分支,SessionBrowser 恢复历史会话 -> setResumeSessionId)。
+  // 构造传全局默认 sandbox 档(设置面板可改):只影响新建实例,已建的不跟随。
+  const getCodexTransport = useCallback(
+    (projectId: string, paneId: string, tabId: string): CodexTransport => {
+      const pool = codexTransportsRef.current;
+      const key = transportKey(projectId, paneId, tabId);
+      let t = pool.get(key);
+      if (!t) {
+        const rootPath = projects.find((p) => p.id === projectId)?.rootPath;
+        const pending = pendingResumeRef.current.get(key);
+        const cwd = pending?.provider === "codex" ? pending.cwd : rootPath;
+        t = new CodexTransport(projectId, tabId, cwd, key, codexSandbox);
+        t.setRegistryPaneId(paneId);
+        if (pending?.provider === "codex") {
+          t.setResumeSessionId(pending.sessionId);
+          pendingResumeRef.current.delete(key);
+        }
+        pool.set(key, t);
+      } else {
+        t.setRegistryPaneId(paneId);
+      }
+      return t;
+    },
+    [projects, codexSandbox],
   );
 
   /** 把某项目的新 tree 写入本地 + 落盘后端。 */
@@ -239,7 +330,7 @@ export function AppShell({
   // 分屏并指定新 pane 的 shell 类型:自适应方向 + 新 pane 只含单个菜单选 kind 的 tab。
   // 不复制原 pane 的 tab 栈(与 splitFocused 同语义,区别在 kind 可选 + 方向自适应)。
   const handleSplitWithKind = useCallback(
-    async (projectId: string, paneId: string, kind: ShellKind) => {
+    async (projectId: string, paneId: string, kind: ShellKind, direction: SplitDirection) => {
       if (!(await ensureToolAndDeps(kind))) return; // TUI 未装(含 yazi+依赖合并提示)→ 弹模态,不分屏。
       const cur = treesByProject[projectId];
       if (!cur) return;
@@ -253,34 +344,61 @@ export function AppShell({
         tabs: [createTab(newTabId, kind, SHELL_KIND_META[kind].defaultTitle, rootPath)],
         activeTabId: newTabId,
       };
-      const next = splitPaneWithPane(cur, paneId, autoDirection(projectId, paneId), newPane);
+      const next = splitPaneWithPane(cur, paneId, direction, newPane);
       commitTree(projectId, next);
       setFocused({ projectId, paneId: newPaneId });
     },
-    [treesByProject, projects, commitTree, autoDirection, ensureToolAndDeps],
+    [treesByProject, projects, commitTree, ensureToolAndDeps],
   );
 
   // 新建 tab:在焦点 pane 追加一个指定 kind 的 tab 并设为 active。
   const handleAddTab = useCallback(
-    async (projectId: string, paneId: string, kind: ShellKind) => {
+    async (projectId: string, paneId: string, kind: ShellKind, cwdOverride?: string): Promise<string | undefined> => {
       if (!(await ensureToolAndDeps(kind))) return; // TUI 未装(含 yazi+依赖合并提示)→ 弹模态,不建 tab。
       const cur = treesByProject[projectId];
       if (!cur) return;
       // 新 tab 始终起在项目根目录:不继承当前活动 tab 的 cwd(避免「复制整个 shell」)。
       const rootPath = projects.find((p) => p.id === projectId)?.rootPath;
+      const cwd = cwdOverride ?? rootPath;
       const newTab: PaneTab = {
         id: nextId("tab"),
         shellKind: kind,
         title: SHELL_KIND_META[kind].defaultTitle,
-        ...(rootPath ? { cwd: rootPath } : {}),
+        ...(cwd ? { cwd } : {}),
       };
       // 用领域纯函数 addTab 追加并设 active。
       const next = addTab(cur, paneId, newTab);
       commitTree(projectId, next);
       // 焦点落到该 pane(新 tab 自动 active)。
       setFocused({ projectId, paneId });
+      return newTab.id;
     },
     [treesByProject, projects, commitTree, ensureToolAndDeps],
+  );
+
+  const handleResumeSession = useCallback(
+    async (
+      projectId: string,
+      provider: "claude" | "codex",
+      sessionId: string,
+      sessionCwd?: string | null,
+    ) => {
+      const kind: ShellKind = provider === "claude" ? "claudepane" : "codexpane";
+      const cur = treesByProject[projectId];
+      if (!cur) return;
+      const paneId = focused?.projectId === projectId ? focused.paneId : listPanes(cur)[0]?.id;
+      if (!paneId) return;
+      const rootPath = projects.find((p) => p.id === projectId)?.rootPath ?? null;
+      const cwd = sessionCwd ?? rootPath;
+      const tabId = await handleAddTab(projectId, paneId, kind, cwd ?? undefined);
+      if (!tabId) return;
+      pendingResumeRef.current.set(transportKey(projectId, paneId, tabId), {
+        provider,
+        sessionId,
+        cwd: cwd ?? null,
+      });
+    },
+    [treesByProject, focused, projects, handleAddTab],
   );
 
   // 切换某 pane 的活动 tab(只改树,不换 transport —— PTY 常驻)。
@@ -309,6 +427,27 @@ export function AppShell({
       if (t) {
         void t.stop(tabId).catch(() => {});
         transportsRef.current.delete(key);
+      }
+      // 同步清理 claude transport:stop(unlisten)+ invoke kill_claude(后端 kill 子进程)。
+      const ct = claudeTransportsRef.current.get(key);
+      if (ct) {
+        ct.stop();
+        void invoke("kill_claude", { projectId, tabId }).catch(() => {});
+        claudeTransportsRef.current.delete(key);
+      }
+      // 同步清理 codex transport:stop(unlisten)+ invoke kill_codex(kill 当前轮 exec 进程树)。
+      const xt = codexTransportsRef.current.get(key);
+      if (xt) {
+        xt.stop();
+        void invoke("kill_codex", { projectId, tabId }).catch(() => {});
+        codexTransportsRef.current.delete(key);
+      }
+      // 同步清理 `!` 命令 transport(若有在跑命令,后端 kill_shell_command 终止进程)。
+      const srt = shellRunTransportsRef.current.get(key);
+      if (srt) {
+        srt.stop();
+        void invoke("kill_shell_command", { projectId, tabId }).catch(() => {});
+        shellRunTransportsRef.current.delete(key);
       }
       const result = closeTab(cur, paneId, tabId);
       if (!result) return;
@@ -342,6 +481,39 @@ export function AppShell({
         const t = transportsRef.current.get(key);
         if (t) void t.stop(tabId).catch(() => {});
         transportsRef.current.delete(key);
+      }
+      // 同步 stop + kill 该 pane 所有 tab 的 claude transport。
+      for (const key of Array.from(claudeTransportsRef.current.keys())) {
+        if (!key.startsWith(prefix)) continue;
+        const tabId = key.slice(prefix.length);
+        const ct = claudeTransportsRef.current.get(key);
+        if (ct) {
+          ct.stop();
+          void invoke("kill_claude", { projectId, tabId }).catch(() => {});
+        }
+        claudeTransportsRef.current.delete(key);
+      }
+      // 同步 stop + kill 该 pane 所有 tab 的 codex transport。
+      for (const key of Array.from(codexTransportsRef.current.keys())) {
+        if (!key.startsWith(prefix)) continue;
+        const tabId = key.slice(prefix.length);
+        const xt = codexTransportsRef.current.get(key);
+        if (xt) {
+          xt.stop();
+          void invoke("kill_codex", { projectId, tabId }).catch(() => {});
+        }
+        codexTransportsRef.current.delete(key);
+      }
+      // 同步 stop + kill 该 pane 所有 tab 的 `!` 命令 transport。
+      for (const key of Array.from(shellRunTransportsRef.current.keys())) {
+        if (!key.startsWith(prefix)) continue;
+        const tabId = key.slice(prefix.length);
+        const srt = shellRunTransportsRef.current.get(key);
+        if (srt) {
+          srt.stop();
+          void invoke("kill_shell_command", { projectId, tabId }).catch(() => {});
+        }
+        shellRunTransportsRef.current.delete(key);
       }
       paneRectsRef.current.delete(surfaceKey(projectId, paneId));
       const next = closePane(cur, paneId);
@@ -443,6 +615,45 @@ export function AppShell({
       pool.delete(key);
       paneRectsRef.current.delete(surfaceKey(projectId, paneId));
     }
+    // 同步释放该项目的所有 claude transport(stop + kill,后端 close_project 也会兜底 kill)。
+    const cpool = claudeTransportsRef.current;
+    for (const key of Array.from(cpool.keys())) {
+      if (!key.startsWith(prefix)) continue;
+      const parts = key.split("::");
+      const tabId = parts[2] ?? "";
+      const ct = cpool.get(key);
+      if (ct) {
+        ct.stop();
+        void invoke("kill_claude", { projectId, tabId }).catch(() => {});
+      }
+      cpool.delete(key);
+    }
+    // 同步释放该项目的所有 codex transport(后端 close_project 的 codex.kill_project 兜底)。
+    const xpool = codexTransportsRef.current;
+    for (const key of Array.from(xpool.keys())) {
+      if (!key.startsWith(prefix)) continue;
+      const parts = key.split("::");
+      const tabId = parts[2] ?? "";
+      const xt = xpool.get(key);
+      if (xt) {
+        xt.stop();
+        void invoke("kill_codex", { projectId, tabId }).catch(() => {});
+      }
+      xpool.delete(key);
+    }
+    // 同步释放该项目的所有 `!` 命令 transport(后端 close_project 的 shell.kill_project 兜底)。
+    const spool = shellRunTransportsRef.current;
+    for (const key of Array.from(spool.keys())) {
+      if (!key.startsWith(prefix)) continue;
+      const parts = key.split("::");
+      const tabId = parts[2] ?? "";
+      const srt = spool.get(key);
+      if (srt) {
+        srt.stop();
+        void invoke("kill_shell_command", { projectId, tabId }).catch(() => {});
+      }
+      spool.delete(key);
+    }
   }, []);
 
   // 删除项目:前端乐观清理(transport 池按 `${projectId}::` 前缀批量 stop+delete、删 tree、
@@ -506,6 +717,19 @@ export function AppShell({
         void t.stop("").catch(() => {});
       }
       transportsRef.current.clear();
+      // 同步清理所有 claude transport(仅 unlisten;后端进程随 app 退出自然终止)。
+      for (const [, ct] of claudeTransportsRef.current) {
+        ct.stop();
+      }
+      claudeTransportsRef.current.clear();
+      for (const [, xt] of codexTransportsRef.current) {
+        xt.stop();
+      }
+      codexTransportsRef.current.clear();
+      for (const [, srt] of shellRunTransportsRef.current) {
+        srt.stop();
+      }
+      shellRunTransportsRef.current.clear();
     };
   }, []);
 
@@ -617,8 +841,28 @@ export function AppShell({
   // 聚焦项目(选中 shell 所属项目):供底部状态栏显示其绝对路径。
   const focusedProject = focused ? projects.find((p) => p.id === focused.projectId) ?? null : null;
 
+  // 全部 claude tab 的对外状态汇总(供 StatusBar 跨 tab 显示「几个在跑/报错/等待」)。
+  // useSyncExternalStore 订阅 claudeStatusRegistry,transport emit 时上报、关 tab 时注销。
+  const claudeStatuses = useClaudeStatuses();
+  // 全部 codex tab 的对外状态汇总(与 claude 并列,StatusBar 分别显示)。
+  const codexStatuses = useCodexStatuses();
+
+  // StatusBar 点击某个 AI 状态药丸 -> 跳到该状态第一个 claude tab:切项目 + 聚焦 pane + 切活动 tab。
+  const handleFocusClaudeTab = useCallback(
+    (projectId: string, tabId: string) => {
+      const tree = treesByProject[projectId];
+      if (!tree) return;
+      const pane = findPaneByTabId(tree, tabId);
+      if (!pane) return;
+      if (projectId !== activeProjectId) onSelectProject(projectId);
+      setFocused({ projectId, paneId: pane.id });
+      handleSetActiveTab(projectId, pane.id, tabId);
+    },
+    [treesByProject, activeProjectId, onSelectProject, handleSetActiveTab],
+  );
+
   return (
-    <main className="grid h-screen min-h-0 grid-rows-[var(--mx-titlebar-h)_1fr_26px] overflow-hidden bg-[#070a12]">
+    <main className="grid h-screen min-h-0 grid-rows-[var(--mx-titlebar-h)_1fr_26px] overflow-hidden bg-[var(--mx-bg)]">
       <TopProjectBar
         projects={projects}
         activeProjectId={activeProjectId}
@@ -632,7 +876,7 @@ export function AppShell({
         singleProjectMode={singleProjectMode}
         onDockBack={onDockBack}
       />
-      <div className="grid min-h-0 grid-cols-[52px_1fr]">
+      <div className="grid min-h-0 grid-cols-[44px_1fr]">
         <div className="flex min-h-0 flex-col">
           {hasProject ? (
             <ShellSidebar
@@ -644,7 +888,7 @@ export function AppShell({
               onCreateShell={handleCreateShell}
             />
           ) : (
-            <div className="grid place-items-center p-4 text-center text-xs text-[#94a3b8]">
+            <div className="grid place-items-center p-4 text-center text-xs text-[var(--mx-muted)]">
               {t("project.emptyHint")}
             </div>
           )}
@@ -663,9 +907,13 @@ export function AppShell({
                   focusedPaneId={focused?.projectId === p.id ? focused.paneId : null}
                   onFocusPane={(paneId) => focusPaneRef(p.id, paneId)}
                   getTransport={(paneId, tabId) => getTransport(p.id, paneId, tabId)}
-                  onSplitPane={(paneId, kind) => handleSplitWithKind(p.id, paneId, kind)}
+                  getClaudeTransport={(paneId, tabId) => getClaudeTransport(p.id, paneId, tabId)}
+                  getCodexTransport={(paneId, tabId) => getCodexTransport(p.id, paneId, tabId)}
+                  getShellRunTransport={(paneId, tabId) => getShellRunTransport(p.id, paneId, tabId)}
+                  onSplitPane={(paneId, kind, direction) => handleSplitWithKind(p.id, paneId, kind, direction)}
                   onClosePane={(paneId) => handleClosePane(p.id, paneId)}
                   onAddTab={(paneId, kind) => handleAddTab(p.id, paneId, kind)}
+                  onResumeSession={(provider, sessionId, cwd) => handleResumeSession(p.id, provider, sessionId, cwd)}
                   onCloseTab={(paneId, tabId) => handleCloseTab(p.id, paneId, tabId)}
                   onSetActiveTab={(paneId, tabId) => handleSetActiveTab(p.id, paneId, tabId)}
                   onMeasurePane={(paneId, size) =>
@@ -675,7 +923,7 @@ export function AppShell({
               ))}
             </div>
           ) : (
-            <div className="grid h-full place-items-center text-xs text-[#475569]">
+            <div className="grid h-full place-items-center text-xs text-[var(--mx-faint)]">
               {t("project.empty")}
             </div>
           )}
@@ -684,6 +932,9 @@ export function AppShell({
       <StatusBar
         focusedProject={focusedProject}
         gitBranch={focusedProject ? gitBranchByRoot[focusedProject.rootPath] : undefined}
+        claudeStatuses={claudeStatuses}
+        codexStatuses={codexStatuses}
+        onFocusClaudeTab={handleFocusClaudeTab}
       />
       <InstallPromptModal prompt={installPrompt} onClose={() => setInstallPrompt(null)} />
     </main>

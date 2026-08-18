@@ -7,6 +7,7 @@
 //! 独立的 managed state;阶段3 做 PTY 项目隔离时再把 PTY 归属到 `projectId` 下。
 //! 二者均遵守 `std::sync::Mutex`「持锁不跨 .await」约束。
 
+use std::collections::HashMap;
 use std::sync::Mutex;
 
 pub mod commands;
@@ -75,6 +76,18 @@ pub struct ProjectRecord {
     pub root_path: String,
     pub last_opened_ms: u128,
     pub pane_tree: Option<PaneNode>,
+    /// ClaudePane 工具白名单(claude `--allowedTools`):用户在确认框点「批准且不再问」时累加,
+    /// 后续 spawn claude 时带上,该工具免确认。空 Vec 不写盘(`skip_serializing_if`),
+    /// 旧 state.json 无此字段 → `#[serde(default)]` 空数组,零迁移(同 `locale`/`terminal_font_size`)。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub claude_allowed_tools: Vec<String>,
+    /// 每个 claudepane tab 的 claude 会话 id(tabId -> sessionId)。持久化以支持跨应用重启 --resume
+    /// 续接同一会话:ClaudeRegistry 仅内存,重启即丢;init 事件回填时写盘,start_claude_session 首启
+    /// 时读作 --resume 的 id。独立于 pane_tree(前端 save_pane_tree 重建 tab 不影响此 map),后端独占管理;
+    /// 关 tab 时由 save_pane_tree 修剪(移除新 tree 中已不存在 tab 的项)。HashMap + serde default
+    /// 兼容旧 state.json 缺字段,无需迁移。
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub claude_tab_sessions: HashMap<String, String>,
 }
 
 /// 原生窗口大小/位置,由 `save_window_bounds` 持久化。
@@ -103,6 +116,13 @@ pub struct AppSnapshot {
     /// 终端 + Monaco 编辑器字体大小(px)。None = 用前端默认值(13)。
     /// Option + serde default 天然兼容旧 state.json 缺字段(无该字段 → None),无需迁移。
     pub terminal_font_size: Option<u32>,
+    /// 界面主题 id("midnight"/"one-dark")。None = 默认(midnight)。
+    /// Option + serde default 兼容旧 state.json 缺字段,无需迁移。
+    pub theme_id: Option<String>,
+    /// Codex 会话默认 sandbox 档位(codex exec -s:"read-only"/"workspace-write"/
+    /// "danger-full-access")。None = 前端默认(workspace-write)。仅影响新建 codex 会话,
+    /// 已开会话在其状态栏单独切换。Option + serde default 兼容旧 state.json,无需迁移。
+    pub codex_sandbox: Option<String>,
 }
 
 /// 全局应用状态容器:`State<Mutex<AppSnapshot>>`。
@@ -133,6 +153,15 @@ pub fn default_pane_tree() -> PaneNode {
             cwd: None,
         }],
         active_tab_id: "ps-1".to_string(),
+    }
+}
+
+/// 收集 pane tree 中所有 tab id(递归)。供 save_pane_tree 修剪 claude_tab_sessions 陈旧项
+/// (关 tab 后其 session_id 不再需要,移除防 map 无界增长)。
+pub fn collect_tab_ids(root: &PaneNode) -> Vec<String> {
+    match root {
+        PaneNode::Pane { tabs, .. } => tabs.iter().map(|t| t.id.clone()).collect(),
+        PaneNode::Split { children, .. } => children.iter().flat_map(collect_tab_ids).collect(),
     }
 }
 

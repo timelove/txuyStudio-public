@@ -1,6 +1,6 @@
 //! 持久化：把 [`AppSnapshot`] 序列化为 JSON 落到 Tauri app data 目录。
 //!
-//! 路径 `<AppData>/txuyStudio/state.json`。解析失败时回退空快照并记日志，
+//! 路径 `<AppData>/txuyStudio[-dev]/state.json`。解析失败时回退空快照并记日志，
 //! **不阻断启动**（与设计「风险与回退」一致）。
 
 use std::path::PathBuf;
@@ -15,7 +15,10 @@ fn state_file_path(app: &AppHandle) -> Result<PathBuf, String> {
         .path()
         .app_data_dir()
         .map_err(|e| format!("resolve app_data_dir: {e}"))?;
-    Ok(base.join("txuyStudio").join("state.json"))
+    // dev(debug 构建)用独立子目录 `txuyStudio-dev`,release 用 `txuyStudio`,
+    // 防 dev 与 prod 共用同一 state.json 互相覆盖(dev 测试数据不污染 prod 已存项目/会话)。
+    let sub = if cfg!(debug_assertions) { "txuyStudio-dev" } else { "txuyStudio" };
+    Ok(base.join(sub).join("state.json"))
 }
 
 /// 从磁盘读取快照。文件不存在或解析失败均回退 [`AppSnapshot::default`]，

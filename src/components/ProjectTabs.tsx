@@ -102,12 +102,12 @@ export function ProjectTabs({ projects, activeProjectId, pinnedProjectIds, onSel
                   "mx-chip flex h-[24px] min-w-0 items-center gap-[6px] px-[10px] text-xs transition-colors cursor-pointer",
                   activeProject
                     ? "bg-[var(--mx-selected-bg)] text-white"
-                    : "bg-[rgba(15,23,42,0.5)] text-[var(--mx-muted)] hover:bg-[var(--mx-hover-bg)] hover:text-[var(--mx-text)]",
+                    : "bg-[var(--mx-surface-soft)] text-[var(--mx-muted)] hover:bg-[var(--mx-hover-bg)] hover:text-[var(--mx-text)]",
                 ].join(" ")}
               >
                 <span
                   aria-hidden
-                  className={`h-1.5 w-1.5 shrink-0 rounded-full ${activeProject ? "bg-[#22d3ee]" : "bg-[var(--mx-faint)]"}`}
+                  className={`h-1.5 w-1.5 shrink-0 rounded-full ${activeProject ? "bg-[var(--mx-accent)]" : "bg-[var(--mx-faint)]"}`}
                 />
                 {chipProjects.length > 0 ? (
                   <span
@@ -198,7 +198,7 @@ export function ProjectTabs({ projects, activeProjectId, pinnedProjectIds, onSel
                   >
                     <span
                       aria-hidden
-                      className={`h-1.5 w-1.5 shrink-0 rounded-full ${isActive ? "bg-[#22d3ee]" : "bg-[var(--mx-faint)]"}`}
+                      className={`h-1.5 w-1.5 shrink-0 rounded-full ${isActive ? "bg-[var(--mx-accent)]" : "bg-[var(--mx-faint)]"}`}
                     />
                     <span className="truncate">{p.name}</span>
                   </button>
@@ -220,8 +220,8 @@ export function ProjectTabs({ projects, activeProjectId, pinnedProjectIds, onSel
                       className={[
                         "mx-icon-tile grid h-[16px] w-[16px] shrink-0 place-items-center text-[12px] leading-none cursor-pointer transition-colors",
                         isPinned
-                          ? "text-[#22d3ee] opacity-100 hover:bg-[rgba(34,211,238,0.18)]"
-                          : "text-[#94a3b8] opacity-0 group-hover:opacity-100 hover:bg-[var(--mx-hover-bg)] hover:text-[#e2e8f0]",
+                          ? "text-[var(--mx-accent)] opacity-100 hover:bg-[var(--mx-selected-bg)]"
+                          : "text-[var(--mx-muted)] opacity-0 group-hover:opacity-100 hover:bg-[var(--mx-hover-bg)] hover:text-[var(--mx-text-bright)]",
                       ].join(" ")}
                     >
                       {isPinned ? "●" : "○"}
@@ -243,7 +243,7 @@ export function ProjectTabs({ projects, activeProjectId, pinnedProjectIds, onSel
                         }
                       }}
                       onMouseDown={(e) => e.stopPropagation()}
-                      className="mx-icon-tile grid h-[16px] w-[16px] shrink-0 place-items-center text-[12px] leading-none cursor-pointer text-[#94a3b8] opacity-0 group-hover:opacity-100 hover:bg-[rgba(244,63,94,0.18)] hover:text-[#f87171]"
+                      className="mx-icon-tile grid h-[16px] w-[16px] shrink-0 place-items-center text-[12px] leading-none cursor-pointer text-[var(--mx-muted)] opacity-0 group-hover:opacity-100 hover:bg-[var(--mx-danger-bg)] hover:text-[var(--mx-danger)]"
                     >
                       ✕
                     </button>
@@ -267,7 +267,7 @@ export function ProjectTabs({ projects, activeProjectId, pinnedProjectIds, onSel
               size="icon-md"
               onClick={onAddProject}
               onMouseDown={(e) => e.stopPropagation()}
-              className="h-[24px] w-[24px] text-[14px] text-[#bae6fd]"
+              className="h-[24px] w-[24px] text-[14px] text-[var(--mx-accent-bright)]"
             >
               +
             </Button>

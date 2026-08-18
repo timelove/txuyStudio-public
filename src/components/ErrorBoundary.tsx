@@ -33,17 +33,17 @@ export class ErrorBoundary extends Component<Props, State> {
     const { error } = this.state;
     if (!error) return this.props.children;
     return (
-      <div className="grid h-screen place-items-center bg-[#0b1020] p-6 text-center">
+      <div className="grid h-screen place-items-center bg-[var(--mx-editor-bg)] p-6 text-center">
         <div className="max-w-xl">
-          <div className="text-sm font-semibold text-[#f87171]">渲染出错</div>
-          <pre className="mx-scroll-pretty mt-3 max-h-[40vh] overflow-auto rounded bg-[rgba(0,0,0,0.4)] p-3 text-left text-[11px] leading-relaxed text-[#cbd5e1]">
+          <div className="text-sm font-semibold text-[var(--mx-danger)]">渲染出错</div>
+          <pre className="mx-scroll-pretty mt-3 max-h-[40vh] overflow-auto rounded bg-[rgba(0,0,0,0.4)] p-3 text-left text-[11px] leading-relaxed text-[var(--mx-text)]">
             {error.message}
             {error.stack ? `\n\n${error.stack}` : ""}
           </pre>
           <button
             type="button"
             onClick={this.reset}
-            className="mt-4 rounded-[var(--mx-radius-sm)] border border-[var(--mx-border)] px-3 py-1 text-xs text-[#cbd5e1] transition-colors hover:bg-[var(--mx-hover-bg)]"
+            className="mt-4 rounded-[var(--mx-radius-sm)] border border-[var(--mx-border)] px-3 py-1 text-xs text-[var(--mx-text)] transition-colors hover:bg-[var(--mx-hover-bg)]"
           >
             重置
           </button>

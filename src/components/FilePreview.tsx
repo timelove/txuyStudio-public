@@ -69,7 +69,7 @@ export function FilePreview({ file, loading }: { file: OpenFile | null; loading:
   const { t } = useTranslation();
 
   return (
-    <div className="flex h-full min-h-0 min-w-0 flex-col bg-[#0b1020]">
+    <div className="flex h-full min-h-0 min-w-0 flex-col bg-[var(--mx-editor-bg)]">
       {/* 顶栏:文件名 + 大小(image/binary/error 态)。 */}
       {file && (
         <div className="flex shrink-0 items-center justify-between gap-2 border-b border-[var(--mx-border)] px-2 py-1 text-[10px] text-[var(--mx-muted)]">
@@ -92,7 +92,7 @@ export function FilePreview({ file, loading }: { file: OpenFile | null; loading:
           </div>
         )}
         {!loading && file?.kind === "error" && (
-          <div className="grid h-full place-items-center px-4 text-center text-[11px] text-[#f87171]">
+          <div className="grid h-full place-items-center px-4 text-center text-[11px] text-[var(--mx-danger)]">
             {t("preview.readError", { error: file.error ?? "" })}
           </div>
         )}

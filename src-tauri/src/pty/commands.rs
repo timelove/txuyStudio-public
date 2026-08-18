@@ -18,7 +18,8 @@ use super::{PtyOutput, PtyRegistry, PtySession};
 ///
 /// 用 `where`/`where.exe` 探测 PATH；两者都不可用时直接假定 `powershell.exe` 存在
 /// （Windows 自带）。pwsh 默认 UTF-8 输出，体验最佳。
-fn pick_shell() -> String {
+/// `pub(crate)`:claude/shell_run 模块 spawn 子进程时复用做 shell 探测。
+pub(crate) fn pick_shell() -> String {
     let candidates = ["pwsh.exe", "powershell.exe"];
     for candidate in candidates {
         if command_no_window("where.exe")
@@ -43,7 +44,10 @@ fn pick_shell() -> String {
 /// 控制台窗口。dev 下主程序是 `console` 子系统、子进程继承控制台，本标志无副作用。
 ///
 /// 仅 Windows 需要此标志；非 Windows 直接返回普通 `Command`（条件编译保证跨平台编译）。
-fn command_no_window(program: &str) -> std::process::Command {
+///
+/// `pub(crate)`:claude 模块 spawn claude.exe 时复用(同样需要 CREATE_NO_WINDOW,
+/// 见 `crate::claude::commands`)。
+pub(crate) fn command_no_window(program: &str) -> std::process::Command {
     let mut cmd = std::process::Command::new(program);
     #[cfg(windows)]
     {
@@ -53,6 +57,70 @@ fn command_no_window(program: &str) -> std::process::Command {
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
     cmd
+}
+
+/// PowerShell 片段:把注册表 Machine+User PATH 中当前进程没有的项**追加**到 `$env:Path`。
+///
+/// 背景:app 进程的 PATH 是启动快照,用户之后新装的 CLI(volta/pnpm 等)进不去,导致终端
+/// pane 与 `!` 命令找不到命令。本片段实时读注册表(`[Environment]::GetEnvironmentVariable`
+/// 直读注册表,非进程 PATH),把缺失项追加--不覆盖,保留 profile 动态加的项(如 fnm env)。
+///
+/// **括号陷阱**:`+` 优先级高于 `-join`,故 `';' + 数组 -join ';'` 会被解析为 `(';' + 数组)
+/// -join ';'`(字符串+数组→数组被空格拼成单串→join 失效→PATH 污染成空格分隔串,所有命令找不到)。
+/// 必须把 `(管道 -join ';')` 整体括号包住,让 -join 先于 + 求值。
+///
+/// `pub(crate)`:shell_run 模块 spawn `!` 命令时复用(见 `crate::shell_run::commands`)。
+pub(crate) const PATH_REFRESH_PS: &str = r#"$env:Path += ';' + (( ([Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [Environment]::GetEnvironmentVariable('Path','User')) -split ';' | Where-Object { $_ -and ($_ -notin ($env:Path -split ';')) } | Select-Object -Unique ) -join ';')"#;
+
+/// PowerShell 片段:注入 `pnpm` wrapper function,绕过 volta Rust shim 在 PTY 下的 bug。
+///
+/// 背景:volta 的 `pnpm.exe`(Rust shim)执行 pnpm 入口(`volta which pnpm` 返回无扩展名路径)
+/// 时,在 ConPTY 环境下 spawn 的 cmd 找不到 `pnpm` -> 报「'pnpm' 不是内部或外部命令」。外部
+/// PowerShell 正常,仅 txuyStudio pane 复现 -- volta 侧 bug,PATH/PATHEXT/VOLTA_HOME 全一致也救不了。
+///
+/// 方案:`Get-Command volta` 检测 volta 存在才定义 function(不破坏用 npm 等其他方式装 pnpm 的用户)。
+/// 首次调用 `volta which pnpm` 解析入口、加 `.cmd`、缓存到 `$script:__pnpm`,后续直跑包 wrapper
+/// (`pnpm.cmd` 调 node pnpm.cjs),绕过 volta Rust shim。解析失败兜底 `pnpm.exe`(走 shim,罕见)。
+/// 只影响 pane 内 `pnpm` 命令;`pnpm.exe` 仍走 volta shim(用户可显式调用原 shim)。
+pub(crate) const PNPM_WRAPPER_PS: &str = r#"if (Get-Command volta -ErrorAction SilentlyContinue) { function pnpm { if (-not $script:__pnpm) { $e = (volta which pnpm 2>$null); if ($e) { $c = "$e.cmd"; if (Test-Path $c) { $script:__pnpm = $c } } }; if ($script:__pnpm) { & $script:__pnpm @args } else { pnpm.exe @args } } }"#;
+
+/// 解析命令在 PATH 上的完整路径(Windows 走 `where.exe`,会按 PATHEXT 解析 `.cmd`/`.bat`)。
+///
+/// `std::process::Command::new(name)` 在 Windows 上**不解析 PATHEXT**——只搜 `name.exe`,
+/// 找不到 npm/volta 装的 `name.cmd` shim(rust-lang/rust#37519 历史性遗留)。claude 经 volta
+/// 安装就是 `claude.cmd` shim,直接 `Command::new("claude")` 会 `program not found`。
+///
+/// 本函数用 `where.exe`(自带 PATHEXT 解析)取候选行,优先返回 `.cmd`/`.bat` 结尾的可执行 shim
+/// 行,回退首行;都没找到返回 None(调用方退回原名让原生报错)。
+///
+/// `pub(crate)`:claude 模块 spawn claude.cmd shim 时复用(见 `crate::claude::commands`)。
+#[cfg(windows)]
+pub(crate) fn resolve_on_path(name: &str) -> Option<std::path::PathBuf> {
+    let out = command_no_window("where.exe").arg(name).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<&str> = stdout
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .collect();
+    if lines.is_empty() {
+        return None;
+    }
+    // 优先 .cmd/.bat(volta/npm shim 都是这俩),回退首行。
+    let pick = lines
+        .iter()
+        .find(|l| l.ends_with(".cmd") || l.ends_with(".bat"))
+        .or_else(|| lines.first())?;
+    Some(std::path::PathBuf::from(*pick))
+}
+
+/// 解析命令路径(非 Windows:Command::new 本就跑通 PATH,无需解析,返回 None)。
+#[cfg(not(windows))]
+pub(crate) fn resolve_on_path(_name: &str) -> Option<std::path::PathBuf> {
+    None
 }
 
 /// PowerShell prompt hook：每次 prompt 渲染前输出不可见 OSC 标记，前端 transport 用它记录实时 cwd。
@@ -116,7 +184,9 @@ fn ps_single_quote(path: &std::path::Path) -> String {
 /// 返回值会剥离 Windows canonicalize 产生的 `\\?\` verbatim 前缀：ConPTY/portable-pty
 /// 在设置子进程工作目录时对 verbatim 路径处理有问题（实测会导致 shell 启动后无输出），
 /// 因此喂给 `cmd.cwd()` 的必须是普通路径。
-fn validate_cwd(raw: &std::path::Path) -> Result<std::path::PathBuf, String> {
+///
+/// `pub(crate)`:claude 模块 spawn claude.exe 时复用做 cwd 校验。
+pub(crate) fn validate_cwd(raw: &std::path::Path) -> Result<std::path::PathBuf, String> {
     if !raw.is_absolute() {
         return Err(format!("not absolute: {}", raw.display()));
     }
@@ -140,7 +210,9 @@ fn validate_cwd(raw: &std::path::Path) -> Result<std::path::PathBuf, String> {
 
 /// 剥离 Windows `\\?\`（或 `\\?\UNC\`）verbatim 前缀，转回普通路径。
 /// canonicalize 在 Windows 上返回 verbatim 路径，ConPTY 设 cwd 时会出问题。
-fn strip_verbatim_prefix(p: &std::path::Path) -> std::path::PathBuf {
+///
+/// `pub(crate)`:被 `validate_cwd` 与 claude 模块复用。
+pub(crate) fn strip_verbatim_prefix(p: &std::path::Path) -> std::path::PathBuf {
     use std::path::Component;
     let mut comps = p.components();
     match comps.next() {
@@ -161,7 +233,9 @@ fn strip_verbatim_prefix(p: &std::path::Path) -> std::path::PathBuf {
 }
 
 /// 词法规范化：解析 `.`/`..` 段但不要求路径存在。`validate_cwd` 在 canonicalize 失败时的退守路径。
-fn lexical_normalize(p: &std::path::Path) -> std::path::PathBuf {
+///
+/// `pub(crate)`:被 `validate_cwd` 与 claude 模块复用。
+pub(crate) fn lexical_normalize(p: &std::path::Path) -> std::path::PathBuf {
     use std::path::Component::{self, CurDir, Normal, ParentDir, Prefix, RootDir};
     let mut out = std::path::PathBuf::new();
     for comp in p.components() {
@@ -202,6 +276,7 @@ pub async fn spawn_pty(
     cols: u16,
     cwd: Option<String>,
     shell_kind: Option<String>,
+    launch_override: Option<String>,
 ) -> Result<String, String> {
     let pty_system = native_pty_system();
     let pair = pty_system
@@ -225,7 +300,8 @@ pub async fn spawn_pty(
     //
     // 内置 omp 文件缺失(如开发期未下载)时退回裸 prompt hook + warn,不阻断启动。
     let kind = shell_kind.as_deref().unwrap_or("shell");
-    let launch = launch_command_for(kind);
+    // launch_override(前端传 "codex resume <id>" 等)优先; 无则回退静态 launch_command_for.
+    let launch: Option<String> = launch_override.or_else(|| launch_command_for(kind).map(|s| s.to_string()));
     let cwd_hook = powershell_prompt_cwd_hook();
     let omp_init = match bundled_omp_paths(&app) {
         Some((exe, theme)) => {
@@ -247,12 +323,17 @@ pub async fn spawn_pty(
     // 拼接 -Command 脚本:omp init? ; cwd hook ; (& launcher)?
     // 各段均为完整语句,用 ` ; ` 连接。AI CLI 用 `&` 显式调用避免解析歧义(与历史行为一致)。
     let omp_init_str = omp_init.as_deref();
-    let mut segments: Vec<String> = Vec::with_capacity(3);
+    // 首段:补全最新系统 PATH(注册表 Machine+User 中当前进程没有的项追加)。
+    // app PATH 是启动快照,中途装的 CLI 进不去;放首段确保后续 omp/launcher 能用到新装的命令。
+    let mut segments: Vec<String> = Vec::with_capacity(5);
+    segments.push(PATH_REFRESH_PS.to_string());
+    // pnpm wrapper:绕过 volta Rust shim 在 PTY 下的 bug(见 PNPM_WRAPPER_PS 注释)。
+    segments.push(PNPM_WRAPPER_PS.to_string());
     if let Some(omp) = omp_init_str {
         segments.push(omp.to_string());
     }
     segments.push(cwd_hook.to_string());
-    if let Some(launcher) = launch {
+    if let Some(launcher) = &launch {
         segments.push(format!("& {launcher}"));
     }
     let command_script = segments.join(" ; ");
