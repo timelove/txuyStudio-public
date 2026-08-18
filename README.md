@@ -18,7 +18,25 @@ txuyStudio is a desktop workbench (built with Tauri + Rust + React + xterm.js) f
 
 > **Status:** MVP — real PTY with per-project PTY isolation, multi-project workspaces, detachable independent windows, Windows-Terminal-style pane splitting with per-pane multi-tab, bundled oh-my-posh + Nerd Font, TUI tool windows (lazygit/yazi/fresh) with install prompts, WT-style shortcuts, and persisted layouts are all implemented. Destructive-command protection and one-click task launching are on the roadmap.
 
-> Screenshots / demo GIFs are not yet included. To see it live: clone → `bun install` → `bun run tauri dev`.
+> To see it live: clone → `bun install` → `bun run tauri dev`.
+
+### Screenshots
+
+<p align="center">
+  <img src="docs/assets/txuyStudio.png" alt="txuyStudio main window (midnight theme)" width="880"><br>
+  <sub>Multi-project workspace with Windows-Terminal-style pane splitting, per-pane tabs, and a Claude conversation pane.</sub>
+</p>
+
+<p align="center">
+  <img src="docs/assets/txuyStudio-codex.png" alt="Codex self-rendered conversation pane" width="880"><br>
+  <sub>Self-rendered Codex pane — inline message stream, tool-call cards, and a status bar with switchable sandbox.</sub>
+</p>
+
+<p align="center">
+  <img src="docs/assets/txuyStudio_select_pane.png" alt="Pane selection / focus" width="620"> &nbsp;&nbsp;
+  <img src="docs/assets/txuyStudio_one_dark.png" alt="One Dark theme" width="620"><br>
+  <sub>Left: pane focus / splitting. Right: built-in One Dark theme (terminal ANSI + UI surface).</sub>
+</p>
 
 ### Highlights
 
@@ -128,7 +146,25 @@ txuyStudio 是一个桌面工作台(基于 Tauri + Rust + React + xterm.js),用�
 
 > **当前阶段:**MVP——真实 PTY(按项目隔离)、多项目工作区、可弹出独立窗口、Windows Terminal 式分屏(每 pane 多 tab)、内置 oh-my-posh + Nerd Font、TUI 工具窗口(lazygit/yazi/fresh,未安装则提示)、WT 式快捷键、布局持久化均已实现。危险命令保护、一键启动任务在路线图上。
 
-> 暂未附截图 / 演示 GIF。本地体验:`git clone` → `bun install` → `bun run tauri dev`。
+> 本地体验:`git clone` → `bun install` → `bun run tauri dev`。
+
+### 截图预览
+
+<p align="center">
+  <img src="docs/assets/txuyStudio.png" alt="txuyStudio 主界面(midnight 主题)" width="880"><br>
+  <sub>多项目工作区 + Windows Terminal 式分屏 + 每 pane 多 tab + Claude 自渲染对话面板。</sub>
+</p>
+
+<p align="center">
+  <img src="docs/assets/txuyStudio-codex.png" alt="Codex 自渲染对话面板" width="880"><br>
+  <sub>Codex 自渲染面板 —— 行内消息流、工具卡片、可切换 sandbox 的状态栏。</sub>
+</p>
+
+<p align="center">
+  <img src="docs/assets/txuyStudio_select_pane.png" alt="分屏 / 焦点切换" width="620"> &nbsp;&nbsp;
+  <img src="docs/assets/txuyStudio_one_dark.png" alt="One Dark 主题" width="620"><br>
+  <sub>左:pane 焦点 / 分屏。右:内置 One Dark 主题(终端 ANSI + 界面色板)。</sub>
+</p>
 
 ### 核心特性
 
