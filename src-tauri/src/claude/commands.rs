@@ -22,7 +22,8 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use super::{
-    ClaudeEvent, ClaudeEventPayload, ClaudeRegistry, ClaudeSession, ClaudeStatus, SessionConfig,
+    BackgroundTaskInfo, ClaudeEvent, ClaudeEventPayload, ClaudeRegistry, ClaudeSession,
+    ClaudeStatus, SessionConfig,
 };
 use crate::pty::commands::{command_no_window, resolve_on_path, validate_cwd};
 use crate::state::AppState;
@@ -805,6 +806,71 @@ fn run_read_loop(app: AppHandle, project_id: String, tab_id: String, stdout: std
                             project_id: project_id.clone(),
                             tab_id: tab_id.clone(),
                             payload: ClaudeEventPayload::CompactBoundary { metadata },
+                        },
+                    );
+                } else if subtype == "background_tasks_changed" {
+                    // 后台任务列表权威快照(任务启动/完成/变化时推,含 result 之后的空闲期)。
+                    // 前端据此显示「后台任务 ×N」,快照清空即回 idle。字段缺失容错:无 task_id 的项跳过。
+                    let tasks: Vec<BackgroundTaskInfo> = v
+                        .get("tasks")
+                        .and_then(|t| t.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|t| {
+                                    let task_id = t.get("task_id").and_then(|s| s.as_str())?.to_string();
+                                    Some(BackgroundTaskInfo {
+                                        task_id,
+                                        task_type: t
+                                            .get("task_type")
+                                            .and_then(|s| s.as_str())
+                                            .unwrap_or("")
+                                            .to_string(),
+                                        description: t
+                                            .get("description")
+                                            .and_then(|s| s.as_str())
+                                            .unwrap_or("")
+                                            .to_string(),
+                                    })
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let _ = app.emit(
+                        "claude-event",
+                        ClaudeEvent {
+                            project_id: project_id.clone(),
+                            tab_id: tab_id.clone(),
+                            payload: ClaudeEventPayload::BackgroundTasksChanged { tasks },
+                        },
+                    );
+                } else if subtype == "task_notification" {
+                    // 后台任务完成/失败通知(带人读 summary),前端在消息流插入轻量完成提示。
+                    let _ = app.emit(
+                        "claude-event",
+                        ClaudeEvent {
+                            project_id: project_id.clone(),
+                            tab_id: tab_id.clone(),
+                            payload: ClaudeEventPayload::TaskNotification {
+                                task_id: v
+                                    .get("task_id")
+                                    .and_then(|s| s.as_str())
+                                    .unwrap_or("")
+                                    .to_string(),
+                                tool_use_id: v
+                                    .get("tool_use_id")
+                                    .and_then(|s| s.as_str())
+                                    .map(|s| s.to_string()),
+                                status: v
+                                    .get("status")
+                                    .and_then(|s| s.as_str())
+                                    .unwrap_or("")
+                                    .to_string(),
+                                summary: v
+                                    .get("summary")
+                                    .and_then(|s| s.as_str())
+                                    .unwrap_or("")
+                                    .to_string(),
+                            },
                         },
                     );
                 }

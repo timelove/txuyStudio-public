@@ -98,7 +98,11 @@ pub struct ClaudeEvent {
 /// `rename_all = "snake_case"`:kind 值用 snake_case(init/assistant/user/thinking/result/terminated/
 /// compact_status/compact_boundary)。
 #[derive(Clone, serde::Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+// `tag="kind"` + 变体名 snake_case(kind 值);`rename_all_fields="camelCase"`:变体字段 camelCase
+// ——前端 TS union 按 camelCase 读(durationMs/claudeSessionId/…)。此前漏配 rename_all_fields,
+// 字段发出 snake_case,前端全部读空走兜底(durationMs=0/contextWindow 恒 infer 兜底/
+// slashCommands 空数组/claudeSessionId 恒空),由序列化回归测试锁定。
+#[serde(tag = "kind", rename_all = "snake_case", rename_all_fields = "camelCase")]
 pub enum ClaudeEventPayload {
     /// `system subtype=init`:首次拿到 claude session_id(后端据此回填 registry)。
     /// `slash_commands`:claude 内置斜杠命令(如 /clear /compact /cost …),透传给前端做
@@ -152,6 +156,62 @@ pub enum ClaudeEventPayload {
     /// `cumulative_dropped_tokens`/`duration_ms`/`preserved_segment`/`preserved_messages`),
     /// 前端据此渲染「已压缩 pre→post tokens」分隔线。后端不解析内部结构(透传 Value)。
     CompactBoundary { metadata: serde_json::Value },
+    /// `system subtype=background_tasks_changed`:后台任务列表**权威快照**(任务启动/完成/列表
+    /// 变化时推,含 `result` 之后的空闲期)。tasks = 当前运行中的全部后台任务(local_bash/
+    /// subagent 等),前端据此显示「后台任务 ×N」状态,快照清空即回 idle。
+    BackgroundTasksChanged { tasks: Vec<BackgroundTaskInfo> },
+    /// `system subtype=task_notification`:后台任务完成/失败通知(带人读 summary,如
+    /// `Background command "…" completed (exit code 0)`),前端在消息流插入轻量完成提示。
+    TaskNotification {
+        task_id: String,
+        tool_use_id: Option<String>,
+        status: String,
+        summary: String,
+    },
+}
+
+/// 后台任务信息(`background_tasks_changed.tasks[]` 项,camelCase 对齐前端)。
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackgroundTaskInfo {
+    pub task_id: String,
+    /// claude 任务类型(实测 "local_bash";subagent 等其他类型原样透传)。
+    pub task_type: String,
+    /// 人读描述(assistant 发起工具调用时的 description 字段)。
+    pub description: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 回归:payload 序列化约定——`kind` 标签 snake_case、变体字段 camelCase(与前端 TS union
+    /// `ClaudeEventPayload` 的 camelCase 读取对齐)。BackgroundTaskInfo 亦 camelCase。
+    #[test]
+    fn payload_serializes_snake_kind_camel_fields() {
+        let p = ClaudeEventPayload::TaskNotification {
+            task_id: "t1".into(),
+            tool_use_id: Some("u1".into()),
+            status: "completed".into(),
+            summary: "done".into(),
+        };
+        let s = serde_json::to_string(&p).unwrap();
+        assert!(s.contains(r#""kind":"task_notification""#), "kind tag snake_case: {s}");
+        assert!(s.contains(r#""taskId":"t1""#), "variant fields camelCase: {s}");
+        assert!(s.contains(r#""toolUseId":"u1""#), "variant fields camelCase: {s}");
+
+        let q = ClaudeEventPayload::BackgroundTasksChanged {
+            tasks: vec![BackgroundTaskInfo {
+                task_id: "b1".into(),
+                task_type: "local_bash".into(),
+                description: "sleep".into(),
+            }],
+        };
+        let s2 = serde_json::to_string(&q).unwrap();
+        assert!(s2.contains(r#""kind":"background_tasks_changed""#), "kind tag: {s2}");
+        assert!(s2.contains(r#""taskId":"b1""#), "task info camelCase: {s2}");
+        assert!(s2.contains(r#""taskType":"local_bash""#), "task info camelCase: {s2}");
+    }
 }
 
 /// 全局 claude 会话注册表,按项目分桶:`projectId → (tabId → ClaudeSession)`。

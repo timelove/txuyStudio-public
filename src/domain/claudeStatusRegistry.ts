@@ -62,14 +62,15 @@ class ClaudeStatusRegistry {
     const e = this.entries.get(key);
     if (!e) return;
     const s = e.summary;
-    // kind/active 变化 OR ctxPct/model/effort 变化才 invalidate
-    // (否则 ctx% / effort 实时值不刷新 StatusBar)。
+    // kind/active 变化 OR ctxPct/model/effort/bgTasks 变化才 invalidate
+    // (否则 ctx% / effort 实时值 / 后台任务计数不刷新 StatusBar)。
     if (
       s.kind === summary.kind &&
       s.active === summary.active &&
       s.ctxPct === summary.ctxPct &&
       s.model === summary.model &&
-      s.effort === summary.effort
+      s.effort === summary.effort &&
+      s.bgTasks === summary.bgTasks
     ) return;
     this.entries.set(key, { ...e, summary });
     this.invalidate();

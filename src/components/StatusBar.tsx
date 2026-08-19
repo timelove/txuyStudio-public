@@ -113,20 +113,21 @@ export function StatusBar({ focusedProject, gitBranch, claudeStatuses, codexStat
   const path = focusedProject?.rootPath ?? "";
   const entry = HEALTH_TIPS[tipIdx];
 
-  // AI 会话计数:按语义态分组(running/retrying/waiting/error/idle)。claude + codex 合并
+  // AI 会话计数:按语义态分组(running/retrying/waiting/error/bg/idle)。claude + codex 合并
   // (codex 的 kind 是 ClaudeSessionKind 子集)。只显活跃态;全 idle 时不显(避免噪声)。
   // 点击某态药丸 -> 跳该态第一个 tab。
   const allAiStatuses = [...claudeStatuses, ...(codexStatuses ?? [])];
-  const aiCounts: Record<ClaudeSessionKind, number> = { error: 0, retrying: 0, waiting: 0, running: 0, idle: 0 };
+  const aiCounts: Record<ClaudeSessionKind, number> = { error: 0, retrying: 0, waiting: 0, running: 0, bg: 0, idle: 0 };
   for (const e of allAiStatuses) aiCounts[e.summary.kind]++;
-  // 活跃态药丸列表(显示顺序:error > retrying > waiting > running;idle 不显)。每态:label/颜色/计数。
+  // 活跃态药丸列表(显示顺序:error > retrying > waiting > running > bg;idle 不显)。每态:label/颜色/计数。
   const aiPills: { kind: ClaudeSessionKind; label: string; color: string }[] = [
     { kind: "error", label: t("statusbar.aiError", { n: aiCounts.error }), color: "#f87171" },
     { kind: "retrying", label: t("statusbar.aiRetrying", { n: aiCounts.retrying }), color: "#fb923c" },
     { kind: "waiting", label: t("statusbar.aiWaiting", { n: aiCounts.waiting }), color: "#a78bfa" },
     { kind: "running", label: t("statusbar.aiRunning", { n: aiCounts.running }), color: "#22d3ee" },
+    { kind: "bg", label: t("statusbar.aiBg", { n: aiCounts.bg }), color: "#fbbf24" },
   ];
-  const aiActive = aiCounts.running + aiCounts.retrying + aiCounts.waiting + aiCounts.error;
+  const aiActive = aiCounts.running + aiCounts.retrying + aiCounts.waiting + aiCounts.error + aiCounts.bg;
 
   return (
     <>
