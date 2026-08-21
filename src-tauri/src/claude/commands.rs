@@ -22,7 +22,8 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use super::{
-    ClaudeEvent, ClaudeEventPayload, ClaudeRegistry, ClaudeSession, ClaudeStatus, SessionConfig,
+    BackgroundTaskInfo, ClaudeEvent, ClaudeEventPayload, ClaudeRegistry, ClaudeSession,
+    ClaudeStatus, SessionConfig,
 };
 use crate::pty::commands::{command_no_window, resolve_on_path, validate_cwd};
 use crate::state::AppState;
@@ -31,6 +32,53 @@ use crate::state::AppState;
 const THINKING_BATCH_CHARS: usize = 200;
 /// thinking_tokens flush 间隔:即使没到阈值,这么久也 flush 一次,让 UI 感知「在思考」。
 const THINKING_FLUSH_INTERVAL: Duration = Duration::from_millis(50);
+
+/// 定位 claude 可执行文件(优先原生安装包)。
+///
+/// 背景:官方对 npm 安装方式随时可能下线,原生安装包(Windows `irm https://claude.ai/install.ps1 | iex`)
+/// 是最可靠渠道:产物是独立 .exe,无 node/npm 依赖,也无 `.cmd` shim 在长进程 stdin 管道上的
+/// 传递问题(见 `start_claude_session` 的 Windows .cmd 包装注释)。原生安装默认落
+/// `%USERPROFILE%\.local\bin\claude.exe`,安装器虽会把自己加入 PATH,但 PATH 顺序可能被
+/// npm/volta 等其他安装方式抢占,故**显式优先探测**原生位置。
+///
+/// 优先级:
+/// 1. `~/.local/bin/claude[.exe]` -- 原生安装包默认位置;
+/// 2. PATH 解析(`where.exe`,volta/npm 的 .cmd shim 或用户手动放置的 .exe);
+/// 3. `~/.claude/local/claude[.exe|.cmd|.bat]` -- 旧版 `claude migrate-installer` 迁移位置;
+/// 4. 非 Windows 兜底原名 "claude"(`Command::new` 本就搜 PATH);Windows 全找不到返回 None
+///    (调用方发友好安装提示,不让 spawn 报生硬的 OS 错误)。
+///
+/// `pub(crate)`:`system::commands::check_commands_installed` 探测 claude 是否安装时复用,
+/// 保证「探测」与「spawn」用同一解析逻辑(探测说装了 spawn 就一定能找到)。
+pub(crate) fn resolve_claude_program() -> Option<String> {
+    let home = dirs::home_dir();
+    let exe = if cfg!(windows) { "claude.exe" } else { "claude" };
+    // 1) 原生安装包默认位置。
+    if let Some(home) = &home {
+        let native = home.join(".local").join("bin").join(exe);
+        if native.is_file() {
+            return Some(native.to_string_lossy().into_owned());
+        }
+    }
+    // 2) PATH(where.exe;volta/npm shim 等)。
+    if let Some(p) = resolve_on_path("claude") {
+        return Some(p.to_string_lossy().into_owned());
+    }
+    // 3) 旧版 migrate-installer 迁移位置(npm 时代可能留下 .cmd/.bat shim)。
+    if let Some(home) = &home {
+        for name in [exe, "claude.cmd", "claude.bat"] {
+            let p = home.join(".claude").join("local").join(name);
+            if p.is_file() {
+                return Some(p.to_string_lossy().into_owned());
+            }
+        }
+    }
+    // 4) 非 Windows:Command::new 本就搜 PATH,兜底原名让 spawn 自行解析(与旧行为一致)。
+    if !cfg!(windows) {
+        return Some("claude".to_string());
+    }
+    None
+}
 
 /// 启动/重启 claude 长进程(幂等「确保一个新进程在跑」)。
 ///
@@ -184,9 +232,29 @@ pub async fn start_claude_session(
     //    ("claude.cmd")` spawn 时,批处理层的 stdin pipe 重定向可能丢失 → claude 收到 stdin EOF
     //    立刻退出(实测:Rust 直接 spawn .cmd 长进程立刻 EOF;node `spawn("cmd",["/c",...])` 稳定)。
     //    故 Windows 上用 `cmd.exe /c claude.cmd <args>` 包装,与诊断脚本一致,保证 stdin pipe 传递。
-    let claude_program = resolve_on_path("claude")
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "claude".to_string());
+    let claude_program = match resolve_claude_program() {
+        Some(p) => p,
+        None => {
+            // Windows 上原生位置/PATH/迁移位置均未找到:发友好 Terminated(带安装命令)替代
+            // spawn 的生硬 OS 错误,前端 claudeMissing 卡片与 terminated 红字都能给出可操作提示。
+            let reason = "claude executable not found (tried ~/.local/bin, PATH, ~/.claude/local); \
+                          install the native build: irm https://claude.ai/install.ps1 | iex"
+                .to_string();
+            log::error!("start_claude_session: {reason}");
+            let _ = set_session_status(&app, &project_id, &tab_id, ClaudeStatus::Error);
+            let _ = app.emit(
+                "claude-event",
+                ClaudeEvent {
+                    project_id: project_id.clone(),
+                    tab_id: tab_id.clone(),
+                    payload: ClaudeEventPayload::Terminated {
+                        reason: reason.clone(),
+                    },
+                },
+            );
+            return Err(reason);
+        }
+    };
     log::info!("start_claude_session: resolved claude program = {claude_program}");
     #[cfg(windows)]
     let mut cmd = {
@@ -322,6 +390,17 @@ pub async fn start_claude_session(
 ///
 /// 持锁不跨 .await:status/stdin 锁短作用域同步取放;`write_all` 在 spawn_blocking 内,async
 /// 侧只 await JoinHandle。
+/// `send_claude_message` 的 tool_result 载荷(前端批准/拒绝被拒工具调用时原地回传,见
+/// `approveToolRun`):作为 user 消息的 tool_result block 写 stdin,claude 像收到正常工具
+/// 结果一样续跑(claude cli 交互批准的同语义),无需发一条对话消息让 claude 重调。
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolResultPayload {
+    pub tool_use_id: String,
+    pub content: String,
+    pub is_error: bool,
+}
+
 #[tauri::command]
 pub async fn send_claude_message(
     app: AppHandle,
@@ -329,6 +408,7 @@ pub async fn send_claude_message(
     project_id: String,
     tab_id: String,
     prompt: String,
+    tool_result: Option<ToolResultPayload>,
 ) -> Result<(), String> {
     // 1) 短锁:检查 busy + take stdin + 置 Running(即时 local command 如 /clear 除外,见下方
     //    `is_instant_local_command`:不置 Running,避免 /clear 不发 result 时 busy 死锁)。
@@ -361,11 +441,24 @@ pub async fn send_claude_message(
         session.stdin.lock().ok().and_then(|mut g| g.take())
     };
 
-    // 2) 构造 stream-json user 消息行(实测格式)。
-    let line = serde_json::json!({
-        "type": "user",
-        "message": { "role": "user", "content": [{ "type": "text", "text": &prompt }] }
-    })
+    // 2) 构造 stream-json user 消息行(实测格式):普通 prompt -> text block;tool_result ->
+    //    tool_result block(批准/拒绝被拒工具的原地回传,tool_use_id 配对)。
+    let line = if let Some(tr) = &tool_result {
+        serde_json::json!({
+            "type": "user",
+            "message": { "role": "user", "content": [{
+                "type": "tool_result",
+                "tool_use_id": &tr.tool_use_id,
+                "content": &tr.content,
+                "is_error": tr.is_error,
+            }]}
+        })
+    } else {
+        serde_json::json!({
+            "type": "user",
+            "message": { "role": "user", "content": [{ "type": "text", "text": &prompt }] }
+        })
+    }
     .to_string()
         + "\n";
 
@@ -807,6 +900,71 @@ fn run_read_loop(app: AppHandle, project_id: String, tab_id: String, stdout: std
                             payload: ClaudeEventPayload::CompactBoundary { metadata },
                         },
                     );
+                } else if subtype == "background_tasks_changed" {
+                    // 后台任务列表权威快照(任务启动/完成/变化时推,含 result 之后的空闲期)。
+                    // 前端据此显示「后台任务 ×N」,快照清空即回 idle。字段缺失容错:无 task_id 的项跳过。
+                    let tasks: Vec<BackgroundTaskInfo> = v
+                        .get("tasks")
+                        .and_then(|t| t.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|t| {
+                                    let task_id = t.get("task_id").and_then(|s| s.as_str())?.to_string();
+                                    Some(BackgroundTaskInfo {
+                                        task_id,
+                                        task_type: t
+                                            .get("task_type")
+                                            .and_then(|s| s.as_str())
+                                            .unwrap_or("")
+                                            .to_string(),
+                                        description: t
+                                            .get("description")
+                                            .and_then(|s| s.as_str())
+                                            .unwrap_or("")
+                                            .to_string(),
+                                    })
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let _ = app.emit(
+                        "claude-event",
+                        ClaudeEvent {
+                            project_id: project_id.clone(),
+                            tab_id: tab_id.clone(),
+                            payload: ClaudeEventPayload::BackgroundTasksChanged { tasks },
+                        },
+                    );
+                } else if subtype == "task_notification" {
+                    // 后台任务完成/失败通知(带人读 summary),前端在消息流插入轻量完成提示。
+                    let _ = app.emit(
+                        "claude-event",
+                        ClaudeEvent {
+                            project_id: project_id.clone(),
+                            tab_id: tab_id.clone(),
+                            payload: ClaudeEventPayload::TaskNotification {
+                                task_id: v
+                                    .get("task_id")
+                                    .and_then(|s| s.as_str())
+                                    .unwrap_or("")
+                                    .to_string(),
+                                tool_use_id: v
+                                    .get("tool_use_id")
+                                    .and_then(|s| s.as_str())
+                                    .map(|s| s.to_string()),
+                                status: v
+                                    .get("status")
+                                    .and_then(|s| s.as_str())
+                                    .unwrap_or("")
+                                    .to_string(),
+                                summary: v
+                                    .get("summary")
+                                    .and_then(|s| s.as_str())
+                                    .unwrap_or("")
+                                    .to_string(),
+                            },
+                        },
+                    );
                 }
             }
             "assistant" => {
@@ -1037,4 +1195,229 @@ fn take_killed_flag(app: &AppHandle, project_id: &str, tab_id: &str) -> bool {
         }
     }
     false
+}
+
+/// 历史回填事件上限:大会话(数千行)只回填最近部分,防一次性注入巨量消息卡 UI。
+const HISTORY_MAX_EVENTS: usize = 400;
+
+/// `read_claude_history_events` 返回:events(最多上限条,取**末尾**段=最近上下文)+ total(全会话
+/// 命中事件数,total > events.len 时前端提示「仅回填最近部分」)。camelCase 对齐前端。
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaudeHistoryEvents {
+    pub events: Vec<ClaudeEventPayload>,
+    pub total: usize,
+}
+
+/// 读某 claude 历史会话 jsonl,解析成与实时 `claude-event` **同构**的事件序列(恢复会话历史回填)。
+///
+/// 背景:glm 代理的 `claude --resume` 不重放历史(官方版会推 isReplay 重放事件,实测 glm 2.1.235
+/// 只推 init+本轮新事件),前端恢复后消息流空、零视觉反馈。本命令读
+/// `~/.claude/projects/**/<sessionId>.jsonl`(session id 全局唯一,递归定位不依赖 cwd),
+/// 逐行取 `type=="user"/"assistant"` 且 `isSidechain!=true` 的行包成 `ClaudeEventPayload::User/Assistant`
+/// (message 透传,前端 applyEvent 直接归并渲染,thinking/工具卡片结构完整);其余行
+/// (queue-operation/attachment/last-prompt/mode/system 等)跳过。spawn_blocking 包裹(逐行 IO)。
+///
+/// 文件不存在 -> `Err`(前端 notice 提示「历史回填失败」但不阻断恢复--claude 内部上下文仍续接)。
+#[tauri::command]
+pub async fn read_claude_history_events(session_id: String) -> Result<ClaudeHistoryEvents, String> {
+    tokio::task::spawn_blocking(move || {
+        let home = dirs::home_dir().ok_or_else(|| "home dir not available".to_string())?;
+        let root = home.join(".claude").join("projects");
+        // 递归找 stem 恰等 session_id 的 jsonl(全等比对,防 uuid 前缀误命中)。
+        let want = format!("{session_id}.jsonl");
+        let mut found: Option<std::path::PathBuf> = None;
+        crate::system::commands::walk_jsonl(&root, &mut |p| {
+            if found.is_none() && p.file_name().map(|s| s.to_str() == Some(want.as_str())).unwrap_or(false) {
+                found = Some(p.to_path_buf());
+            }
+        });
+        let file = found.ok_or_else(|| format!("claude session file not found: {session_id}"))?;
+        let f = std::fs::File::open(&file).map_err(|e| format!("open {}: {e}", file.display()))?;
+        let mut all: Vec<ClaudeEventPayload> = Vec::new();
+        for line in std::io::BufReader::new(f).lines() {
+            let line = match line {
+                Ok(l) => l,
+                Err(_) => continue,
+            };
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+                continue;
+            };
+            // sidechain 子链(subagent)不混入主对话历史。
+            if v.get("isSidechain").and_then(|b| b.as_bool()).unwrap_or(false) {
+                continue;
+            }
+            let ty = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
+            let message = match v.get("message") {
+                Some(m) if !m.is_null() => m.clone(),
+                _ => continue,
+            };
+            let payload = match ty {
+                "user" => ClaudeEventPayload::User { message },
+                "assistant" => ClaudeEventPayload::Assistant { message },
+                _ => continue,
+            };
+            all.push(payload);
+        }
+        let total = all.len();
+        if total > HISTORY_MAX_EVENTS {
+            all = all.split_off(total - HISTORY_MAX_EVENTS);
+        }
+        Ok(ClaudeHistoryEvents { events: all, total })
+    })
+    .await
+    .map_err(|e| format!("join history read task: {e}"))?
+}
+
+/// 本地工具执行输出上限(字符):超长截尾保头(claude Bash 工具同思路,防巨输出打爆 IPC/UI)。
+const LOCAL_TOOL_OUTPUT_MAX: usize = 100 * 1024;
+
+/// `exec_claude_tool_local` 的返回:output(拼好的工具输出文本)+ is_error(执行框架层面失败,
+/// 如 old_string 不匹配/文件不可写;Bash exit 非 0 不算 error,exit code 拼在 output 尾,claude
+/// 看到失败输出自行调整)。camelCase 对齐前端。
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalToolResult {
+    pub output: String,
+    pub is_error: bool,
+}
+
+/// 本地执行一次被拒(需批准)的 claude 工具调用(用户点「批准」后由前端调,结果经
+/// `send_claude_message` 的 tool_result 原地回传给 claude 续跑--claude cli 交互批准的同语义,
+/// 不发对话消息)。支持 Bash(PowerShell 执行)/Edit(唯一匹配替换)/Write;未知工具 `Err`
+/// (前端回退旧「发消息重试」方案)。同步 IO 用 `spawn_blocking` 不占 async worker;
+/// 无硬超时(与 `!` 命令同策略:用户批准的命令,久跑久等)。
+#[tauri::command]
+pub async fn exec_claude_tool_local(
+    tool: String,
+    input: serde_json::Value,
+    cwd: Option<String>,
+) -> Result<LocalToolResult, String> {
+    tokio::task::spawn_blocking(move || match tool.as_str() {
+        "Bash" | "PowerShell" | "Shell" => exec_local_bash(&input, cwd.as_deref()),
+        "Edit" | "Replace" => exec_local_edit(&input, cwd.as_deref()),
+        "Write" => exec_local_write(&input, cwd.as_deref()),
+        _ => Err(format!("tool not locally executable: {tool}")),
+    })
+    .await
+    .map_err(|e| format!("join local tool exec: {e}"))?
+}
+
+/// Bash 工具本地执行:claude 的 Bash 是 POSIX 语义,Windows 下用 PowerShell 跑(绝大多数常用
+/// 命令兼容;不兼容命令 exit 非 0,输出原样回传,claude 看到错误自行调整)。复用 `command_no_window`
+/// (CREATE_NO_WINDOW 防弹窗);stdout+stderr 合并,尾拼 exit code(claude Bash 工具惯例),超长截断。
+fn exec_local_bash(input: &serde_json::Value, cwd: Option<&str>) -> Result<LocalToolResult, String> {
+    let command = input
+        .get("command")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "Bash input missing `command`".to_string())?;
+    let mut cmd = command_no_window("powershell");
+    // UTF-8 输出编码前置:防中文输出按 GBK 解码成乱码。
+    cmd.args([
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        &format!("[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; {command}"),
+    ])
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
+    if let Some(dir) = cwd {
+        cmd.current_dir(dir);
+    }
+    let out = cmd.output().map_err(|e| format!("spawn powershell: {e}"))?;
+    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    if !stderr.trim().is_empty() {
+        text.push_str("\n[stderr]\n");
+        text.push_str(&stderr);
+    }
+    text.push_str(&format!("\n[exit code: {}]", out.status.code().unwrap_or(-1)));
+    if text.chars().count() > LOCAL_TOOL_OUTPUT_MAX {
+        let truncated: String = text.chars().take(LOCAL_TOOL_OUTPUT_MAX).collect();
+        text = truncated + "\n[output truncated by txuyStudio]";
+    }
+    Ok(LocalToolResult { output: text, is_error: false })
+}
+
+/// Edit 工具本地执行:old_string 唯一匹配替换(replace_all=true 全替换,Edit 工具语义);
+/// 不匹配/多匹配 -> is_error(claude 收到错误自行调整,与官方 Edit 工具报错语义一致)。
+fn exec_local_edit(input: &serde_json::Value, cwd: Option<&str>) -> Result<LocalToolResult, String> {
+    let path = resolve_tool_path(input, cwd)?;
+    let old = input
+        .get("old_string")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "Edit input missing `old_string`".to_string())?;
+    let new = input
+        .get("new_string")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "Edit input missing `new_string`".to_string())?;
+    let replace_all = input
+        .get("replace_all")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let content = std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    let count = content.matches(old).count();
+    if count == 0 {
+        return Ok(LocalToolResult {
+            output: format!("old_string not found in {}", path.display()),
+            is_error: true,
+        });
+    }
+    if count > 1 && !replace_all {
+        return Ok(LocalToolResult {
+            output: format!("old_string not unique ({count} matches) in {}", path.display()),
+            is_error: true,
+        });
+    }
+    let replaced = if replace_all {
+        content.replace(old, new)
+    } else {
+        content.replacen(old, new, 1)
+    };
+    std::fs::write(&path, replaced).map_err(|e| format!("write {}: {e}", path.display()))?;
+    Ok(LocalToolResult {
+        output: format!("edited {}", path.display()),
+        is_error: false,
+    })
+}
+
+/// Write 工具本地执行:整文件写入。
+fn exec_local_write(input: &serde_json::Value, cwd: Option<&str>) -> Result<LocalToolResult, String> {
+    let path = resolve_tool_path(input, cwd)?;
+    let content = input
+        .get("content")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "Write input missing `content`".to_string())?;
+    std::fs::write(&path, content).map_err(|e| format!("write {}: {e}", path.display()))?;
+    Ok(LocalToolResult {
+        output: format!("wrote {}", path.display()),
+        is_error: false,
+    })
+}
+
+/// 解析工具 input 的 file_path(绝对;相对则 join cwd)。校验:词法 `..` 拒绝(纵深防御,
+/// 与 filetree/list_ai_cli_sessions 同思路)。用户已点批准,不做白名单限制。
+fn resolve_tool_path(
+    input: &serde_json::Value,
+    cwd: Option<&str>,
+) -> Result<std::path::PathBuf, String> {
+    let raw = input
+        .get("file_path")
+        .or_else(|| input.get("path"))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "tool input missing `file_path`".to_string())?;
+    let path = if std::path::Path::new(raw).is_absolute() {
+        std::path::PathBuf::from(raw)
+    } else {
+        let base = cwd.ok_or_else(|| "relative file_path but no cwd".to_string())?;
+        std::path::Path::new(base).join(raw)
+    };
+    if path
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err(format!("path escapes via ..: {raw}"));
+    }
+    Ok(path)
 }

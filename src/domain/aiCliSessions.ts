@@ -179,12 +179,12 @@ export function mostRecentSessionInCwd(
 }
 
 /**
- * provider → 续接(restore)某历史会话的 CLI 命令(供会话列表详情展示 `claude --resume <id>` 文本,用户手动复制粘贴)。
- * - claude: `claude -r <sessionId>`(--resume 短写)。
+ * provider → 续接(restore)某历史会话的 CLI 命令(供会话列表详情展示文本,用户手动复制粘贴)。
+ * - claude: `claude resume <sessionId>`。
  * - codex: `codex resume <sessionId>`。
  */
 export function resumeCommandFor(providerId: AiCliKind, sessionId: string): string {
-  return providerId === "codex" ? `codex resume ${sessionId}` : `claude -r ${sessionId}`;
+  return `${providerId} resume ${sessionId}`;
 }
 
 /**

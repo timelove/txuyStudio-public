@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 import { useSettings } from "../settings/SettingsProvider";
 import type { ProjectId, ProjectSnapshot } from "../domain/projects";
 import type { ShellKind, PaneNode, PaneLeaf, PaneRef, SplitDirection, PaneTab } from "../domain/paneTree";
+import type { ProjectRecord } from "../domain/appState";
 import {
   addTab,
   closePane,
@@ -50,6 +51,16 @@ type AppShellProps = {
   singleProjectMode?: boolean;
   /** 独立窗口「回到主窗口」回调(关掉自己,后端 emit 事件让主窗口恢复显示)。 */
   onDockBack?: () => void;
+  /** 最近项目历史(+ 菜单「历史项目」数据源;已打开的项前端过滤不显示)。 */
+  recentProjects?: ProjectRecord[];
+  /** + 菜单历史项点击:恢复该项目并钉住(AppShell 负责钉住态)。 */
+  onOpenRecent?: (rootPath: string) => Promise<ProjectId | null>;
+  /** + 菜单历史项 ✕:从历史删除记录。 */
+  onRemoveRecent?: (rootPath: string) => void;
+  /** 历史项右键「在新窗口打开」:恢复该项目并弹独立项目窗口。 */
+  onOpenRecentToWindow?: (rootPath: string) => void | Promise<void>;
+  /** + 菜单「新窗口」:新建空白工作台窗口。 */
+  onNewWindow?: () => void;
 };
 
 /** 简单自增 id 生成(运行期唯一即可,持久化用的是后端已有 id)。 */
@@ -77,6 +88,11 @@ export function AppShell({
   detachedProjectIds,
   singleProjectMode,
   onDockBack,
+  recentProjects,
+  onOpenRecent,
+  onRemoveRecent,
+  onOpenRecentToWindow,
+  onNewWindow,
 }: AppShellProps) {
   const { t } = useTranslation();
   // 全局设置:Codex 默认 sandbox 档位(新建 codex 会话的初始 -s;已开会话不跟随,其状态栏单独切)。
@@ -151,6 +167,11 @@ export function AppShell({
     () => visibleProjectIds.map((id) => projects.find((p) => p.id === id)).filter((p): p is ProjectSnapshot => !!p),
     [visibleProjectIds, projects],
   );
+
+  // 注:单项目可见性由 visibleProjectIds 回退 [active] 保证,无需自动钉住。
+  // 历史上这里曾「唯一可见项目自动钉住」,会把默认/单项目钉进 pinnedProjectIds(
+  // 且后续不自动取消),导致下拉切换时误触发「旧 active 已钉住 -> 新选也钉住」的副作用。
+  // 已移除:pin 完全由用户显式动作(●/○、右键、+ 菜单历史项)驱动。
 
   // 拉取可见项目的 git 分支:仅对缓存中未查过的 rootPath invoke 一次。
   useEffect(() => {
@@ -591,12 +612,42 @@ export function AppShell({
     [focused, treesByProject, handleSetActiveTab],
   );
 
+  // 顶栏下拉切换:设为 active;若旧 active 已被钉住(已有并排视图),则把被点击的
+  // 项目也钉住,使其加入并排视图,契合「点历史/点项目 = 回到眼前」的预期。
+  // 旧 active 未钉住(无并排视图)时纯切换 active,不钉,避免默认项目被钉住误触发。
+  const handleSelectFromDropdown = useCallback(
+    (projectId: ProjectId) => {
+      setPinnedProjectIds((prev) => {
+        if (projectId === activeProjectId) return prev;
+        // 旧 active 未被钉住:无需联动钉住,只切换 active。
+        if (!activeProjectId || !prev.includes(activeProjectId)) return prev;
+        // 旧 active 已钉住 -> 把新选也钉住(若尚未钉)。
+        return prev.includes(projectId) ? prev : [...prev, projectId];
+      });
+      onSelectProject(projectId);
+    },
+    [activeProjectId, onSelectProject],
+  );
+
   // 顶栏切换钉住。
   const handleTogglePin = useCallback((projectId: string) => {
     setPinnedProjectIds((prev) =>
       prev.includes(projectId) ? prev.filter((id) => id !== projectId) : [...prev, projectId],
     );
   }, []);
+
+  // + 菜单历史项点击:恢复项目(App.tsx 调后端移回打开列表并设 active),
+  // 成功后立即钉住到并排视图(用户预期:点历史 = 回到眼前,而不是只出现在下拉里)。
+  const handleOpenRecent = useCallback(
+    async (rootPath: string) => {
+      if (!onOpenRecent) return;
+      const projectId = await onOpenRecent(rootPath);
+      if (projectId) {
+        setPinnedProjectIds((prev) => (prev.includes(projectId) ? prev : [...prev, projectId]));
+      }
+    },
+    [onOpenRecent],
+  );
 
   // 释放某项目在主窗口的所有 transport(stop + 清池 + 清 pane 尺寸),但**不删项目记录、
   // 不删 tree**。用于 detach 弹出独立窗口前:主窗口停止持有该项目旧 PTY,避免与独立窗口
@@ -867,7 +918,7 @@ export function AppShell({
         projects={projects}
         activeProjectId={activeProjectId}
         pinnedProjectIds={pinnedProjectIds}
-        onSelectProject={onSelectProject}
+        onSelectProject={handleSelectFromDropdown}
         onTogglePin={handleTogglePin}
         onAddProject={onAddProject}
         onCloseProject={onCloseProject ? handleCloseProject : undefined}
@@ -875,6 +926,11 @@ export function AppShell({
         detachedProjectIds={detachedProjectIds}
         singleProjectMode={singleProjectMode}
         onDockBack={onDockBack}
+        recentProjects={recentProjects}
+        onOpenRecent={handleOpenRecent}
+        onRemoveRecent={onRemoveRecent}
+        onOpenRecentToWindow={onOpenRecentToWindow}
+        onNewWindow={onNewWindow}
       />
       <div className="grid min-h-0 grid-cols-[44px_1fr]">
         <div className="flex min-h-0 flex-col">
@@ -896,7 +952,7 @@ export function AppShell({
         <div className="min-h-0 min-w-0 p-2">
           {hasProject ? (
             <div
-              className="grid h-full min-h-0 min-w-0 gap-px bg-[var(--mx-border-strong)]"
+              className="grid h-full min-h-0 min-w-0 gap-[6px]"
               style={{ gridTemplateColumns: `repeat(${visibleProjects.length}, minmax(0, 1fr))` }}
             >
               {visibleProjects.map((p) => (

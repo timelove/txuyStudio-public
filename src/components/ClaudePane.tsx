@@ -9,7 +9,7 @@ import type { WorkspaceSession } from "../domain/sessions";
 import type { ClaudeTransport } from "../domain/claudeTransport";
 import type { ShellRunTransport } from "../domain/shellRunTransport";
 import type { ShellMessage, ShellRunState } from "../domain/shellRun";
-import type { ClaudeBlock, ClaudeMessage, ClaudeSessionKind, ClaudeStreamState, ClaudeUsage, CompactMeta } from "../domain/claudeStream";
+import type { BackgroundTaskInfo, ClaudeBlock, ClaudeMessage, ClaudeSessionKind, ClaudeStreamState, ClaudeUsage, CompactMeta } from "../domain/claudeStream";
 import { hasPendingApproval as hasPendingApprovalFn, hasPendingPlan as hasPendingPlanFn, inferContextWindow, summarize } from "../domain/claudeStream";
 import {
   getToolConfig,
@@ -185,7 +185,7 @@ function useTabSummary(
   return kind;
 }
 
-/** tab chip 旁的状态点。颜色:running cyan(呼吸)/retrying 橙/waiting 紫/error 红/idle 灰。 */
+/** tab chip 旁的状态点。颜色:running cyan(呼吸)/bg 琥珀(呼吸)/retrying 橙/waiting 紫/error 红/idle 灰。 */
 function TabStatusDot({ kind }: { kind: ClaudeSessionKind | null }) {
   if (!kind) return null;
   const color =
@@ -197,12 +197,127 @@ function TabStatusDot({ kind }: { kind: ClaudeSessionKind | null }) {
           ? "#a78bfa"
           : kind === "running"
             ? "#22d3ee"
-            : "#475569";
+            : kind === "bg"
+              ? "#fbbf24"
+              : "#475569";
   return (
     <span
-      className={`h-1.5 w-1.5 shrink-0 rounded-full ${kind === "running" ? "animate-pulse" : ""}`}
+      className={`h-1.5 w-1.5 shrink-0 rounded-full ${kind === "running" || kind === "bg" ? "animate-pulse" : ""}`}
       style={{ background: color }}
     />
+  );
+}
+
+/**
+ * 任务列表面板内容——「后台任务 ×N」状态行(非 busy)与 busy 行琥珀徽标共用,Popover 挂输入框上方。
+ * 三节:
+ * - 主任务:claude 主对话轮当前状态(执行中/思考中/等待确认/空闲),色与 tab dot 语义一致;
+ * - 后台任务:`background_tasks_changed` 快照(运行中,琥珀呼吸点 + description + taskType 徽标);
+ * - 最近完成:messages 里 notice 消息末尾若干条(绿勾/红叉 + claude 原 summary)。
+ */
+function TaskListContent({
+  t,
+  main,
+  bgTasks,
+  doneNotices,
+  onKillTask,
+  pendingKillIds,
+}: {
+  t: (k: string, opts?: Record<string, unknown>) => string;
+  main: { label: string; color: string; pulse: boolean };
+  bgTasks: BackgroundTaskInfo[];
+  doneNotices: { kind: "bg_done" | "bg_failed" | "bg_stopped"; summary: string }[];
+  /** 停止单个后台任务(借道模型层 TaskStop,见 ClaudePane handleKillBgTask)。 */
+  onKillTask: (taskId: string, description: string) => void;
+  /** 已排队待停止的任务 id(busy 期间点停止,回 idle 后合并发送)。这些项按钮替换为「待停止」。 */
+  pendingKillIds: Set<string>;
+}) {
+  return (
+    <div className="flex flex-col gap-0.5">
+      {/* 主任务(主对话轮) */}
+      <div className="flex items-center gap-2 rounded px-2 py-1.5 text-[11px]">
+        <span aria-hidden className={`h-1.5 w-1.5 shrink-0 rounded-full ${main.pulse ? "animate-pulse" : ""}`} style={{ background: main.color }} />
+        <span className="shrink-0 font-[600] text-[var(--mx-text)]">{t("claudepane.mainTask")}</span>
+        <span className="min-w-0 flex-1 truncate text-[var(--mx-muted)]" title={main.label}>
+          {main.label}
+        </span>
+      </div>
+      <div className="mx-1 border-t border-[var(--mx-border)]" />
+      {/* 后台任务(运行中) */}
+      <div className="px-2 pb-0.5 pt-1 text-[10px] font-[600] text-[var(--mx-faint)]">
+        {t("claudepane.bgTaskRunningSection", { n: bgTasks.length })}
+      </div>
+      {bgTasks.length === 0 ? (
+        <div className="px-2 py-1 text-[10px] text-[var(--mx-faint)]">{t("claudepane.bgTaskNone")}</div>
+      ) : (
+        bgTasks.map((task) => (
+          <div key={task.taskId} className="group/task flex items-center gap-2 rounded px-2 py-1 text-[11px]">
+            <span aria-hidden className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-[#fbbf24]" />
+            <span className="min-w-0 flex-1 truncate text-[var(--mx-text)]" title={task.description}>
+              {task.description || task.taskType}
+            </span>
+            <span className="shrink-0 rounded bg-[var(--mx-border)] px-1 py-px font-mono text-[9px] text-[var(--mx-muted)]">{task.taskType}</span>
+            {pendingKillIds.has(task.taskId) ? (
+              /* busy 期间点停止已入队:等主轮回 idle 自动合并发送(不能 interrupt——会杀进程树连坐全部后台任务)。 */
+              <span className="shrink-0 text-[9px] text-[var(--mx-faint)]">{t("claudepane.killTaskQueuedShort")}</span>
+            ) : (
+              /* 停止单个后台任务:借道模型层 TaskStop(官方工具;stdin 控制协议无单任务 kill)。
+                 走一轮对话(~数秒),claude 杀掉任务后 background_tasks_changed 快照自动回流。 */
+              <button
+                type="button"
+                title={t("claudepane.killTaskTitle")}
+                onMouseDown={(e) => e.stopPropagation()}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onKillTask(task.taskId, task.description);
+                }}
+                className="shrink-0 rounded p-0.5 text-[var(--mx-faint)] opacity-0 transition-opacity hover:bg-[var(--mx-danger-bg)] hover:text-[#fca5a5] group-hover/task:opacity-100"
+              >
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+                  <rect x="6" y="6" width="12" height="12" rx="2" />
+                </svg>
+              </button>
+            )}
+          </div>
+        ))
+      )}
+      {/* 最近完成(notice 消息摘录) */}
+      {doneNotices.length > 0 && (
+        <>
+          <div className="mx-1 mt-1 border-t border-[var(--mx-border)]" />
+          <div className="px-2 pb-0.5 pt-1 text-[10px] font-[600] text-[var(--mx-faint)]">{t("claudepane.bgTaskDoneSection")}</div>
+          {doneNotices.map((n, i) => {
+            const done = n.kind === "bg_done";
+            const stopped = n.kind === "bg_stopped";
+            return (
+              <div key={i} className="flex items-start gap-2 rounded px-2 py-1 text-[10px] leading-relaxed">
+                {stopped ? (
+                  <svg className="mt-[4px] h-2.5 w-2.5 shrink-0" viewBox="0 0 24 24" fill="#fbbf24" aria-hidden>
+                    <rect x="6" y="6" width="12" height="12" rx="2" />
+                  </svg>
+                ) : (
+                  <svg
+                    className="mt-[3px] h-3 w-3 shrink-0"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke={done ? "#86efac" : "#fca5a5"}
+                    strokeWidth="2.4"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    aria-hidden
+                  >
+                    {done ? <path d="M20 6L9 17l-5-5" /> : <path d="M18 6L6 18M6 6l12 12" />}
+                  </svg>
+                )}
+                <span className="min-w-0 flex-1 break-words text-[var(--mx-faint)]">
+                  {stopped ? `${t("claudepane.bgTaskStoppedLabel")} ${n.summary}` : n.summary}
+                </span>
+              </div>
+            );
+          })}
+        </>
+      )}
+    </div>
   );
 }
 
@@ -382,7 +497,7 @@ export function ClaudePane(props: ClaudePaneProps) {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [historyStorageKey]);
-  const [menuMode, setMenuMode] = useState<"tab" | "perm" | "model" | "effort" | null>(null);
+  const [menuMode, setMenuMode] = useState<"tab" | "perm" | "model" | "effort" | "tasks" | null>(null);
   const [resumeOpen, setResumeOpen] = useState(false);
   const [resumeInput, setResumeInput] = useState("");
   /** ↻ 弹窗「恢复上一次」:当前项目(活动 tab cwd)最近一条 claude 历史会话。弹窗打开时懒拉。 */
@@ -918,6 +1033,9 @@ export function ClaudePane(props: ClaudePaneProps) {
   // API error 自动重试状态(非 null=重试中)。重试期间 status 被覆写 running 维持 busy(中断按钮可用),
   // 此状态驱动状态行「API 错误,正在重试 (n/max)」(最高优先,盖住 thinkingNow)。
   const retrying = state?.retry ?? null;
+  // 后台任务运行数(`background_tasks_changed` 快照)。本轮可能已结束(idle),驱动输入框上方
+  // 琥珀状态行「后台任务 ×N」;busy/等待确认时被上方状态行盖住,不影响 busy 与发送。
+  const bgCount = state?.backgroundTasks.length ?? 0;
 
   // 当前是否处于「思考中」:busy 且当前轮的 assistant 消息尚无可见文本/工具内容。
   // - 新轮发起后、纯 thinking 阶段(只有 thinking block)→ thinkingNow=true,显「思考中…」。
@@ -1166,8 +1284,14 @@ export function ClaudePane(props: ClaudePaneProps) {
         }
         return next;
       });
-      await transport.interrupt();
-      void transport.approveTool(block.name, persist, t("claudepane.approveProceed"));
+      void transport.approveToolRun({
+        toolUseId: block.id,
+        tool: block.name,
+        input: block.input,
+        persist,
+        cwd: stateRef.current?.meta.cwd ?? null,
+        fallbackApproveMsg: t("claudepane.approveProceed"),
+      });
     },
     [activeTabId, t],
   );
@@ -1186,7 +1310,11 @@ export function ClaudePane(props: ClaudePaneProps) {
         }
         return next;
       });
-      void transport.rejectTool(t("claudepane.rejectMsg", { tool: block.name }));
+      void transport.sendToolResult(
+        block.id,
+        `User denied the ${block.name} tool call. Please suggest an alternative approach or ask for clarification.`,
+        true,
+      );
     },
     [activeTabId, t],
   );
@@ -1320,6 +1448,86 @@ export function ClaudePane(props: ClaudePaneProps) {
     () => (state ? hasPendingApprovalFn(state, resolvedApprovals) : false),
     [state, resolvedApprovals],
   );
+  // 后台任务「最近完成」列表(任务面板第三节):从 messages 反向扫 notice 消息取末尾 5 条,
+  // 倒序收集后 reverse 回时间正序。summary 是 claude 原文(含命令 description + exit code)。
+  const bgDoneNotices = useMemo(() => {
+    if (!state) return [] as { kind: "bg_done" | "bg_failed" | "bg_stopped"; summary: string }[];
+    const out: { kind: "bg_done" | "bg_failed" | "bg_stopped"; summary: string }[] = [];
+    for (let i = state.messages.length - 1; i >= 0 && out.length < 5; i--) {
+      const m = state.messages[i];
+      const n = m.notice;
+      // 只收后台任务 notice;history_resumed(恢复会话历史回填)不属于任务完成列表。
+      if (m.role === "notice" && n && n.kind !== "history_resumed") {
+        out.push({ kind: n.kind, summary: n.summary });
+      }
+    }
+    return out.reverse();
+  }, [state]);
+  // 主任务(claude 主对话轮)状态——任务面板首行,文案/色与 summarize 语义态一致
+  // (running 青/retrying 橙/waiting 紫/idle 灰),busy 内细分 thinking/工具。
+  const mainTask = retrying
+    ? { label: t("claudepane.retrying", { n: retrying.attempt, max: retrying.maxAttempts }), color: "#fb923c", pulse: false }
+    : hasPendingPlan || hasPendingApproval
+      ? { label: t("claudepane.mainWaiting"), color: "#a78bfa", pulse: true }
+      : compactRunning
+        ? { label: t("claudepane.compactRunning"), color: "#a78bfa", pulse: true }
+        : busy
+          ? {
+              label: thinkingNow
+                ? t("claudepane.thinking")
+                : runningTool
+                  ? t("claudepane.runningTool", { tool: runningTool })
+                  : t("claudepane.toolRunning"),
+              color: "#22d3ee",
+              pulse: true,
+            }
+          : { label: t("claudepane.mainIdle"), color: "#475569", pulse: false };
+  /**
+   * 排队的待停止后台任务(busy 期间点的):回 idle 后由下方 effect 合并成一条指令发送。
+   * 不能 busy 时 interrupt——interrupt 是 kill 整个 claude 进程树(taskkill /F /T),全部后台
+   * 任务都是它的子进程,会**全部连坐被杀**(实测「点一个停一个却全停」的根因)。
+   */
+  const [pendingKillTasks, setPendingKillTasks] = useState<{ taskId: string; description: string }[]>([]);
+  const pendingKillIds = useMemo(() => new Set(pendingKillTasks.map((t) => t.taskId)), [pendingKillTasks]);
+  /**
+   * 停止单个后台任务。claude stdin 控制协议没有单任务 kill(实测二进制:REPL bridge 只认
+   * set_model/interrupt/… 十种 subtype,interrupt 会全停+打断当前轮),官方精确路径是模型层
+   * TaskStop 工具——故借道:发一条系统指令让 claude 调 TaskStop(taskId),实测 ~数秒生效,
+   * 任务被杀后 `background_tasks_changed` 快照自动回流(列表消失 + stopped notice)。
+   * idle 立即发;busy/compact 中不能发(后端拒)也不能 interrupt(连坐)→ 入队待 idle 合并发。
+   */
+  const handleKillBgTask = useCallback(
+    (taskId: string, description: string) => {
+      const transport = getClaudeTransportRef.current(activeTabId);
+      if (!transport) return;
+      setMenuMode(null);
+      if (busy || compactRunning) {
+        setPendingKillTasks((prev) =>
+          prev.some((t) => t.taskId === taskId) ? prev : [...prev, { taskId, description }],
+        );
+        return;
+      }
+      void transport.send(t("claudepane.killTaskMsg", { id: taskId, desc: description || taskId }));
+    },
+    [busy, compactRunning, activeTabId, t],
+  );
+  // 排队的停止指令:回 idle 后合并一条发送(一次 TaskStop 多任务,省轮次)。先清队再发防重入;
+  // 过滤掉排队期间已自然结束的任务(快照里已不在)。state 变化频繁(逐 token)但 guard 早退无害。
+  useEffect(() => {
+    if (busy || compactRunning || pendingKillTasks.length === 0) return;
+    const transport = getClaudeTransportRef.current(activeTabId);
+    if (!transport) {
+      setPendingKillTasks([]);
+      return;
+    }
+    const runningIds = new Set((state?.backgroundTasks ?? []).map((t) => t.taskId));
+    const due = pendingKillTasks.filter((t) => runningIds.has(t.taskId));
+    setPendingKillTasks([]);
+    if (due.length === 0) return;
+    const tasksStr = due.map((t) => `${t.description || t.taskId}(${t.taskId})`).join("、");
+    void transport.send(t("claudepane.killTaskQueuedMsg", { tasks: tasksStr }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [busy, compactRunning, pendingKillTasks, activeTabId]);
   // 弹框确认(plan/permission)出现时,若 Claude 还在跑(被拒后它会继续尝试别的工具,把 denied
   // block 移出「最后消息」会让确认框消失),自动 interrupt 让它停下等用户决策——而非一边转圈思考
   // 一边等确认。headless 单轮已退(plan)时 interrupt 幂等,无害。
@@ -1397,6 +1605,23 @@ export function ClaudePane(props: ClaudePaneProps) {
           </TabsList>
         </Tabs>
         <div className="flex shrink-0 items-center gap-1 text-[var(--mx-muted)]">
+          {/* 重置当前会话:清屏 + kill 进程 + 用 registry live id --resume 重启(session 续接)。 */}
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                className="text-[14px] text-[var(--mx-muted)] hover:bg-[var(--mx-border)] hover:text-[var(--mx-text)]"
+                onMouseDown={(e) => e.stopPropagation()}
+                onClick={() => {
+                  void getClaudeTransportRef.current(activeTabId)?.resetSession();
+                }}
+              >
+                ↺
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>{t("session.resetSession")}</TooltipContent>
+          </Tooltip>
           {onResumeSession && (
             <Popover open={resumeOpen} onOpenChange={setResumeOpen}>
               <Tooltip>
@@ -1557,7 +1782,7 @@ export function ClaudePane(props: ClaudePaneProps) {
         <div className="shrink-0 px-4 pb-3 pt-1">
           <div className="mx-auto max-w-[54.25rem]">
             {/* 会话状态指示行:retrying(API error 自动重试,最高优先,橙色)> compactRunning(紫)>
-                thinkingNow 思考中(紫)> busy 执行中(蓝,带当前 running 工具名)。悬浮在输入框上方,
+                thinkingNow 思考中(紫)> busy 执行中(蓝,不显示具体工具名,只显「执行中…」)。悬浮在输入框上方,
                 busy 全程可见 -- 此前仅思考阶段显示,长工具运行中用户无从察觉会话仍在进行。
                 retrying 期间 status 被覆写 running 维持 busy,中断按钮可用;idle → 此条消失。 */}
             {(retrying || busy || compactRunning) && !hasPendingPlan && !hasPendingApproval && (
@@ -1578,14 +1803,70 @@ export function ClaudePane(props: ClaudePaneProps) {
                       ? t("claudepane.compactRunning")
                       : thinkingNow
                         ? t("claudepane.thinking")
-                        : runningTool
-                          ? t("claudepane.runningTool", { tool: runningTool })
-                          : t("claudepane.toolRunning")}
+                        : t("claudepane.toolRunning")}
                 </span>
                 <span className="tabular-nums text-[var(--mx-faint)]">
                   ⏱ {formatElapsed(turnElapsed)}　↑{formatTokens(sessionTokens.input)} ↓{formatTokens(sessionTokens.output)}
                 </span>
+                {/* busy 期间的后台任务入口:琥珀徽标点开任务面板(主任务正显示在左侧,bgCount>0 才显)。
+                    与非 busy 琥珀行共用 menuMode==="tasks" 与 TaskListContent(busy 与非 busy 互斥渲染,不冲突)。 */}
+                {bgCount > 0 && (
+                  <Popover open={menuMode === "tasks"} onOpenChange={(o) => setMenuMode(o ? "tasks" : null)}>
+                    <PopoverTrigger asChild>
+                      <button
+                        type="button"
+                        onMouseDown={(e) => e.stopPropagation()}
+                        className="flex shrink-0 items-center gap-1 rounded bg-[var(--mx-border)] px-1.5 py-0.5 text-[10px] text-[#fbbf24] transition-colors hover:bg-[var(--mx-hover-bg)]"
+                      >
+                        <span aria-hidden className="h-1 w-1 animate-pulse rounded-full bg-[#fbbf24]" />
+                        {t("claudepane.bgCountBadge", { n: bgCount })}
+                      </button>
+                    </PopoverTrigger>
+                    {menuMode === "tasks" && (
+                      <PopoverContent
+                        side="top"
+                        align="end"
+                        sideOffset={4}
+                        onOpenAutoFocus={(e) => e.preventDefault()}
+                        className="mx-menu w-[340px] border border-[var(--mx-border)] bg-[var(--mx-surface)] p-1 shadow-xl"
+                      >
+                        <TaskListContent t={t} main={mainTask} bgTasks={state?.backgroundTasks ?? []} doneNotices={bgDoneNotices} onKillTask={handleKillBgTask} pendingKillIds={pendingKillIds} />
+                      </PopoverContent>
+                    )}
+                  </Popover>
+                )}
               </div>
+            )}
+            {/* 后台任务状态行:本轮已结束(非 busy/非等待确认)、可继续对话,但有 N 个后台任务在跑
+                (Bash run_in_background / 后台 subagent,`background_tasks_changed` 快照驱动)。
+                琥珀色与「执行中」青色区分;busy 时被上方状态行盖住,turn 结束后透出。
+                整行可点击 → 任务面板 Popover(主任务 + 后台任务列表 + 最近完成)。 */}
+            {!retrying && !busy && !compactRunning && !hasPendingPlan && !hasPendingApproval && bgCount > 0 && (
+              <Popover open={menuMode === "tasks"} onOpenChange={(o) => setMenuMode(o ? "tasks" : null)}>
+                <PopoverTrigger asChild>
+                  <div
+                    className="mb-1.5 flex w-fit cursor-pointer items-center gap-2 rounded px-1 text-[11px] text-[var(--mx-warning)] transition-colors hover:bg-[var(--mx-border)]"
+                    onMouseDown={(e) => e.stopPropagation()}
+                  >
+                    <span aria-hidden className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-[var(--mx-warning)]" />
+                    <span>{t("claudepane.bgTasks", { n: bgCount })}</span>
+                    <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" aria-hidden>
+                      <path d="M6 15l6-6 6 6" />
+                    </svg>
+                  </div>
+                </PopoverTrigger>
+                {menuMode === "tasks" && (
+                  <PopoverContent
+                    side="top"
+                    align="start"
+                    sideOffset={4}
+                    onOpenAutoFocus={(e) => e.preventDefault()}
+                    className="mx-menu w-[340px] border border-[var(--mx-border)] bg-[var(--mx-surface)] p-1 shadow-xl"
+                  >
+                    <TaskListContent t={t} main={mainTask} bgTasks={state?.backgroundTasks ?? []} doneNotices={bgDoneNotices} onKillTask={handleKillBgTask} pendingKillIds={pendingKillIds} />
+                  </PopoverContent>
+                )}
+              </Popover>
             )}
             {claudeMissing ? (
               /* 未安装提示卡片(不进全局模态,本组件内渲染)。 */
@@ -2195,6 +2476,48 @@ const MessageRow = memo(function MessageRow({
     // compact 节点:boundary=边界分隔线(已压缩 pre→post tokens(pct)·耗时);
     // summary=压缩总结卡片(MdPreview 渲染,violet 色调,assistant 风格)。
     return <CompactRow message={message} t={t} />;
+  }
+
+  if (message.role === "notice") {
+    // notice 节点:系统级轻提示行(后台任务完成/失败/停止、恢复会话历史回填)。
+    // 仿 compact boundary 的居中轻量样式,绿勾/红叉/琥珀方块/青勾区分,不参与角色流。
+    const kind = message.notice?.kind;
+    const stopped = kind === "bg_stopped";
+    const done = kind === "bg_done";
+    const resumed = kind === "history_resumed";
+    const hist = message.notice?.history;
+    const ok = done || (resumed && !hist?.failed);
+    const tone = stopped ? "#fbbf24" : ok ? (resumed ? "#7dd3fc" : "#86efac") : "#fca5a5";
+    const label = stopped
+      ? t("claudepane.bgTaskStoppedLabel")
+      : done
+        ? t("claudepane.bgTaskDoneLabel")
+        : resumed
+          ? hist?.failed
+            ? t("claudepane.historyFailed")
+            : t("claudepane.historyResumed", { n: hist?.count ?? 0 })
+          : t("claudepane.bgTaskFailedLabel");
+    // 后台任务 notice 的 summary 是 claude 原文直接拼;历史回填 notice 的附注(截断提示)走 i18n。
+    const suffix = resumed ? (hist?.truncated ? t("claudepane.historyTruncated") : "") : message.notice?.summary;
+    return (
+      <div className="my-2 flex items-center gap-3 select-none">
+        <div className="h-px flex-1" style={{ borderTop: "1px dashed rgba(148,163,184,0.32)", background: "transparent" }} />
+        <span className="flex shrink-0 items-center gap-1.5 text-[10px] text-[var(--mx-faint)]">
+          {stopped ? (
+            <svg width="10" height="10" viewBox="0 0 24 24" fill={tone} aria-hidden>
+              <rect x="6" y="6" width="12" height="12" rx="2" />
+            </svg>
+          ) : (
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke={tone} strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+              {ok ? <path d="M20 6L9 17l-5-5" /> : <path d="M18 6L6 18M6 6l12 12" />}
+            </svg>
+          )}
+          <span style={{ color: tone }}>{label}</span>
+          {suffix}
+        </span>
+        <div className="h-px flex-1" style={{ borderTop: "1px dashed rgba(148,163,184,0.32)", background: "transparent" }} />
+      </div>
+    );
   }
 
   if (message.role === "user") {

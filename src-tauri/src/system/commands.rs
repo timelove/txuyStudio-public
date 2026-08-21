@@ -112,24 +112,34 @@ fn lexical_normalize(p: &Path) -> std::path::PathBuf {
     out
 }
 
-/// 批量检测可执行文件是否在 PATH 上。
+/// 批量检测可执行文件是否安装。
 ///
-/// 用 `where.exe` 探测(与 `pty::commands::pick_shell` 同范式):命令存在即 `status.success()`。
+/// 默认用 `where.exe` 探测 PATH(与 `pty::commands::pick_shell` 同范式):命令存在即
+/// `status.success()`。**claude 例外**:走 `claude::commands::resolve_claude_program`
+/// (优先原生安装包位置,见其注释),PATH 之外的安装位置也能探测到。
 /// 无状态、无锁、亚毫秒级,直接同步调用(同 module 既有先例),无需 `spawn_blocking`。
 ///
-/// 用于前端在「新建 TUI 工具窗口」(lazygit/yazi/fresh)前探测是否安装:
-/// 未安装则弹提示给安装命令,不建 tab。
+/// 用于前端「新建 TUI 工具窗口」(lazygit/yazi/fresh)前探测是否安装(未安装则弹提示给
+/// 安装命令,不建 tab),以及 ClaudePane 的 claude 缺失检测(claudeMissing 卡片)。
 #[tauri::command]
 pub async fn check_commands_installed(
     commands: Vec<String>,
 ) -> Result<std::collections::HashMap<String, bool>, String> {
     let mut out = std::collections::HashMap::new();
     for cmd in commands {
-        let installed = command_no_window("where.exe")
-            .arg(&cmd)
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
+        // claude 走专属解析(resolve_claude_program):优先原生安装包位置(~/.local/bin),
+        // PATH 之外的位置也能探测到(npm 安装方式官方随时可能下线,原生安装不一定在 PATH 上);
+        // 与 start_claude_session 的 spawn 用同一解析,保证「探测说装了 spawn 就找得到」。
+        // 其余命令(codex/lazygit/…)仍走 where.exe PATH 探测。
+        let installed = if cmd == "claude" {
+            crate::claude::commands::resolve_claude_program().is_some()
+        } else {
+            command_no_window("where.exe")
+                .arg(&cmd)
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        };
         out.insert(cmd, installed);
     }
     Ok(out)
@@ -290,7 +300,8 @@ fn scan_codex_sessions() -> Result<Vec<AiCliSessionListItem>, String> {
 }
 
 /// 递归遍历 dir 下所有 `.jsonl` 文件,对每个调用 f。单文件读取失败不阻断。
-fn walk_jsonl(dir: &Path, f: &mut dyn FnMut(&Path)) {
+/// `pub(crate)`:claude 模块的 `read_claude_history_events` 复用(历史回填定位会话文件)。
+pub(crate) fn walk_jsonl(dir: &Path, f: &mut dyn FnMut(&Path)) {
     let read_dir = match std::fs::read_dir(dir) {
         Ok(rd) => rd,
         Err(_) => return,

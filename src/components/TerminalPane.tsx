@@ -175,6 +175,21 @@ export function TerminalPane({
     const fitAddon = new FitAddon();
     terminal.loadAddon(fitAddon);
     terminal.open(container);
+    // Ctrl+C 智能复制(Windows Terminal 行为):有非空选区时 Ctrl+C = 复制选中文本到剪贴板 +
+    // 清选区(吞掉,不作为 \x03 发给 PTY);无选区时放行,Ctrl+C 照常中断。选区是 xterm 层的
+    // (非 DOM selection),用 hasSelection() 判断;复制走 navigator.clipboard(与 ClaudePane
+    // 等处同模式)。吞掉后返回 false 阻止 xterm 自行处理(不产生 ^C);清选区让第二次 Ctrl+C
+    // 可立即中断(复制一次后选区已消失)。
+    terminal.attachCustomKeyEventHandler((ev) => {
+      if (ev.type !== "keydown" || !ev.ctrlKey || ev.shiftKey || ev.altKey || ev.metaKey) return true;
+      if (ev.key !== "c") return true;
+      if (!terminal.hasSelection()) return true;
+      const text = terminal.getSelection();
+      if (!text) return true;
+      navigator.clipboard?.writeText(text).catch(() => {});
+      terminal.clearSelection();
+      return false;
+    });
     // 锁定光标形状为 bar:拦截 DECSCUSR(CSI Ps q,无中间字节),阻止 PowerShell/ConPTY 或
     // TUI 把光标设回 block。返回 true 吞掉序列,xterm 保持 cursorStyle:'bar'。仅拦形状;
     // 可见性(\e[?25h/l)走另一序列不受影响,TUI 隐藏/显示光标正常。

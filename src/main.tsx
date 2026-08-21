@@ -60,3 +60,29 @@ try {
 } catch {
   // 非 Tauri 环境兜底,忽略。
 }
+
+// 链接一律走系统外部浏览器打开:消息流 markdown(marked)等生成的 `<a href>` 默认在 WebView
+// 内导航,整个应用会被替换成目标网页(无地址栏/无返回),必须拦截。全局捕获阶段监听 click,
+// 命中 http(s)/mailto 链接 -> preventDefault + opener(tauri-plugin-opener)外开;锚点(#)与
+// 相对链接不拦(应用内行为)。HtmlPreviewPane 的 iframe(srcdoc)内点击不冒泡到主文档,不受影响。
+// 动态 import 同上(非 Tauri 环境不引入;失败兜底 window.open)。
+document.addEventListener(
+  "click",
+  (e) => {
+    const anchor = (e.target as Element | null)?.closest?.("a[href]");
+    if (!anchor) return;
+    const href = anchor.getAttribute("href") ?? "";
+    if (!/^(https?:|mailto:)/i.test(href)) return;
+    e.preventDefault();
+    void import("@tauri-apps/plugin-opener")
+      .then(({ openUrl }) => openUrl(href))
+      .catch(() => {
+        try {
+          window.open(href, "_blank", "noopener");
+        } catch {
+          // 非 Tauri 且弹窗被拦等极端情况,忽略。
+        }
+      });
+  },
+  true,
+);

@@ -29,3 +29,15 @@ export type AppSnapshot = {
   projects: ProjectSnapshot[];
   activeProjectId: ProjectId | null;
 };
+
+/**
+ * 项目稳定标识色:按 id hash 派生 hue(0-359),HSL 低饱和/中亮度(莫兰迪感,避免大红大绿
+ * 刺眼;深色背景仍可辨)。同一 id 永远同色(跨会话稳定),多个钉住项目并排(顶栏 chip/下拉
+ * 列表)时一眼按色区分;hash 碰撞仅颜色相近,无功能影响。用于 ProjectTabs 色条/圆点/
+ * 下划线、TopProjectBar 单项目 dot、ShellSidebar 标头。
+ */
+export function projectAccentColor(id: ProjectId): string {
+  let h = 0;
+  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
+  return `hsl(${h % 360} 45% 55%)`;
+}

@@ -6,7 +6,9 @@ import {
   type ClaudeStreamState,
   appendUserMessage,
   applyEvent,
+  applyHistoryEvents,
   initialClaudeState,
+  patchToolBlock,
 } from "./claudeStream";
 import { RETRY_DELAYS_MS, RETRY_MAX_ATTEMPTS, isRetryableApiError } from "./claudeRetry";
 import { claudeStatusRegistry } from "./claudeStatusRegistry";
@@ -370,8 +372,14 @@ export class ClaudeTransport {
    *  避免同一失败双重置 terminated。 */
   private async startSession(allowedTools?: string[]) {
     // resumeSessionId 仅首启传入(用户恢复历史会话);后端 start_claude_session 的 resume_session_id
-    // 仅当无 persisted/live id 时生效。invoke 成功后清空--重启走 registry live id(--resume),不再传。
+    // 仅当无 persisted/live id 时生效。消费即清空(重启走 registry live id,不再传);消费时先
+    // 回填历史(glm 代理 --resume 不重放历史,读 jsonl 注入消息流,见 backfillHistory)——必须
+    // 在 spawn 前完成,保证历史先落、init/新轮事件全部 append 在后(顺序稳定)。
     const resumeSessionId = this.resumeSessionId;
+    if (resumeSessionId) {
+      this.resumeSessionId = null;
+      await this.backfillHistory(resumeSessionId);
+    }
     await invoke("start_claude_session", {
       projectId: this.projectId,
       tabId: this.tabId,
@@ -382,12 +390,49 @@ export class ClaudeTransport {
       effort: this.effort ?? null,
       model: this.model ?? null,
     });
-    this.resumeSessionId = null;
     this.started = true;
     this.dead = false;
     this.activeMode = this.mode;
     this.activeEffort = this.effort;
     this.activeModel = this.model;
+  }
+
+  /**
+   * 恢复会话的历史回填(glm 代理 `--resume` 不重放历史的兜底;实测 glm 2.1.235 resume 后只推
+   * init+本轮新事件,消息流空=用户「恢复没反应」)。读会话 jsonl(后端 `read_claude_history_events`,
+   * 事件与实时流同构)重置 state 后批量注入 + history_resumed notice。
+   *
+   * 重置语义:清旧会话消息(↻ 切换会话时旧消息必须清,否则两会话消息混杂);meta.claudeSessionId
+   * 置目标 id(init 回来时非 firstInit,不误置 running/busy);effort/model 保留用户选择。
+   * 读取失败不阻断恢复(claude 内部上下文仍续接,可正常对话),仅插失败 notice。
+   */
+  private async backfillHistory(sessionId: string): Promise<void> {
+    this.state = {
+      ...initialClaudeState,
+      meta: {
+        effort: this.state.meta.effort,
+        model: this.state.meta.model,
+        claudeSessionId: sessionId,
+      },
+    };
+    this.emit();
+    let history = { count: 0, truncated: false, failed: true };
+    try {
+      const res = await invoke<{ events: ClaudeEventPayload[]; total: number }>(
+        "read_claude_history_events",
+        { sessionId },
+      );
+      history = {
+        count: res.events.length,
+        truncated: res.total > res.events.length,
+        failed: false,
+      };
+      this.state = applyHistoryEvents(this.state, res.events, history);
+    } catch (err) {
+      console.warn("[ClaudeTransport] history backfill failed:", err);
+      this.state = applyHistoryEvents(this.state, [], history);
+    }
+    this.emit();
   }
 
   /**
@@ -469,11 +514,104 @@ export class ClaudeTransport {
   }
 
   /**
-   * 拒绝一个被拒的工具调用(确认框「拒绝」):发拒绝消息,下一轮 claude 看到,换方式。
-   * 复用 send(乐观插入 + 写 stdin)。
+   * 把工具结果作为 stream-json tool_result user 消息写 stdin(批准/拒绝被拒工具的原地回传)。
+   * claude 像收到正常工具结果一样续跑下一 turn(claude cli 交互批准的同语义),**不插对话
+   * 消息、不 restart**。置 running(新 turn 开始);失败统一 handleEvent(terminated)。
    */
-  async rejectTool(feedback: string): Promise<void> {
-    await this.send(feedback);
+  async sendToolResult(toolUseId: string, content: string, isError: boolean): Promise<void> {
+    if (this.sendingPromise) {
+      await this.sendingPromise.catch(() => {});
+    }
+    this.cancelRetry();
+    this.lastPrompt = null;
+    this.clearing = false;
+    this.starting = false;
+    this.state = { ...this.state, status: "running", terminatedReason: null };
+    this.emit();
+    this.sendingPromise = (async () => {
+      try {
+        await this.ensureListening();
+        await invoke("send_claude_message", {
+          projectId: this.projectId,
+          tabId: this.tabId,
+          prompt: "",
+          toolResult: { toolUseId, content, isError },
+        });
+      } catch (err) {
+        this.handleEvent({
+          kind: "terminated",
+          reason: typeof err === "string" ? err : String(err),
+        });
+      }
+    })();
+    try {
+      await this.sendingPromise;
+    } finally {
+      this.sendingPromise = null;
+    }
+  }
+
+  /**
+   * 批准被拒的工具调用(确认框「批准本次/批准且不再问」):**本地执行该工具 + 结果经
+   * tool_result 原地回传**,claude 无缝续跑--与 claude cli 交互批准同语义,不发「已批准请
+   * 继续」对话消息。persist=true 持久化工具到项目 allowlist(下轮 spawn 生效,不重启当前
+   * 进程)。执行链:Bash(PowerShell)/Edit(唯一匹配替换)/Write(后端 exec_claude_tool_local);
+   * 未知工具或进程已死无法直写 stdin 等场景 -> 回退旧 approveTool(interrupt+restart+发消息
+   * 重试,fallbackApproveMsg 由组件 i18n 传入)。
+   */
+  async approveToolRun(opts: {
+    toolUseId: string;
+    tool: string;
+    input: unknown;
+    persist: boolean;
+    cwd: string | null;
+    fallbackApproveMsg: string;
+  }): Promise<void> {
+    if (this.sendingPromise) {
+      await this.sendingPromise.catch(() => {});
+    }
+    if (opts.persist) {
+      try {
+        await invoke("add_claude_allowed_tool", { projectId: this.projectId, tool: opts.tool });
+      } catch (err) {
+        console.warn("[ClaudeTransport] add_claude_allowed_tool failed:", err);
+      }
+    }
+    // 进程已死(被拒后单轮退出/崩溃)时先 ensureStarted(--resume 续接,claude 上下文里
+    // tool_use 仍在,tool_result 可配对),否则 stdin 写不进(后端 stdin=None 静默丢)。
+    if (this.dead || !this.started) {
+      try {
+        await this.ensureStarted();
+      } catch (err) {
+        this.handleEvent({
+          kind: "terminated",
+          reason: `start failed: ${typeof err === "string" ? err : String(err)}`,
+        });
+        return;
+      }
+    }
+    // UI 反馈:block 置执行中(本地执行可能耗时)。
+    this.state = patchToolBlock(this.state, opts.toolUseId, { status: "running", resultContent: null });
+    this.emit();
+    let result: { output: string; isError: boolean };
+    try {
+      result = await invoke("exec_claude_tool_local", {
+        tool: opts.tool,
+        input: opts.input,
+        cwd: opts.cwd,
+      });
+    } catch (err) {
+      // 工具不支持本地执行(如 WebFetch)或框架失败:回退发消息重试方案(旧路径,不 persist
+      // --persist 已在上方处理过)。
+      console.warn("[ClaudeTransport] local exec unavailable, fallback to message:", err);
+      return this.approveTool(opts.tool, false, opts.fallbackApproveMsg);
+    }
+    this.state = patchToolBlock(this.state, opts.toolUseId, {
+      status: result.isError ? "error" : "done",
+      resultContent: result.output,
+    });
+    this.emit();
+    await this.sendToolResult(opts.toolUseId, result.output, result.isError);
   }
 
   /** 中断当前轮(kill 整进程)。后端 kill 后 emit Terminated{reason:"interrupted"} → dead。
@@ -488,6 +626,42 @@ export class ClaudeTransport {
       });
     } catch (err) {
       console.warn("[ClaudeTransport] interrupt failed:", err);
+    }
+  }
+
+  /**
+   * 重置当前会话(右上角「重置」按钮):清屏(前端 state 归零但保留 meta.claudeSessionId,
+   * 防 init 误判 firstInit 置 running)+ kill 长进程 + startSession 重启(走 registry 的
+   * claude_session_id 自动带 --resume,session 续接)。与 /clear 的区别:clear 是进程内
+   * local command 清上下文(进程不重启);reset 是进程级 kill+restart+--resume,UI 清屏、
+   * claude 重载该 session 上下文。适合「卡住/状态错乱时重启会话」的场景。
+   * 不回填历史(resumeSession 才回填;reset 走 registry live id,进程内 claude 自带上下文)。
+   */
+  async resetSession(): Promise<void> {
+    this.cancelRetry();
+    this.lastPrompt = null;
+    this.starting = false;
+    this.clearing = true; // 抑制 restart 期间 init 把 status 置 running
+    // 清屏但保留 claudeSessionId(防 firstInit)+ effort/model(用户选择不丢)。
+    this.state = {
+      ...initialClaudeState,
+      meta: {
+        effort: this.state.meta.effort,
+        model: this.state.meta.model,
+        claudeSessionId: this.state.meta.claudeSessionId,
+      },
+    };
+    this.emit();
+    if (this.sendingPromise) {
+      await this.sendingPromise.catch(() => {});
+    }
+    this.sendingPromise = (async () => {
+      await this.restart();
+    })();
+    try {
+      await this.sendingPromise;
+    } finally {
+      this.sendingPromise = null;
     }
   }
 

@@ -34,7 +34,18 @@ export type ClaudeEventPayload =
   | { kind: "result"; success: boolean; durationMs: number; numTurns: number; totalCostUsd: number; stopReason: string | null; error: string | null; usage?: ClaudeUsage; contextWindow?: number }
   | { kind: "terminated"; reason: string }
   | { kind: "compact_status"; status: string | null; result: string | null; error: string | null }
-  | { kind: "compact_boundary"; metadata: CompactMetadata };
+  | { kind: "compact_boundary"; metadata: CompactMetadata }
+  | { kind: "background_tasks_changed"; tasks: BackgroundTaskInfo[] }
+  | { kind: "task_notification"; taskId: string; toolUseId?: string; status: string; summary: string };
+
+/** 后台任务信息(claude `system subtype=background_tasks_changed` 快照项)。 */
+export type BackgroundTaskInfo = {
+  taskId: string;
+  /** claude 任务类型(实测 "local_bash";subagent 等原样透传)。 */
+  taskType: string;
+  /** 人读描述(assistant 发起工具调用时的 description)。 */
+  description: string;
+};
 
 /** claude stream-json 透传的原始 message(assistant/user)。content 是 block 数组。 */
 export type ClaudeRawMessage = {
@@ -121,11 +132,19 @@ export type CompactMeta = {
 export type ClaudeMessage = {
   /** 消息 id:user 消息用自生成 id;assistant 用 claude 的 message.id;compact 用自生成 id。 */
   id: string;
-  role: "user" | "assistant" | "compact";
+  role: "user" | "assistant" | "compact" | "notice";
   /** compact 节点的子类型(boundary=边界分隔线 / summary=压缩总结)。非 compact 节点无此字段。 */
   compactKind?: "boundary" | "summary";
   /** compact boundary 的压缩比信息(仅 kind:"boundary" 有)。 */
   compactMeta?: CompactMeta;
+  /** notice 节点的载荷(仅 role:"notice" 有):后台任务完成/失败/停止、历史回填等系统级轻提示。 */
+  notice?: {
+    kind: "bg_done" | "bg_failed" | "bg_stopped" | "history_resumed";
+    summary: string;
+    /** history_resumed 专用:回填元信息(条数/是否截断/是否失败)。summary 留空,文案由
+     *  ClaudePane 渲染时按 history 字段 i18n 本地化(transport 层无 i18n 上下文)。 */
+    history?: { count: number; truncated: boolean; failed: boolean };
+  };
   blocks: ClaudeBlock[];
   timestamp: string | null;
   model?: string;
@@ -184,6 +203,9 @@ export type ClaudeStreamState = {
   compactError: string | null;
   /** compact_boundary 已到、等待紧跟的 user 总结消息。下一条 user(非 tool_result)归并成 summary 消息。 */
   expectingCompactSummary: boolean;
+  /** 后台任务快照(`background_tasks_changed` 权威替换,[] = 无)。turn 结束后仍在跑的任务由此
+   *  驱动「后台 ×N」状态;非轮次事件,不影响 status/busy。/clear 归零(initialState)。 */
+  backgroundTasks: BackgroundTaskInfo[];
   /** API error 自动重试状态(非 null=重试中,含第几次/上限/下次重试时刻)。非 applyEvent 事件驱动,
    *  由 ClaudeTransport.scheduleRetry/cancelRetry 维护,emit 时覆写。null=不在重试。 */
   retry: { attempt: number; maxAttempts: number; nextRetryAt: number } | null;
@@ -199,6 +221,7 @@ export const initialClaudeState: ClaudeStreamState = {
   compactRunning: false,
   compactError: null,
   expectingCompactSummary: false,
+  backgroundTasks: [],
   retry: null,
 };
 
@@ -291,6 +314,13 @@ export function applyEvent(state: ClaudeStreamState, payload: ClaudeEventPayload
 
   switch (payload.kind) {
     case "init": {
+      // 仅真正首启(此前无 session id,含 /clear 后的 meta 重置)才置 running。
+      // 后台任务全部完成后 claude 会再推一个 init(同 session_id,实测),无条件置 running 会把
+      // 空闲会话误判 busy 卡死。非首启路径的 running 语义由各调用方保证:发消息/批准由
+      // appendUserMessage 乐观置 running;mode/effort 重启后轮次在途同理;打开 tab 握手由
+      // transport.starting 覆写回 idle;resumeSession 切历史会话本就无在途轮(置 running 反而
+      // 是 busy 卡死的 bug,此处顺带修正)。
+      const firstInit = !next.meta.claudeSessionId;
       next.meta = {
         ...next.meta,
         model: payload.model || next.meta.model,
@@ -299,7 +329,7 @@ export function applyEvent(state: ClaudeStreamState, payload: ClaudeEventPayload
         slashCommands: payload.slashCommands ?? next.meta.slashCommands ?? [],
       };
       next.terminatedReason = null;
-      next.status = "running";
+      if (firstInit) next.status = "running";
       return next;
     }
     case "assistant": {
@@ -629,11 +659,126 @@ export function applyEvent(state: ClaudeStreamState, payload: ClaudeEventPayload
       next.expectingCompactSummary = true;
       return next;
     }
+    case "background_tasks_changed": {
+      // 后台任务快照:权威替换(任务启动/完成/变化时推,含 result 之后的空闲期)。
+      // 非轮次事件:不动 status(空闲期照旧 idle,「后台 ×N」由 summarize 单独判),不追加消息。
+      // 内容相等时原样返回(保持引用稳定,避免无谓重渲染)。
+      const same =
+        next.backgroundTasks.length === payload.tasks.length &&
+        next.backgroundTasks.every(
+          (t, i) =>
+            t.taskId === payload.tasks[i].taskId &&
+            t.taskType === payload.tasks[i].taskType &&
+            t.description === payload.tasks[i].description,
+        );
+      if (same) return state;
+      next.backgroundTasks = payload.tasks;
+      return next;
+    }
+    case "task_notification": {
+      // 后台任务完成/失败/停止通知:在消息流末尾插入轻量 notice 提示(绿勾/红叉/琥珀方块居中行)。
+      // 幂等:确定性 id `notice:<taskId>:<status>` + messageIndex 查重,同 (taskId, status) 只插
+      // 一次(claude 偶发重推);其余 status(未知/中间态)忽略。
+      if (payload.status !== "completed" && payload.status !== "failed" && payload.status !== "stopped") {
+        return state;
+      }
+      const noticeId = `notice:${payload.taskId}:${payload.status}`;
+      if (next.messageIndex.has(noticeId)) return state;
+      next.messages.push({
+        id: noticeId,
+        role: "notice",
+        notice: {
+          kind:
+            payload.status === "completed"
+              ? "bg_done"
+              : payload.status === "failed"
+                ? "bg_failed"
+                : "bg_stopped",
+          summary: payload.summary,
+        },
+        blocks: [],
+        timestamp: new Date().toISOString(),
+        streaming: false,
+      });
+      next.messageIndex.set(noticeId, next.messages.length - 1);
+      return next;
+    }
     default: {
       // 兜底:未知 kind 不改 state。
       return next;
     }
   }
+}
+
+/**
+ * 恢复会话的历史回填:把 `read_claude_history_events` 读出的事件序列(glm 代理 `--resume`
+ * 不重放历史的兜底,事件与实时流同构)批量归并进 state,末尾插 history_resumed notice。
+ *
+ * 与直接循环 applyEvent 的关键差异:
+ * - **收尾强制 status=idle / 清 terminatedReason**:applyEvent 的 assistant case 无条件置
+ *   running(「轮次进行中」语义),历史注入是静态回放非在途轮,不复位会 busy 卡死(不能发消息)。
+ * - **streaming 收尾置 false**:jsonl 里的 assistant 消息是完整快照,没有后续 result 事件配对,
+ *   不清会永远转圈。
+ * - notice 幂等(确定性 id):↻ 反复切换会话时 state 已被 backfill 前置重置,同 id 不叠加。
+ */
+export function applyHistoryEvents(
+  state: ClaudeStreamState,
+  payloads: ClaudeEventPayload[],
+  history: { count: number; truncated: boolean; failed: boolean },
+): ClaudeStreamState {
+  let next = state;
+  for (const p of payloads) next = applyEvent(next, p);
+  next = {
+    ...next,
+    status: "idle",
+    terminatedReason: null,
+    messages: next.messages.map((m) => ({ ...m, streaming: false })),
+  };
+  const noticeId = "notice:history_resumed";
+  if (!next.messageIndex.has(noticeId)) {
+    const messages = [...next.messages];
+    const messageIndex = new Map(next.messageIndex);
+    messages.push({
+      id: noticeId,
+      role: "notice",
+      notice: { kind: "history_resumed", summary: "", history },
+      blocks: [],
+      timestamp: new Date().toISOString(),
+      streaming: false,
+    });
+    messageIndex.set(noticeId, messages.length - 1);
+    next = { ...next, messages, messageIndex };
+  }
+  return next;
+}
+
+/**
+ * 批准本地执行的工具块 UI 反馈:原地 patch tool_use block 的 status/result。批准被拒工具后
+ * txuyStudio 本地执行该工具、结果经 stdin tool_result 回传给 claude(见 ClaudeTransport.
+ * approveToolRun)--这条路径**不走 applyEvent 事件流**,UI 侧由本函数显式更新(执行中
+ * running/完成后回填结果摘要),否则工具卡停留在旧 denied 药丸误导用户。
+ */
+export function patchToolBlock(
+  state: ClaudeStreamState,
+  toolUseId: string,
+  patch: { status: "running" | "done" | "error"; resultContent: string | null },
+): ClaudeStreamState {
+  const loc = state.toolUseIndex.get(toolUseId);
+  if (!loc) return state;
+  const target = state.messages[loc.msgIdx];
+  const block = target.blocks[loc.blockIdx];
+  if (block.type !== "tool_use") return state;
+  const messages = [...state.messages];
+  const blocks = [...target.blocks];
+  blocks[loc.blockIdx] = {
+    ...block,
+    status: patch.status,
+    result: patch.resultContent != null
+      ? { content: patch.resultContent, isError: patch.status === "error" }
+      : block.result,
+  };
+  messages[loc.msgIdx] = { ...target, blocks };
+  return { ...state, messages };
 }
 
 /**
@@ -660,16 +805,18 @@ export function appendUserMessage(state: ClaudeStreamState, text: string): Claud
 
 // -- 对外汇总语义(状态栏 + tab chip 共用) --
 
-/** 对外汇总的会话语义态。优先级从高到低:error > retrying > waiting > running > idle。 */
-export type ClaudeSessionKind = "error" | "retrying" | "waiting" | "running" | "idle";
+/** 对外汇总的会话语义态。优先级从高到低:error > retrying > waiting > running > bg > idle。 */
+export type ClaudeSessionKind = "error" | "retrying" | "waiting" | "running" | "bg" | "idle";
 
 /** 对外汇总的会话状态(状态栏 + tab chip 共用)。与 `ClaudeRunStatus`(applyEvent 内部状态机)区分:
  *  这里是面向 UI 的「这个 tab 现在处于什么语义态」,把散落的 status/compactRunning/retry/
  *  hasPendingPlan/hasPendingApproval 收敛成单一值,供 StatusBar 跨 tab 汇总与 tab chip 状态点复用。 */
 export type ClaudeSessionSummary = {
   kind: ClaudeSessionKind;
-  /** 是否处于活跃态(占资源/需关注),用于 StatusBar 计数。running/retrying/waiting 为 true。 */
+  /** 是否处于活跃态(占资源/需关注),用于 StatusBar 计数。running/retrying/waiting/bg 为 true。 */
   active: boolean;
+  /** 后台任务运行数(仅 kind:"bg" 有值)。AI 本轮空闲、可继续对话,但有 N 个后台任务在跑。 */
+  bgTasks?: number;
   /** 上下文占用%(0-100,取最近 assistant usage / contextWindow)。无 usage 时 undefined。 */
   ctxPct?: number;
   /** 当前会话 model(init/前端切换回填)。供 StatusBar 聚焦 tab 显示。 */
@@ -717,11 +864,13 @@ export function hasPendingApproval(state: ClaudeStreamState, resolvedApprovals?:
 const EMPTY_SET: Set<string> = new Set();
 
 /**
- * 把 ClaudeStreamState 归并成对外汇总语义。优先级:error > retrying > waiting > running > idle。
+ * 把 ClaudeStreamState 归并成对外汇总语义。优先级:error > retrying > waiting > running > bg > idle。
  *  - error:status=error(进程异常/崩溃,非 interrupted--interrupted 在 applyEvent 已置 idle)。
  *  - retrying:state.retry 非空(API error 自动重试中,橙,最高优先异常,盖住 running)。
  *  - waiting:hasPendingPlan || hasPendingApproval(需用户确认,紫)。
  *  - running:busy(status running/thinking)|| compactRunning || shellRunning(正在干活,cyan)。
+ *  - bg:backgroundTasks.length > 0(本轮已结束、可对话,但有后台任务在跑,琥珀;busy 时被 running
+ *    盖住,turn 结束后透出)。附 bgTasks 计数。
  *  - idle:其余(done 后 idle / 未启动)。
  *
  * @param shellRunning `!` 命令是否在跑(同 tab 的 ShellRunTransport 状态)。tab chip 传(true 算 running);
@@ -794,6 +943,9 @@ export function summarize(
   const busy = state.status === "running" || state.status === "thinking";
   if (busy || state.compactRunning || shellRunning) {
     return { kind: "running", active: true, ...extra };
+  }
+  if (state.backgroundTasks.length > 0) {
+    return { kind: "bg", active: true, bgTasks: state.backgroundTasks.length, ...extra };
   }
   return { kind: "idle", active: false, ...extra };
 }
