@@ -2,7 +2,7 @@
 
 > 面向 Windows 开发者的 AI CLI 终端工作台 — 并行管理 `claude` / `codex` / 常规 shell / 测试命令的桌面工作台（Tauri · Rust · React · xterm.js）。
 
-**Status: MVP** · 真实 PTY（按项目隔离）· 多项目工作区 · 可弹出独立窗口 · WT 式分屏（每 pane 多 tab）· 内置 oh-my-posh + Nerd Font · 布局持久化
+**Status: MVP** · 自渲染 Claude/Codex 对话面板 · 真实 PTY（按项目隔离）· 多项目多主窗口 · 可弹出独立窗口 · WT 式分屏（每 pane 多 tab）· 内置 oh-my-posh + Nerd Font · 布局持久化
 
 [English](#english) · [中文](#中文)
 
@@ -16,7 +16,7 @@
 
 txuyStudio is a desktop workbench (built with Tauri + Rust + React + xterm.js) for running and managing AI CLI tools — `claude`, `codex`, regular shells, and test commands — side by side within a per-project workspace. It is **not** a general-purpose terminal replacement; the differentiation is a UI and workflow designed around AI-coding-CLI usage.
 
-> **Status:** MVP — real PTY with per-project PTY isolation, multi-project workspaces, detachable independent windows, Windows-Terminal-style pane splitting with per-pane multi-tab, bundled oh-my-posh + Nerd Font, TUI tool windows (lazygit/yazi/fresh) with install prompts, WT-style shortcuts, and persisted layouts are all implemented. Destructive-command protection and one-click task launching are on the roadmap.
+> **Status:** MVP — self-rendered Claude/Codex conversation panes, real PTY with per-project isolation, multi-project workspaces with multi-window support, detachable project windows, Windows-Terminal-style pane splitting with per-pane multi-tab, bundled oh-my-posh + Nerd Font, TUI tool windows (lazygit/yazi/fresh) with install prompts, WT-style shortcuts, and persisted layouts are all implemented. Destructive-command protection and one-click task launching are on the roadmap.
 
 > To see it live: clone → `bun install` → `bun run tauri dev`.
 
@@ -41,6 +41,8 @@ txuyStudio is a desktop workbench (built with Tauri + Rust + React + xterm.js) f
 ### Highlights
 
 - **Per-project workspace** — switch projects from the top bar; each project keeps its own shell layout and restores on reopen. PTY processes are isolated per project (closing a project kills its PTY).
+- **Self-rendered AI conversation panes** — Claude & Codex each get a dedicated conversation UI (not a terminal): streaming markdown + thinking, tool-call cards with in-place approval (executes locally and feeds the result back), session-history resume, per-tab model / effort / permission-mode switching, context-window % status, `/compact`, and `!` inline PowerShell commands. The `claude` executable is auto-located — native installer (`~/.local/bin`, recommended), PATH, or legacy `~/.claude/local`.
+- **Multi-window workbench** — the top-bar ＋ menu (new project / new window / recent projects) opens additional main windows with isolated projects; closing a project archives it to history, restorable in one click with its layout and AI sessions intact.
 - **Detachable project windows** — right-click a project chip → "Open in new window" pops it into an independent native window (move semantics: hidden in main window while detached). Dock back or close the window to restore; detached state is runtime-only (not persisted), so restart always re-docks everything into the main window.
 - **Windows-Terminal-style pane splitting** — split panes right/down (nestable), close-to-refill, directional focus switching. Binary `paneTree` model, persisted to `state.json`.
 - **Per-pane multi-tab** — each pane leaf holds a stack of tabs (switch without disposing xterm; scrollback & input history preserved). Splitting (space) and tabs (time) are orthogonal dimensions.
@@ -117,6 +119,7 @@ The frontend dev server is pinned to port `:1420` (`strictPort`) — Tauri depen
 | `Ctrl+Shift+W` | Close current tab |
 | `Ctrl+Tab` / `Ctrl+Shift+Tab` | Cycle tabs forward / backward |
 | `Ctrl+Alt+1…9` | Switch to project N (by visible-project order) |
+| `Ctrl+C` | Copy when text is selected in a terminal pane; otherwise send ^C (interrupt) |
 
 > Right-click the top-bar project chip for "Open in new window" (detach) and other project actions. The gear in the bottom-left status bar opens the shortcuts/settings panel.
 
@@ -144,7 +147,7 @@ Implementation progress and the roadmap are listed above; ongoing tracking moves
 
 txuyStudio 是一个桌面工作台(基于 Tauri + Rust + React + xterm.js),用于在同一个项目工作区内并行运行和管理 AI CLI 工具——`claude`、`codex`、常规 shell、测试命令。它**不是**通用终端替代品,差异化在于为「AI 编程 CLI 工作流」专门设计的界面与流程。
 
-> **当前阶段:**MVP——真实 PTY(按项目隔离)、多项目工作区、可弹出独立窗口、Windows Terminal 式分屏(每 pane 多 tab)、内置 oh-my-posh + Nerd Font、TUI 工具窗口(lazygit/yazi/fresh,未安装则提示)、WT 式快捷键、布局持久化均已实现。危险命令保护、一键启动任务在路线图上。
+> **当前阶段:**MVP——自渲染 Claude/Codex 对话面板、真实 PTY(按项目隔离)、多项目多主窗口工作区、可弹出独立项目窗口、Windows Terminal 式分屏(每 pane 多 tab)、内置 oh-my-posh + Nerd Font、TUI 工具窗口(lazygit/yazi/fresh,未安装则提示)、WT 式快捷键、布局持久化均已实现。危险命令保护、一键启动任务在路线图上。
 
 > 本地体验:`git clone` → `bun install` → `bun run tauri dev`。
 
@@ -169,6 +172,8 @@ txuyStudio 是一个桌面工作台(基于 Tauri + Rust + React + xterm.js),用�
 ### 核心特性
 
 - **按项目隔离的工作区**——顶栏切换项目,每个项目保存各自的 shell 布局,重开自动恢复。PTY 进程按项目隔离(关闭项目即 kill 对应 PTY)。
+- **AI 自渲染对话面板**——Claude/Codex 各有专属对话界面(非终端):流式 markdown + thinking、工具卡片与批准原地执行(本地执行并把结果回传)、会话历史恢复、每 tab 独立 model/effort/权限模式、上下文占用 % 状态、`/compact`、`!` 内联 PowerShell。`claude` 可执行文件自动定位(原生安装包 `~/.local/bin`,推荐 > PATH > 旧版 `~/.claude/local`)。
+- **多主窗口工作台**——顶栏 ＋ 菜单(新项目/新窗口/历史项目)可开多个主窗口,各窗口项目隔离;关闭项目自动归档进历史,一键恢复(布局与 AI 会话完整还原)。
 - **可弹出独立窗口**——右键顶栏项目 chip →「在新窗口打开」,把项目弹到独立原生窗口(move 语义:弹出后主窗口隐藏该项目)。dock back 或关窗即恢复;detached 状态仅运行期(不持久化),重启必定所有项目归位主窗口。
 - **Windows Terminal 式分屏**——向右/向下分屏(可嵌套)、关闭回填、方向切焦点。二叉 `paneTree` 模型持久化到 `state.json`。
 - **每 pane 多 tab**——pane 叶子是 tab 栈(切 tab 不卸载 xterm,回滚与输入历史完整保留)。分屏(空间维度)与 tab(时间维度)正交。
@@ -245,6 +250,7 @@ cargo check          # 后端类型/编译检查(在 src-tauri/ 下执行)
 | `Ctrl+Shift+W` | 关闭当前 tab |
 | `Ctrl+Tab` / `Ctrl+Shift+Tab` | 循环切 tab(前 / 后) |
 | `Ctrl+Alt+1…9` | 切到第 N 个项目(按可见项目顺序) |
+| `Ctrl+C` | 终端里有选中文字时复制;无选中时发送中断(^C) |
 
 > 右键顶栏项目 chip 可「在新窗口打开」(detach)等操作;状态栏左下角齿轮打开快捷键/设置面板。
 
