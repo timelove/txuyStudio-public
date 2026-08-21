@@ -5,6 +5,7 @@ import type { PaneRef } from "../domain/paneTree";
 import { listPanes } from "../domain/paneTree";
 import { NEW_SHELL_GROUPS, SHELL_KIND_META } from "../domain/shellKinds";
 import type { ProjectSnapshot } from "../domain/projects";
+import { projectAccentColor } from "../domain/projects";
 import { Button } from "./ui/Button";
 import { Popover, PopoverContent, PopoverTrigger } from "./ui/Popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/Tooltip";
@@ -89,8 +90,8 @@ export function ShellSidebar({
         {visibleProjects.map((project, idx) => {
           const tree = treesByProject[project.id];
           const panes = tree ? listPanes(tree) : [];
-          // 项目色:用项目 id 哈希到一个稳定色调(仅做左栏标头区分,非 shellKind 配色)。
-          const projectColor = projectColorFor(project.id);
+          // 项目色:用项目 id 哈希稳定色(与顶栏 chip/内容区分隔线同色源,跨 UI 一致区分)。
+          const projectColor = projectAccentColor(project.id);
           return (
             <section key={project.id} className="flex w-full flex-col items-center gap-[6px]">
               {/* 项目色条:3px 全宽,纯项目色。hover 区仅 3px 高,Tooltip 体验差,保留原生 title。 */}
@@ -190,12 +191,4 @@ export function ShellSidebar({
       </nav>
     </>
   );
-}
-
-/** 把 projectId 映射到稳定的项目色调(仅左栏标头区分用)。 */
-function projectColorFor(id: string): string {
-  const palette = ["#7c3aed", "#22d3ee", "#3b82f6", "#a855f7", "#f59e0b", "#60a5fa"];
-  let h = 0;
-  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
-  return palette[h % palette.length];
 }

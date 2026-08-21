@@ -1284,8 +1284,14 @@ export function ClaudePane(props: ClaudePaneProps) {
         }
         return next;
       });
-      await transport.interrupt();
-      void transport.approveTool(block.name, persist, t("claudepane.approveProceed"));
+      void transport.approveToolRun({
+        toolUseId: block.id,
+        tool: block.name,
+        input: block.input,
+        persist,
+        cwd: stateRef.current?.meta.cwd ?? null,
+        fallbackApproveMsg: t("claudepane.approveProceed"),
+      });
     },
     [activeTabId, t],
   );
@@ -1304,7 +1310,11 @@ export function ClaudePane(props: ClaudePaneProps) {
         }
         return next;
       });
-      void transport.rejectTool(t("claudepane.rejectMsg", { tool: block.name }));
+      void transport.sendToolResult(
+        block.id,
+        `User denied the ${block.name} tool call. Please suggest an alternative approach or ask for clarification.`,
+        true,
+      );
     },
     [activeTabId, t],
   );
@@ -1445,7 +1455,11 @@ export function ClaudePane(props: ClaudePaneProps) {
     const out: { kind: "bg_done" | "bg_failed" | "bg_stopped"; summary: string }[] = [];
     for (let i = state.messages.length - 1; i >= 0 && out.length < 5; i--) {
       const m = state.messages[i];
-      if (m.role === "notice" && m.notice) out.push(m.notice);
+      const n = m.notice;
+      // 只收后台任务 notice;history_resumed(恢复会话历史回填)不属于任务完成列表。
+      if (m.role === "notice" && n && n.kind !== "history_resumed") {
+        out.push({ kind: n.kind, summary: n.summary });
+      }
     }
     return out.reverse();
   }, [state]);
@@ -1591,6 +1605,23 @@ export function ClaudePane(props: ClaudePaneProps) {
           </TabsList>
         </Tabs>
         <div className="flex shrink-0 items-center gap-1 text-[var(--mx-muted)]">
+          {/* 重置当前会话:清屏 + kill 进程 + 用 registry live id --resume 重启(session 续接)。 */}
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                className="text-[14px] text-[var(--mx-muted)] hover:bg-[var(--mx-border)] hover:text-[var(--mx-text)]"
+                onMouseDown={(e) => e.stopPropagation()}
+                onClick={() => {
+                  void getClaudeTransportRef.current(activeTabId)?.resetSession();
+                }}
+              >
+                ↺
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>{t("session.resetSession")}</TooltipContent>
+          </Tooltip>
           {onResumeSession && (
             <Popover open={resumeOpen} onOpenChange={setResumeOpen}>
               <Tooltip>
@@ -2448,16 +2479,26 @@ const MessageRow = memo(function MessageRow({
   }
 
   if (message.role === "notice") {
-    // notice 节点:系统级轻提示行(后台任务完成/失败/停止,`task_notification` 驱动)。
-    // 仿 compact boundary 的居中轻量样式,绿勾/红叉/琥珀方块区分,不参与角色流。
-    const stopped = message.notice?.kind === "bg_stopped";
-    const done = message.notice?.kind === "bg_done";
-    const tone = stopped ? "#fbbf24" : done ? "#86efac" : "#fca5a5";
+    // notice 节点:系统级轻提示行(后台任务完成/失败/停止、恢复会话历史回填)。
+    // 仿 compact boundary 的居中轻量样式,绿勾/红叉/琥珀方块/青勾区分,不参与角色流。
+    const kind = message.notice?.kind;
+    const stopped = kind === "bg_stopped";
+    const done = kind === "bg_done";
+    const resumed = kind === "history_resumed";
+    const hist = message.notice?.history;
+    const ok = done || (resumed && !hist?.failed);
+    const tone = stopped ? "#fbbf24" : ok ? (resumed ? "#7dd3fc" : "#86efac") : "#fca5a5";
     const label = stopped
       ? t("claudepane.bgTaskStoppedLabel")
       : done
         ? t("claudepane.bgTaskDoneLabel")
-        : t("claudepane.bgTaskFailedLabel");
+        : resumed
+          ? hist?.failed
+            ? t("claudepane.historyFailed")
+            : t("claudepane.historyResumed", { n: hist?.count ?? 0 })
+          : t("claudepane.bgTaskFailedLabel");
+    // 后台任务 notice 的 summary 是 claude 原文直接拼;历史回填 notice 的附注(截断提示)走 i18n。
+    const suffix = resumed ? (hist?.truncated ? t("claudepane.historyTruncated") : "") : message.notice?.summary;
     return (
       <div className="my-2 flex items-center gap-3 select-none">
         <div className="h-px flex-1" style={{ borderTop: "1px dashed rgba(148,163,184,0.32)", background: "transparent" }} />
@@ -2468,11 +2509,11 @@ const MessageRow = memo(function MessageRow({
             </svg>
           ) : (
             <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke={tone} strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-              {done ? <path d="M20 6L9 17l-5-5" /> : <path d="M18 6L6 18M6 6l12 12" />}
+              {ok ? <path d="M20 6L9 17l-5-5" /> : <path d="M18 6L6 18M6 6l12 12" />}
             </svg>
           )}
           <span style={{ color: tone }}>{label}</span>
-          {message.notice?.summary}
+          {suffix}
         </span>
         <div className="h-px flex-1" style={{ borderTop: "1px dashed rgba(148,163,184,0.32)", background: "transparent" }} />
       </div>

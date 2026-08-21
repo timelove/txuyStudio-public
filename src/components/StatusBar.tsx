@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useTranslation } from "react-i18next";
 import type { ProjectSnapshot } from "../domain/projects";
+import { projectAccentColor } from "../domain/projects";
 import type { ClaudeStatusEntry } from "../domain/claudeStatusRegistry";
 import type { CodexStatusEntry } from "../domain/codexStatusRegistry";
 import type { ClaudeSessionKind } from "../domain/claudeStream";
@@ -157,7 +158,7 @@ export function StatusBar({ focusedProject, gitBranch, claudeStatuses, codexStat
             <TooltipTrigger asChild>
             <span
               className="h-1.5 w-1.5 shrink-0 rounded-full"
-              style={{ background: "var(--mx-accent)" }}
+              style={{ background: focusedProject ? projectAccentColor(focusedProject.id) : "var(--mx-accent)" }}
             />
             </TooltipTrigger>
             <TooltipContent>{t("statusbar.focusedProject")}</TooltipContent>

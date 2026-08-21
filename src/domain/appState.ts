@@ -18,11 +18,13 @@ export type PaneConfig = {
   command: string;
 };
 
-/** 单个项目的持久化记录（身份层）。 */
+/** 单个项目的持久化记录(身份层)。 */
 export type ProjectRecord = {
   id: ProjectId;
   name: string;
   rootPath: string;
+  /** 承载该项目的窗口 label("main"/"workspace-N");后端 serde 默认 "main"(旧数据)。 */
+  ownerWindow?: string;
   lastOpenedMs: number;
   /** 分屏布局（WT 式 pane tree）。旧数据可能为空，前端 deriver 回退默认单 PowerShell pane。 */
   paneTree?: PaneNode;
@@ -49,4 +51,6 @@ export type BackendAppSnapshot = {
   themeId?: string | null;
   /** Codex 会话默认 sandbox 档位(codex exec -s);undefined/未设 = 前端默认(workspace-write)。 */
   codexSandbox?: string | null;
+  /** 最近项目历史(关闭项目/工作台窗口关窗时后端归档;+ 菜单「历史项目」数据源)。 */
+  recentProjects?: ProjectRecord[];
 };

@@ -1042,6 +1042,23 @@ export function CodexPane(props: CodexPaneProps) {
           </TabsList>
         </Tabs>
         <div className="flex shrink-0 items-center gap-1 text-[var(--mx-muted)]">
+          {/* 重置当前会话:清屏 + resume 当前 thread id(下次 send 续接同 thread)。 */}
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                className="text-[14px] text-[var(--mx-muted)] hover:bg-[var(--mx-border)] hover:text-[var(--mx-text)]"
+                onMouseDown={(e) => e.stopPropagation()}
+                onClick={() => {
+                  getCodexTransportRef.current(activeTabId)?.resetSession();
+                }}
+              >
+                ↺
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>{t("session.resetSession")}</TooltipContent>
+          </Tooltip>
           {onResumeSession && (
             <Popover open={resumeOpen} onOpenChange={setResumeOpen}>
               <Tooltip>

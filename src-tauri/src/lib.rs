@@ -8,8 +8,9 @@ mod system;
 mod windows;
 
 use claude::commands::{
-    claude_settings_changed, get_claude_config_path, get_claude_session_model, kill_claude,
-    list_claude_models, send_claude_message, set_claude_model, start_claude_session,
+    claude_settings_changed, exec_claude_tool_local, get_claude_config_path, get_claude_session_model,
+    kill_claude, list_claude_models, read_claude_history_events, send_claude_message, set_claude_model,
+    start_claude_session,
 };
 use claude::ClaudeRegistry;
 use codex::commands::{
@@ -25,9 +26,9 @@ use pty::PtyRegistry;
 use shell_run::commands::{kill_shell_command, run_shell_command};
 use shell_run::ShellRunRegistry;
 use state::commands::{
-    add_claude_allowed_tool, close_project, hydrate_window, open_project, save_pane_tree,
-    save_window_bounds, set_active_project, set_codex_sandbox, set_locale,
-    set_terminal_font_size, set_theme,
+    add_claude_allowed_tool, close_project, hydrate_window, open_project, open_recent_project,
+    remove_recent_project, save_pane_tree, save_window_bounds, set_active_project,
+    set_codex_sandbox, set_locale, set_terminal_font_size, set_theme,
 };
 use system::commands::{
     check_commands_installed, delete_ai_cli_session, get_ai_cli_session_messages, get_git_branch,
@@ -38,7 +39,7 @@ use std::sync::Mutex;
 
 use tauri::{Emitter, Manager};
 use tauri_plugin_log::{Builder as LogBuilder, Target, TargetKind};
-use windows::{close_project_window, open_project_window};
+use windows::{close_project_window, open_new_workspace_window, open_project_window};
 
 /// 已被前端 show 过的窗口 label 集合(多窗口隔离:主窗口与每个独立项目窗口各自首帧 show)。
 /// `show()` 本身幂等;此集合仅用于日志去重 + 让兜底定时器在前端已 show 时跳过。
@@ -194,6 +195,10 @@ pub fn run() {
                     log::info!("project window close requested: {label}, emitting project-window-closed");
                     let _ = window.app_handle().emit("project-window-closed", label);
                 }
+                // 工作台窗口关闭:其项目归档进最近历史 + kill 会话(main 不走此路径)。
+                if windows::is_workspace_window(label) {
+                    windows::archive_workspace_projects(window.app_handle(), label);
+                }
             }
         })
         .setup(|app| {
@@ -207,7 +212,32 @@ pub fn run() {
             // 从磁盘加载持久化状态（失败回退空快照，不阻断启动），
             // 再 manage 为全局 AppState。
             log::info!("txuyStudio starting, loading persisted state…");
-            let snapshot = state::persistence::load(app.handle());
+            let mut snapshot = state::persistence::load(app.handle());
+            // 启动兜底:workspace 窗口不持久化重建,若上次会话被强杀/崩溃,其项目没走
+            // CloseRequested 归档流程,会以 owner=workspace-N 滞留(主窗口不可见、也不在
+            // 历史)。这里统一归档进最近项目历史(workspace_active 一并清空,窗口已不存在)。
+            {
+                let orphaned: Vec<state::ProjectRecord> = snapshot
+                    .projects
+                    .iter()
+                    .filter(|p| p.owner_window.starts_with(windows::WORKSPACE_WINDOW_PREFIX))
+                    .cloned()
+                    .collect();
+                if !orphaned.is_empty() {
+                    log::info!(
+                        "startup: archiving {} orphaned workspace project(s) into recent history",
+                        orphaned.len()
+                    );
+                    snapshot
+                        .projects
+                        .retain(|p| !p.owner_window.starts_with(windows::WORKSPACE_WINDOW_PREFIX));
+                    state::archive_recent(&mut snapshot, orphaned);
+                    snapshot.workspace_active.clear();
+                    if let Err(e) = state::persistence::save(app.handle(), &snapshot) {
+                        log::error!("startup: archive orphaned projects persist failed: {e}");
+                    }
+                }
+            }
             log::info!(
                 "state loaded: {} project(s), active = {:?}",
                 snapshot.projects.len(),
@@ -270,6 +300,10 @@ pub fn run() {
             kill_pty,
             // claude 自渲染对话(stream-json 长进程;start 启动/重启,send 写 stdin,/compact 真生效)
             start_claude_session,
+            // 恢复会话历史回填:读 jsonl 转与实时事件同构的序列(glm 代理 --resume 不重放历史的兜底)
+            read_claude_history_events,
+            // 批准被拒工具时本地执行(Bash/Edit/Write),结果经 tool_result 原地回传(claude cli 同语义)
+            exec_claude_tool_local,
             send_claude_message,
             get_claude_config_path,
             get_claude_session_model,
@@ -294,6 +328,9 @@ pub fn run() {
             open_project,
             close_project,
             set_active_project,
+            // 最近项目历史(+ 菜单「历史项目」恢复/删除)
+            open_recent_project,
+            remove_recent_project,
             set_locale,
             set_terminal_font_size,
             set_theme,
@@ -304,6 +341,8 @@ pub fn run() {
             // 独立项目窗口(阶段 4:右击项目「在新窗口打开」)
             open_project_window,
             close_project_window,
+            // 空白工作台窗口(多主窗口:+ 菜单「新窗口」,项目按窗口归属隔离)
+            open_new_workspace_window,
             // 系统环境查询（内存占用 + git 分支 + 命令安装检测 + AI CLI 会话列表/删除/消息流/provider 注册表）
             get_system_memory,
             get_git_branch,

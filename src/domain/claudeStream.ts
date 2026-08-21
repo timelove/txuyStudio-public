@@ -137,8 +137,14 @@ export type ClaudeMessage = {
   compactKind?: "boundary" | "summary";
   /** compact boundary 的压缩比信息(仅 kind:"boundary" 有)。 */
   compactMeta?: CompactMeta;
-  /** notice 节点的载荷(仅 role:"notice" 有):后台任务完成/失败/停止等系统级轻提示。 */
-  notice?: { kind: "bg_done" | "bg_failed" | "bg_stopped"; summary: string };
+  /** notice 节点的载荷(仅 role:"notice" 有):后台任务完成/失败/停止、历史回填等系统级轻提示。 */
+  notice?: {
+    kind: "bg_done" | "bg_failed" | "bg_stopped" | "history_resumed";
+    summary: string;
+    /** history_resumed 专用:回填元信息(条数/是否截断/是否失败)。summary 留空,文案由
+     *  ClaudePane 渲染时按 history 字段 i18n 本地化(transport 层无 i18n 上下文)。 */
+    history?: { count: number; truncated: boolean; failed: boolean };
+  };
   blocks: ClaudeBlock[];
   timestamp: string | null;
   model?: string;
@@ -702,6 +708,77 @@ export function applyEvent(state: ClaudeStreamState, payload: ClaudeEventPayload
       return next;
     }
   }
+}
+
+/**
+ * 恢复会话的历史回填:把 `read_claude_history_events` 读出的事件序列(glm 代理 `--resume`
+ * 不重放历史的兜底,事件与实时流同构)批量归并进 state,末尾插 history_resumed notice。
+ *
+ * 与直接循环 applyEvent 的关键差异:
+ * - **收尾强制 status=idle / 清 terminatedReason**:applyEvent 的 assistant case 无条件置
+ *   running(「轮次进行中」语义),历史注入是静态回放非在途轮,不复位会 busy 卡死(不能发消息)。
+ * - **streaming 收尾置 false**:jsonl 里的 assistant 消息是完整快照,没有后续 result 事件配对,
+ *   不清会永远转圈。
+ * - notice 幂等(确定性 id):↻ 反复切换会话时 state 已被 backfill 前置重置,同 id 不叠加。
+ */
+export function applyHistoryEvents(
+  state: ClaudeStreamState,
+  payloads: ClaudeEventPayload[],
+  history: { count: number; truncated: boolean; failed: boolean },
+): ClaudeStreamState {
+  let next = state;
+  for (const p of payloads) next = applyEvent(next, p);
+  next = {
+    ...next,
+    status: "idle",
+    terminatedReason: null,
+    messages: next.messages.map((m) => ({ ...m, streaming: false })),
+  };
+  const noticeId = "notice:history_resumed";
+  if (!next.messageIndex.has(noticeId)) {
+    const messages = [...next.messages];
+    const messageIndex = new Map(next.messageIndex);
+    messages.push({
+      id: noticeId,
+      role: "notice",
+      notice: { kind: "history_resumed", summary: "", history },
+      blocks: [],
+      timestamp: new Date().toISOString(),
+      streaming: false,
+    });
+    messageIndex.set(noticeId, messages.length - 1);
+    next = { ...next, messages, messageIndex };
+  }
+  return next;
+}
+
+/**
+ * 批准本地执行的工具块 UI 反馈:原地 patch tool_use block 的 status/result。批准被拒工具后
+ * txuyStudio 本地执行该工具、结果经 stdin tool_result 回传给 claude(见 ClaudeTransport.
+ * approveToolRun)--这条路径**不走 applyEvent 事件流**,UI 侧由本函数显式更新(执行中
+ * running/完成后回填结果摘要),否则工具卡停留在旧 denied 药丸误导用户。
+ */
+export function patchToolBlock(
+  state: ClaudeStreamState,
+  toolUseId: string,
+  patch: { status: "running" | "done" | "error"; resultContent: string | null },
+): ClaudeStreamState {
+  const loc = state.toolUseIndex.get(toolUseId);
+  if (!loc) return state;
+  const target = state.messages[loc.msgIdx];
+  const block = target.blocks[loc.blockIdx];
+  if (block.type !== "tool_use") return state;
+  const messages = [...state.messages];
+  const blocks = [...target.blocks];
+  blocks[loc.blockIdx] = {
+    ...block,
+    status: patch.status,
+    result: patch.resultContent != null
+      ? { content: patch.resultContent, isError: patch.status === "error" }
+      : block.result,
+  };
+  messages[loc.msgIdx] = { ...target, blocks };
+  return { ...state, messages };
 }
 
 /**

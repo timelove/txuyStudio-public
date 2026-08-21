@@ -218,6 +218,38 @@ export class CodexTransport {
   }
 
   /**
+   * 重置当前会话(右上角「重置」按钮):中断当前轮 + 清屏 + 用当前 thread 的 session id
+   * 重新 resume。codex 每轮是短命 exec,但后端仍会把运行中的 child 标记为 busy,所以
+   * 必须先 interrupt,否则清屏后下一条消息会被后端以「session busy」拒绝。
+   * 与 newSession 的区别:new 开全新 thread(上下文丢弃);reset 清屏但续接同 thread。
+   */
+  async resetSession(): Promise<void> {
+    const sid = this.state.meta.sessionId;
+    if (!sid) {
+      // 无会话 id(从未发过消息):等同 newSession(下轮开新 thread)。
+      this.newSession();
+      return;
+    }
+
+    // 先杀掉后端仍在运行的 exec。即使前端状态已经是 idle,后端也可能尚未处理完
+    // 上一轮 EOF,因此这里不依赖本地 busy 判定。
+    const inFlightSend = this.sendingPromise;
+    await this.interrupt();
+    if (inFlightSend) await inFlightSend.catch(() => {});
+
+    this.state = {
+      ...initialCodexState,
+      meta: {
+        ...this.state.meta,
+        // 保留 sessionId/model/reasoning 等;清消息与轮次状态。
+      },
+    };
+    this.resumeSessionId = sid;
+    this.pendingNewSession = false;
+    this.emit();
+  }
+
+  /**
    * 在当前 tab 恢复到指定历史 session:设 resumeSessionId(下次 send 带它续接该 thread)+
    * 清 terminatedReason(消「已终止」红字)+ 清 pendingNewSession(防 /new 残留导致开新会话)。
    *

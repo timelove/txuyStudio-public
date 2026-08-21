@@ -8,7 +8,7 @@ import { I18nProvider } from "./i18n/I18nProvider";
 import { SettingsProvider } from "./settings/SettingsProvider";
 import { ThemeProvider } from "./theme/ThemeProvider";
 import { useTranslation } from "react-i18next";
-import type { BackendAppSnapshot } from "./domain/appState";
+import type { BackendAppSnapshot, ProjectRecord } from "./domain/appState";
 import type { ProjectId, ProjectSnapshot } from "./domain/projects";
 import { deriveProjects } from "./domain/projectDeriver";
 
@@ -67,6 +67,8 @@ export default function App() {
   const [themeId, setThemeId] = useState<string | null | undefined>(undefined);
   /** 后端持久化的 Codex 默认 sandbox 档位(hydrate 后传入 SettingsProvider;undefined -> 默认档)。 */
   const [codexSandbox, setCodexSandbox] = useState<string | null | undefined>(undefined);
+  /** 最近项目历史(+ 菜单「历史项目」数据源;关闭项目/工作台关窗时后端归档,随快照回传)。 */
+  const [recentProjects, setRecentProjects] = useState<ProjectRecord[]>([]);
 
   // 主窗口运行期标记：哪些项目已弹出为独立窗口（隐藏在主窗口列表里）。不持久化。
   const [detachedProjectIds, setDetachedProjectIds] = useState<Set<ProjectId>>(new Set());
@@ -107,6 +109,7 @@ export default function App() {
         setTerminalFontSize(snap.terminalFontSize);
         setThemeId(snap.themeId ?? null);
         setCodexSandbox(snap.codexSandbox ?? null);
+        setRecentProjects(snap.recentProjects ?? []);
         setLoadState("ready");
       })
       .catch((err) => {
@@ -151,30 +154,98 @@ export default function App() {
   }, [mode.isMain]);
 
   const handleSelect = useCallback((projectId: ProjectId) => {
-    // 乐观更新：UI 立即切换，后端落 active。
+    // 乐观更新：UI 立即切换，后端落 active(按窗口;main 写旧字段,workspace 写各自 entry)。
     setActiveProjectId(projectId);
-    invoke("set_active_project", { projectId }).catch((err) => {
+    invoke("set_active_project", { projectId, windowLabel: mode.label }).catch((err) => {
       console.warn("[App] set_active_project failed:", err);
     });
-  }, []);
+  }, [mode.label]);
 
   const handleAdd = useCallback(async () => {
-    // 后端调起系统文件夹选择器；返回最新快照。
+    // 后端调起系统文件夹选择器；返回最新快照。新项目归属当前窗口(ownerWindow)。
     try {
-      const snap = await invoke<BackendAppSnapshot>("open_project");
+      const snap = await invoke<BackendAppSnapshot>("open_project", { windowLabel: mode.label });
       setProjects(deriveProjects(snap));
       setActiveProjectId(snap.activeProjectId);
+      setRecentProjects(snap.recentProjects ?? []);
     } catch (err) {
       console.error("[App] open_project failed:", err);
     }
+  }, [mode.label]);
+
+  // + 菜单「新窗口」:新建空白工作台窗口(后端建 workspace-N,项目按窗口归属隔离)。
+  const handleNewWindow = useCallback(async () => {
+    try {
+      await invoke<string>("open_new_workspace_window");
+    } catch (err) {
+      console.error("[App] open_new_workspace_window failed:", err);
+    }
   }, []);
+
+  // + 菜单「历史项目」点击:从最近历史恢复(rootPath 定位,整份记录移回打开列表,
+  // 布局/claude 会话保留),归属当前窗口并设为 active。返回新 active 供 AppShell 钉住。
+  const handleOpenRecent = useCallback(async (rootPath: string): Promise<ProjectId | null> => {
+    try {
+      const snap = await invoke<BackendAppSnapshot>("open_recent_project", {
+        rootPath,
+        windowLabel: mode.label,
+      });
+      setProjects(deriveProjects(snap));
+      setActiveProjectId(snap.activeProjectId);
+      setRecentProjects(snap.recentProjects ?? []);
+      return snap.activeProjectId;
+    } catch (err) {
+      console.error("[App] open_recent_project failed:", err);
+      return null;
+    }
+  }, [mode.label]);
+
+  // + 菜单历史项 ✕:仅删历史记录(不影响打开中的项目),后端返回最新快照同步列表。
+  const handleRemoveRecent = useCallback(async (rootPath: string) => {
+    try {
+      const snap = await invoke<BackendAppSnapshot>("remove_recent_project", { rootPath });
+      setRecentProjects(snap.recentProjects ?? []);
+    } catch (err) {
+      console.error("[App] remove_recent_project failed:", err);
+    }
+  }, []);
+
+  // 历史项右键「在新窗口打开」:先恢复(open_recent_project 移回打开列表并设 active),
+  // 再弹独立项目窗口(open_project_window)并标记 detached 让本窗口隐藏该项目--
+  // 与打开列表项目的 detach 同形态,只是多一步「从历史恢复」。
+  const handleOpenRecentToWindow = useCallback(async (rootPath: string) => {
+    try {
+      const snap = await invoke<BackendAppSnapshot>("open_recent_project", {
+        rootPath,
+        windowLabel: mode.label,
+      });
+      setProjects(deriveProjects(snap));
+      setActiveProjectId(snap.activeProjectId);
+      setRecentProjects(snap.recentProjects ?? []);
+      const pid = snap.activeProjectId;
+      if (!pid) return;
+      const label = await invoke<string>("open_project_window", { projectId: pid });
+      if (label === `${PROJECT_WINDOW_PREFIX}${pid}`) {
+        setDetachedProjectIds((prev) => {
+          if (prev.has(pid)) return prev;
+          const next = new Set(prev);
+          next.add(pid);
+          return next;
+        });
+      }
+    } catch (err) {
+      console.error("[App] open recent to window failed:", err);
+    }
+  }, [mode.label]);
 
   const handleCloseProject = useCallback(async (projectId: ProjectId) => {
     // 后端 kill 该项目所有 PTY + 移除记录 + 落盘;返回最新 snap(可能为空 active)。
+    // 被删项目后端已归档进最近历史,一并同步(供 + 菜单「历史项目」展示)。
     try {
       const snap = await invoke<BackendAppSnapshot>("close_project", { projectId });
       setProjects(deriveProjects(snap));
       setActiveProjectId(snap.activeProjectId);
+      setRecentProjects(snap.recentProjects ?? []);
       // 关闭的项目若曾 detached,也清掉标记。
       setDetachedProjectIds((prev) => {
         if (!prev.has(projectId)) return prev;
@@ -240,6 +311,11 @@ export default function App() {
           detachedProjectIds={mode.isMain ? detachedProjectIds : new Set()}
           singleProjectMode={!mode.isMain}
           onDockBack={mode.isMain ? undefined : handleDockBack}
+          recentProjects={mode.isMain ? recentProjects : []}
+          onOpenRecent={mode.isMain ? handleOpenRecent : undefined}
+          onRemoveRecent={mode.isMain ? handleRemoveRecent : undefined}
+          onOpenRecentToWindow={mode.isMain ? handleOpenRecentToWindow : undefined}
+          onNewWindow={mode.isMain ? handleNewWindow : undefined}
         />
       </SettingsProvider>
       </ThemeProvider>

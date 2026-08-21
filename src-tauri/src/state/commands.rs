@@ -8,13 +8,17 @@ use tauri::{AppHandle, State};
 use tauri_plugin_dialog::DialogExt;
 
 use super::persistence;
-use super::{collect_tab_ids, default_pane_tree, now_ms, AppState, AppSnapshot, PaneNode, ProjectRecord, WindowBounds};
+use super::{
+    archive_recent, collect_tab_ids, default_pane_tree, now_ms, set_active_for_window, AppState,
+    AppSnapshot, PaneNode, ProjectRecord, WindowBounds,
+};
 use crate::claude::ClaudeRegistry;
 use crate::pty::PtyRegistry;
 
 /// 启动 hydrate:按 `windowLabel` 返回权威快照。
 ///
-/// - `windowLabel == "main"`(或无 route_hint)→ 返回整份快照(主窗口用)。
+/// - `windowLabel == "main"` 或 `workspace-N`(工作台窗口)→ 返回本窗口拥有的项目
+///   (ownerWindow 匹配;main 兼容旧数据全量)+ 全量最近项目历史;active 按窗口取。
 /// - `windowLabel` 以 `project-` 开头且 `route_hint` 给了 projectId → 返回**只含该单个项目**
 ///   的快照(projects 过滤为 1 项,activeProjectId = 该 projectId)。独立项目窗口据此
 ///   只拿到自己项目的数据,天然隔离。锁作用域内 clone/过滤后即释放,无 `.await` 跨锁。
@@ -52,7 +56,21 @@ pub async fn hydrate_window(
         }
     }
 
-    Ok(guard.clone())
+    // 工作台窗口(main / workspace-N):只回本窗口拥有的项目;active 按窗口取并校验。
+    // (recent_projects 历史全量附带,各窗口的 + 菜单都能看到、都能恢复。)
+    let mut snap = guard.clone();
+    snap.projects.retain(|p| p.owner_window == window_label);
+    let active = if window_label == "main" {
+        snap.active_project_id.clone()
+    } else {
+        snap.workspace_active.get(&window_label).cloned()
+    };
+    // active 失效(指向他窗项目/已删项目)-> 回退本窗口首项或 None。
+    snap.active_project_id = match active {
+        Some(a) if snap.projects.iter().any(|p| p.id == a) => Some(a),
+        _ => snap.projects.first().map(|p| p.id.clone()),
+    };
+    Ok(snap)
 }
 
 /// 通过系统文件夹选择器添加一个项目。
@@ -64,6 +82,7 @@ pub async fn hydrate_window(
 pub async fn open_project(
     app: AppHandle,
     state: State<'_, AppState>,
+    window_label: Option<String>,
 ) -> Result<AppSnapshot, String> {
     // blocking_pick_folder 内部走 channel 同步等待回调,不占用 async runtime 线程。
     let picked = app.dialog().file().blocking_pick_folder();
@@ -76,6 +95,7 @@ pub async fn open_project(
         }
     };
 
+    let owner = window_label.unwrap_or_else(|| "main".to_string());
     let root_path = folder.to_string_lossy().into_owned();
     let name = folder
         .file_name()
@@ -88,6 +108,7 @@ pub async fn open_project(
         id: uuid::Uuid::new_v4().to_string(),
         name,
         root_path,
+        owner_window: owner.clone(),
         last_opened_ms: now_ms(),
         pane_tree: Some(default_pane_tree()),
         claude_allowed_tools: Vec::new(),
@@ -97,8 +118,10 @@ pub async fn open_project(
 
     let snapshot = {
         let mut snap = state.inner.lock().map_err(|e| e.to_string())?;
+        // 历史去重:项目回到打开列表,同 rootPath 的历史条目移除。
+        snap.recent_projects.retain(|p| p.root_path != record.root_path);
         snap.projects.push(record);
-        snap.active_project_id = Some(new_active);
+        set_active_for_window(&mut snap, &owner, &new_active);
         snap.clone()
     };
 
@@ -129,14 +152,50 @@ pub async fn close_project(
     let snapshot = {
         let mut snap = state.inner.lock().map_err(|e| e.to_string())?;
         let before = snap.projects.len();
+        // 先取出被移除的记录:整份归档进最近项目历史(id/布局/claude 会话映射保留,
+        // 历史恢复时原样移回 projects),+ 菜单「历史项目」据此可恢复。
+        let removed: Vec<ProjectRecord> = snap
+            .projects
+            .iter()
+            .filter(|p| p.id == project_id)
+            .cloned()
+            .collect();
         snap.projects.retain(|p| p.id != project_id);
         if snap.projects.len() == before {
             // 没有匹配项,仍返回当前快照(幂等)。仍尝试 kill_project,兜底清理可能的孤儿 PTY。
             log::info!("close_project: no project matched {project_id}, idempotent");
         }
+        archive_recent(&mut snap, removed);
         let was_active = snap.active_project_id.as_deref() == Some(project_id.as_str());
         if was_active {
-            snap.active_project_id = snap.projects.first().map(|p| p.id.clone());
+            // active 落到本窗口(main)剩余首项或 None。
+            snap.active_project_id = snap
+                .projects
+                .iter()
+                .find(|p| p.owner_window == "main")
+                .map(|p| p.id.clone());
+        }
+        // 各工作台窗口的 active 若指向被删项目:回退到该窗口剩余首项,没有则清掉。
+        let stale_labels: Vec<String> = snap
+            .workspace_active
+            .iter()
+            .filter(|(_, pid)| pid.as_str() == project_id.as_str())
+            .map(|(l, _)| l.clone())
+            .collect();
+        for label in stale_labels {
+            let fallback = snap
+                .projects
+                .iter()
+                .find(|p| p.owner_window == label)
+                .map(|p| p.id.clone());
+            match fallback {
+                Some(id) => {
+                    snap.workspace_active.insert(label, id);
+                }
+                None => {
+                    snap.workspace_active.remove(&label);
+                }
+            }
         }
         snap.clone()
     };
@@ -167,20 +226,91 @@ pub async fn close_project(
     Ok(snapshot)
 }
 
+/// 从最近项目历史恢复一个项目(rootPath 定位),整份记录原样移回 `projects`。
+///
+/// 历史条目保留了 id/pane tree/claude 会话映射,恢复 = 回到关闭前的状态(布局还原、
+/// claude 可 --resume 续接)。归属窗口取调用方 `window_label`(缺省 main),
+/// 恢复后设为该窗口 active。找不到匹配 rootPath -> Err(前端提示)。
+#[tauri::command]
+pub async fn open_recent_project(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    root_path: String,
+    window_label: Option<String>,
+) -> Result<AppSnapshot, String> {
+    let owner = window_label.unwrap_or_else(|| "main".to_string());
+    let snapshot = {
+        let mut snap = state.inner.lock().map_err(|e| {
+            log::error!("open_recent_project: state lock poisoned: {e}");
+            e.to_string()
+        })?;
+        let idx = snap
+            .recent_projects
+            .iter()
+            .position(|p| p.root_path == root_path)
+            .ok_or_else(|| {
+                log::error!("open_recent_project: no recent project at {root_path}");
+                format!("no recent project at {root_path}")
+            })?;
+        let mut record = snap.recent_projects.remove(idx);
+        record.owner_window = owner.clone();
+        record.last_opened_ms = now_ms();
+        let new_active = record.id.clone();
+        snap.projects.push(record);
+        set_active_for_window(&mut snap, &owner, &new_active);
+        snap.clone()
+    };
+
+    log::info!("open_recent_project: restored {root_path} to window {owner}");
+    if let Err(e) = persistence::save(&app, &snapshot) {
+        log::error!("open_recent_project: persist failed: {e}");
+        return Err(e);
+    }
+    Ok(snapshot)
+}
+
+/// 从最近项目历史删除一个条目(rootPath 定位;+ 菜单历史项的 ✕)。
+///
+/// 只删历史记录,不影响任何打开中的项目;幂等(无匹配也返回当前快照)。
+#[tauri::command]
+pub async fn remove_recent_project(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    root_path: String,
+) -> Result<AppSnapshot, String> {
+    let snapshot = {
+        let mut snap = state.inner.lock().map_err(|e| {
+            log::error!("remove_recent_project: state lock poisoned: {e}");
+            e.to_string()
+        })?;
+        snap.recent_projects.retain(|p| p.root_path != root_path);
+        snap.clone()
+    };
+
+    log::info!("remove_recent_project: removed {root_path}");
+    if let Err(e) = persistence::save(&app, &snapshot) {
+        log::error!("remove_recent_project: persist failed: {e}");
+        return Err(e);
+    }
+    Ok(snapshot)
+}
+
 /// 设置当前 active 项目(驱动顶部项目下拉高亮 + 左栏/分屏内容)。
 #[tauri::command]
 pub async fn set_active_project(
     app: AppHandle,
     state: State<'_, AppState>,
     project_id: String,
+    window_label: Option<String>,
 ) -> Result<AppSnapshot, String> {
+    let owner = window_label.unwrap_or_else(|| "main".to_string());
     let snapshot = {
         let mut snap = state.inner.lock().map_err(|e| e.to_string())?;
         if !snap.projects.iter().any(|p| p.id == project_id) {
             log::error!("set_active_project: project not found: {project_id}");
             return Err(format!("project not found: {project_id}"));
         }
-        snap.active_project_id = Some(project_id.clone());
+        set_active_for_window(&mut snap, &owner, &project_id);
         snap.clone()
     };
 

@@ -63,17 +63,26 @@ pub enum PaneNode {
     },
 }
 
+/// 项目归属窗口的默认值(旧 state.json 无 `ownerWindow` 字段时的回填)。
+fn default_owner_window() -> String {
+    "main".to_string()
+}
+
 /// 单个项目的持久化记录(身份层)。
 ///
 /// 不持久化:transcript、session 运行状态、git 信息、PTY 句柄。
 /// `lastOpenedMs` 用于排序与「最近打开」展示。`paneTree` 为旧数据兼容用 Option,
 /// 缺失时前端 deriver 回退默认单 PowerShell pane。
+/// `ownerWindow` = 承载该项目的窗口 label("main" / "workspace-N"):多主窗口时代
+/// 项目按窗口隔离,hydrate 只回本窗口的项目。旧数据 serde default 回填 "main"。
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectRecord {
     pub id: String,
     pub name: String,
     pub root_path: String,
+    #[serde(default = "default_owner_window")]
+    pub owner_window: String,
     pub last_opened_ms: u128,
     pub pane_tree: Option<PaneNode>,
     /// ClaudePane 工具白名单(claude `--allowedTools`):用户在确认框点「批准且不再问」时累加,
@@ -123,6 +132,16 @@ pub struct AppSnapshot {
     /// "danger-full-access")。None = 前端默认(workspace-write)。仅影响新建 codex 会话,
     /// 已开会话在其状态栏单独切换。Option + serde default 兼容旧 state.json,无需迁移。
     pub codex_sandbox: Option<String>,
+    /// 最近项目历史(关闭/工作台窗口关窗时归档的项目记录,rootPath 去重、最新在前)。
+    /// + 菜单「历史项目」数据源:点击重开(整份记录原样移回 projects,布局/claude 会话
+    /// 映射保留),✕ 删除。空 Vec 不写盘,旧 state.json 缺字段 -> default 空,零迁移。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recent_projects: Vec<ProjectRecord>,
+    /// 各工作台窗口(workspace-N)的 active 项目 id(label -> projectId)。
+    /// main 窗口的 active 沿用 `active_project_id` 旧字段(语义不变,零迁移)。
+    /// 空 HashMap 不写盘,旧 state.json 缺字段 -> default 空。
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub workspace_active: HashMap<String, String>,
 }
 
 /// 全局应用状态容器:`State<Mutex<AppSnapshot>>`。
@@ -171,4 +190,117 @@ pub fn now_ms() -> u128 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or(0)
+}
+
+/// 历史项目上限:超长截尾(最旧淘汰),防 state.json 无界增长。
+pub const RECENT_PROJECTS_LIMIT: usize = 10;
+
+/// 按窗口设置 active 项目:main 写 `active_project_id`(旧字段,语义不变),
+/// workspace-N 写 `workspace_active[label]`。供 open/set_active/open_recent 共用。
+pub fn set_active_for_window(snap: &mut AppSnapshot, window_label: &str, project_id: &str) {
+    if window_label == "main" {
+        snap.active_project_id = Some(project_id.to_string());
+    } else {
+        snap.workspace_active.insert(window_label.to_string(), project_id.to_string());
+    }
+}
+
+/// 把项目记录归档进最近项目历史:同 rootPath 旧条目先移除,新条目插头部,超长截尾。
+/// 供 close_project 与工作台窗口关窗归档共用。
+pub fn archive_recent(snap: &mut AppSnapshot, records: Vec<ProjectRecord>) {
+    for rec in records {
+        snap.recent_projects.retain(|p| p.root_path != rec.root_path);
+        snap.recent_projects.insert(0, rec);
+    }
+    snap.recent_projects.truncate(RECENT_PROJECTS_LIMIT);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 旧 state.json(无 ownerWindow/recentProjects/workspaceActive 字段)反序列化兼容:
+    /// 项目 owner 回填 "main",历史/窗口 active 为空。锁定「多窗口字段零迁移」承诺。
+    #[test]
+    fn legacy_state_json_defaults() {
+        let legacy = r#"{
+            "projects": [{
+                "id": "p1",
+                "name": "demo",
+                "rootPath": "D:\\demo",
+                "lastOpenedMs": 123
+            }],
+            "activeProjectId": "p1"
+        }"#;
+        let snap: AppSnapshot = serde_json::from_str(legacy).expect("legacy state.json must parse");
+        assert_eq!(snap.projects.len(), 1);
+        assert_eq!(snap.projects[0].owner_window, "main");
+        assert!(snap.recent_projects.is_empty());
+        assert!(snap.workspace_active.is_empty());
+    }
+
+    /// 新字段 camelCase 序列化往返:ownerWindow/recentProjects/workspaceActive 原样保留
+    /// (防 rename_all 漏配导致前端读空,同 claude 序列化回归测试动机)。
+    #[test]
+    fn snapshot_roundtrip_multivindow_fields() {
+        let mut snap = AppSnapshot::default();
+        snap.projects.push(ProjectRecord {
+            id: "p2".into(),
+            name: "ws".into(),
+            root_path: "D:\\ws".into(),
+            owner_window: "workspace-2".into(),
+            last_opened_ms: 456,
+            pane_tree: None,
+            claude_allowed_tools: vec![],
+            claude_tab_sessions: Default::default(),
+        });
+        snap.workspace_active.insert("workspace-2".into(), "p2".into());
+        snap.recent_projects.push(ProjectRecord {
+            id: "p3".into(),
+            name: "old".into(),
+            root_path: "D:\\old".into(),
+            owner_window: "main".into(),
+            last_opened_ms: 1,
+            pane_tree: None,
+            claude_allowed_tools: vec![],
+            claude_tab_sessions: Default::default(),
+        });
+
+        let json = serde_json::to_string(&snap).expect("serialize");
+        assert!(json.contains("\"ownerWindow\":\"workspace-2\""));
+        assert!(json.contains("\"recentProjects\""));
+        assert!(json.contains("\"workspaceActive\""));
+        let back: AppSnapshot = serde_json::from_str(&json).expect("roundtrip parse");
+        assert_eq!(back.projects[0].owner_window, "workspace-2");
+        assert_eq!(back.workspace_active.get("workspace-2").map(String::as_str), Some("p2"));
+        assert_eq!(back.recent_projects[0].root_path, "D:\\old");
+    }
+
+    /// 归档语义:rootPath 去重(旧的被新的顶掉)、最新在前、超限截尾。
+    #[test]
+    fn archive_recent_dedup_and_limit() {
+        let mut snap = AppSnapshot::default();
+        let rec = |id: &str, root: &str| ProjectRecord {
+            id: id.into(),
+            name: id.into(),
+            root_path: root.into(),
+            owner_window: "main".into(),
+            last_opened_ms: 0,
+            pane_tree: None,
+            claude_allowed_tools: vec![],
+            claude_tab_sessions: Default::default(),
+        };
+        archive_recent(&mut snap, vec![rec("a", "D:\\a"), rec("b", "D:\\b")]);
+        archive_recent(&mut snap, vec![rec("a2", "D:\\a")]);
+        // 同 rootPath 去重:旧的 a 被新的 a2 顶掉,只剩一份且在头部(最新在前)。
+        let a_entries: Vec<&ProjectRecord> =
+            snap.recent_projects.iter().filter(|p| p.root_path == "D:\\a").collect();
+        assert_eq!(a_entries.len(), 1);
+        assert_eq!(a_entries[0].id, "a2");
+        for i in 0..12 {
+            archive_recent(&mut snap, vec![rec(&format!("n{i}"), &format!("D:\\n{i}"))]);
+        }
+        assert_eq!(snap.recent_projects.len(), RECENT_PROJECTS_LIMIT);
+        assert_eq!(snap.recent_projects[0].id, "n11");
+    }
 }

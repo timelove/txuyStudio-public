@@ -1,4 +1,6 @@
 import type { ProjectId, ProjectSnapshot } from "../domain/projects";
+import type { ProjectRecord } from "../domain/appState";
+import { projectAccentColor } from "../domain/projects";
 import { ProjectTabs } from "./ProjectTabs";
 import { WindowControls } from "./WindowControls";
 import { Button } from "./ui/Button";
@@ -21,6 +23,16 @@ type TopProjectBarProps = {
   singleProjectMode?: boolean;
   /** 独立窗口「回到主窗口」。 */
   onDockBack?: () => void;
+  /** 最近项目历史(+ 菜单「历史项目」数据源;透传 ProjectTabs 渲染)。 */
+  recentProjects?: ProjectRecord[];
+  /** + 菜单历史项点击:恢复该项目并钉住。 */
+  onOpenRecent?: (rootPath: string) => void | Promise<void>;
+  /** + 菜单历史项 ✕:从历史删除记录。 */
+  onRemoveRecent?: (rootPath: string) => void;
+  /** 历史项右键「在新窗口打开」:恢复该项目并弹独立项目窗口。 */
+  onOpenRecentToWindow?: (rootPath: string) => void | Promise<void>;
+  /** + 菜单「新窗口」:新建空白工作台窗口。 */
+  onNewWindow?: () => void;
 };
 
 /**
@@ -44,6 +56,11 @@ export function TopProjectBar({
   detachedProjectIds,
   singleProjectMode,
   onDockBack,
+  recentProjects,
+  onOpenRecent,
+  onRemoveRecent,
+  onOpenRecentToWindow,
+  onNewWindow,
 }: TopProjectBarProps) {
   const { t } = useTranslation();
   const activeProject = projects.find((p) => p.id === activeProjectId) ?? null;
@@ -98,7 +115,12 @@ export function TopProjectBar({
         {singleProjectMode ? (
           <div className="flex min-w-0 items-center gap-2">
             <span className="mx-chip flex h-[24px] min-w-0 items-center gap-[6px] bg-[var(--mx-selected-bg)] px-[10px] text-xs text-white">
-              <span aria-hidden className="h-1.5 w-1.5 shrink-0 bg-[var(--mx-accent)]" />
+              {/* 项目稳定色 dot(与主窗口顶栏 chip/下拉同色源,跨窗口同项目同色)。 */}
+              <span
+                aria-hidden
+                className="h-1.5 w-1.5 shrink-0 rounded-full"
+                style={{ background: activeProject ? projectAccentColor(activeProject.id) : "var(--mx-accent)" }}
+              />
               {/* 拖拽区(data-tauri-drag-region)内:Radix Tooltip 依赖 pointermove/hover,
                   纯 hover 应触发;但拖拽按下时失效,故保留原生 title 兜底(≤5 处保留之一)。 */}
               <span className="truncate" title={activeProject?.rootPath ?? ""}>
@@ -133,6 +155,11 @@ export function TopProjectBar({
             onCloseProject={onCloseProject}
             onDetachProject={onDetachProject}
             detachedProjectIds={detachedProjectIds}
+            recentProjects={recentProjects}
+            onOpenRecent={onOpenRecent}
+            onRemoveRecent={onRemoveRecent}
+            onOpenRecentToWindow={onOpenRecentToWindow}
+            onNewWindow={onNewWindow}
           />
         )}
       </div>

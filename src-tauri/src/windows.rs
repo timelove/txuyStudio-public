@@ -13,14 +13,62 @@
 
 use tauri::{AppHandle, Manager, State, WebviewUrl, WebviewWindowBuilder};
 
-use crate::state::AppState;
+use crate::state::{archive_recent, AppState, ProjectRecord};
 
 /// 独立项目窗口 label 前缀。主窗口恒为 `"main"`(tauri.conf.json 默认)。
 pub const PROJECT_WINDOW_PREFIX: &str = "project-";
 
+/// 空白工作台窗口 label 前缀(`workspace-2`/`workspace-3`…,编号自增)。
+/// 与主窗口同构(完整项目栏 + `+` 菜单),但项目按 ownerWindow 隔离:
+/// 各自 `open_project`/历史恢复只影响自己;关窗时其项目归档进最近历史(不持久化重建)。
+pub const WORKSPACE_WINDOW_PREFIX: &str = "workspace-";
+
 /// 判定一个 window label 是否为独立项目窗口。
 pub fn is_project_window(label: &str) -> bool {
     label.starts_with(PROJECT_WINDOW_PREFIX)
+}
+
+/// 判定一个 window label 是否为空白工作台窗口(main 之外的多项目窗口)。
+pub fn is_workspace_window(label: &str) -> bool {
+    label.starts_with(WORKSPACE_WINDOW_PREFIX)
+}
+
+/// 新建一个空白工作台窗口,返回窗口 label。
+///
+/// - label 取最小未占用编号的 `workspace-<n>`(从 2 起:main 是 1 号语义上的第一个),
+///   避免与仍存活的旧工作台窗口冲突。
+/// - 建窗参数与 [[open_project_window]] 一致(decorations:false + visible:false 防白屏,
+///   前端首帧 `show_window` 显示;URL 带 `?mode=workspace` hint,前端按 label 走多项目模式)。
+#[tauri::command]
+pub async fn open_new_workspace_window(app: AppHandle) -> Result<String, String> {
+    // 找最小未占用的 workspace 编号。
+    let mut n: u32 = 2;
+    let label = loop {
+        let candidate = format!("{WORKSPACE_WINDOW_PREFIX}{n}");
+        if app.get_webview_window(&candidate).is_none() {
+            break candidate;
+        }
+        n += 1;
+    };
+
+    let url = WebviewUrl::App("?mode=workspace".into());
+    let builder = WebviewWindowBuilder::new(&app, &label, url)
+        .title("txuyStudio")
+        .inner_size(1100.0, 760.0)
+        .min_inner_size(640.0, 480.0)
+        .decorations(false)
+        .center()
+        .visible(false);
+
+    builder
+        .build()
+        .map_err(|e| {
+            log::error!("open_new_workspace_window: failed to build window {label}: {e}");
+            e.to_string()
+        })?;
+
+    log::info!("open_new_workspace_window: created {label}");
+    Ok(label)
 }
 
 /// 把项目弹出为独立原生窗口,返回窗口 label。
@@ -86,8 +134,70 @@ pub async fn open_project_window(
     Ok(label)
 }
 
-/// 关闭指定独立项目窗口(dock back 时由前端调用)。
+/// 工作台窗口关闭的归档处理(`lib.rs` 的 `on_window_event` 调用)。
 ///
+/// 该窗口 owner 的项目移入最近项目历史(记录整份归档,布局/claude 会话映射保留,
+/// 可从 + 菜单「历史项目」恢复),并 kill 其所有 PTY/claude/codex/shell 会话--
+/// 前端直接关窗不走 close_project 流程,后端在此兜底清理。归档(短锁)同步完成,
+/// kill 是慢操作,clone 出 projectId 集合后放 async spawn,不阻塞关窗。
+/// main 窗口不走此路径(持久工作台,项目跨重启保留)。
+pub fn archive_workspace_projects(app: &AppHandle, label: &str) {
+    let (snapshot, removed_ids) = {
+        let state = app.state::<AppState>();
+        let mut guard = match state.inner.lock() {
+            Ok(g) => g,
+            Err(e) => {
+                log::error!("archive_workspace_projects: state lock poisoned: {e}");
+                return;
+            }
+        };
+        let removed: Vec<ProjectRecord> = guard
+            .projects
+            .iter()
+            .filter(|p| p.owner_window == label)
+            .cloned()
+            .collect();
+        let removed_ids: Vec<String> = removed.iter().map(|p| p.id.clone()).collect();
+        if removed.is_empty() {
+            guard.workspace_active.remove(label);
+            return;
+        }
+        guard.projects.retain(|p| p.owner_window != label);
+        archive_recent(&mut guard, removed);
+        guard.workspace_active.remove(label);
+        (guard.clone(), removed_ids)
+    };
+
+    log::info!("archive_workspace_projects: archived {} project(s) from {label}", removed_ids.len());
+    if let Err(e) = crate::state::persistence::save(app, &snapshot) {
+        log::error!("archive_workspace_projects: persist failed: {e}");
+    }
+
+    // kill 被归档项目的所有会话(PTY/claude/codex/shell,失败仅 warn)。
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        for pid in removed_ids {
+            let pty = app.state::<crate::pty::PtyRegistry>();
+            if let Err(e) = pty.kill_project(&pid).await {
+                log::warn!("archive_workspace_projects: pty kill_project failed for {pid}: {e}");
+            }
+            let claude = app.state::<crate::claude::ClaudeRegistry>();
+            if let Err(e) = claude.kill_project(&pid).await {
+                log::warn!("archive_workspace_projects: claude kill_project failed for {pid}: {e}");
+            }
+            let codex = app.state::<crate::codex::CodexRegistry>();
+            if let Err(e) = codex.kill_project(&pid).await {
+                log::warn!("archive_workspace_projects: codex kill_project failed for {pid}: {e}");
+            }
+            let shell = app.state::<crate::shell_run::ShellRunRegistry>();
+            if let Err(e) = shell.kill_project(&pid).await {
+                log::warn!("archive_workspace_projects: shell kill_project failed for {pid}: {e}");
+            }
+        }
+    });
+}
+
+/// 关闭指定独立项目窗口(dock back 时由前端调用)。
 /// 仅调用窗口的 `close()`;关闭事件统一由建窗时挂的 `CloseRequested` 监听处理
 /// (emit `project-window-closed`),覆盖用户叉窗 / dock-back / app 退出三种情形。
 /// 找不到窗口(可能已被直接关掉)→ 幂等返回 Ok:此前窗口关闭时已 emit 过事件,
