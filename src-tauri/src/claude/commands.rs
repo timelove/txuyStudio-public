@@ -83,6 +83,53 @@ pub(crate) fn resolve_claude_program() -> Option<String> {
     None
 }
 
+/// 定位 claude 可执行文件(优先原生安装包)。
+///
+/// 背景:官方对 npm 安装方式随时可能下线,原生安装包(Windows `irm https://claude.ai/install.ps1 | iex`)
+/// 是最可靠渠道:产物是独立 .exe,无 node/npm 依赖,也无 `.cmd` shim 在长进程 stdin 管道上的
+/// 传递问题(见 `start_claude_session` 的 Windows .cmd 包装注释)。原生安装默认落
+/// `%USERPROFILE%\.local\bin\claude.exe`,安装器虽会把自己加入 PATH,但 PATH 顺序可能被
+/// npm/volta 等其他安装方式抢占,故**显式优先探测**原生位置。
+///
+/// 优先级:
+/// 1. `~/.local/bin/claude[.exe]` -- 原生安装包默认位置;
+/// 2. PATH 解析(`where.exe`,volta/npm 的 .cmd shim 或用户手动放置的 .exe);
+/// 3. `~/.claude/local/claude[.exe|.cmd|.bat]` -- 旧版 `claude migrate-installer` 迁移位置;
+/// 4. 非 Windows 兜底原名 "claude"(`Command::new` 本就搜 PATH);Windows 全找不到返回 None
+///    (调用方发友好安装提示,不让 spawn 报生硬的 OS 错误)。
+///
+/// `pub(crate)`:`system::commands::check_commands_installed` 探测 claude 是否安装时复用,
+/// 保证「探测」与「spawn」用同一解析逻辑(探测说装了 spawn 就一定能找到)。
+pub(crate) fn resolve_claude_program() -> Option<String> {
+    let home = dirs::home_dir();
+    let exe = if cfg!(windows) { "claude.exe" } else { "claude" };
+    // 1) 原生安装包默认位置。
+    if let Some(home) = &home {
+        let native = home.join(".local").join("bin").join(exe);
+        if native.is_file() {
+            return Some(native.to_string_lossy().into_owned());
+        }
+    }
+    // 2) PATH(where.exe;volta/npm shim 等)。
+    if let Some(p) = resolve_on_path("claude") {
+        return Some(p.to_string_lossy().into_owned());
+    }
+    // 3) 旧版 migrate-installer 迁移位置(npm 时代可能留下 .cmd/.bat shim)。
+    if let Some(home) = &home {
+        for name in [exe, "claude.cmd", "claude.bat"] {
+            let p = home.join(".claude").join("local").join(name);
+            if p.is_file() {
+                return Some(p.to_string_lossy().into_owned());
+            }
+        }
+    }
+    // 4) 非 Windows:Command::new 本就搜 PATH,兜底原名让 spawn 自行解析(与旧行为一致)。
+    if !cfg!(windows) {
+        return Some("claude".to_string());
+    }
+    None
+}
+
 /// 启动/重启 claude 长进程(幂等「确保一个新进程在跑」)。
 ///
 /// 一个 claude tab = 一个长生命周期进程:`--input-format stream-json --output-format stream-json`
