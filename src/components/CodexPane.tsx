@@ -178,13 +178,13 @@ const CodexTabChip = memo(function CodexTabChip({
       <TooltipTrigger asChild>
         <TabsTrigger asChild value={session.id}>
           <div
-            className={`mx-tab-item group/tab flex h-[24px] min-w-0 shrink cursor-pointer items-center gap-1 px-2 transition-colors ${
+            className={`mx-tab-item group/tab flex h-[length:var(--mx-tab-h)] min-w-0 shrink cursor-pointer items-center gap-1 px-2 transition-colors ${
               isActive
                 ? "text-[var(--mx-text-bright)]"
                 : "text-[var(--mx-text-dim)] hover:text-[var(--mx-text)]"
             }`}
           >
-            <span className="truncate text-[11px] font-[600]">{t(session.name)}</span>
+            <span className="min-w-0 max-w-[180px] truncate text-[length:var(--mx-ui-fs-sm)] font-[600]">{t(session.name)}</span>
             <TabStatusDot kind={kind} />
             {showClose && onCloseTab && (
               <Button
@@ -237,7 +237,7 @@ function QuickResumeLast({
           onClick={() => onPick(item.sessionId)}
         >
           <span className="shrink-0 text-[var(--mx-accent)]">↶</span>
-          <span className="min-w-0 flex-1 truncate text-[11px] text-[var(--mx-text)]">{title}</span>
+          <span className="min-w-0 flex-1 truncate text-[length:var(--mx-ui-fs-sm)] text-[var(--mx-text)]">{title}</span>
           <span className="shrink-0 text-[10px] text-[var(--mx-faint)]">{relativeTime(item.lastAt, locale)}</span>
         </button>
       </TooltipTrigger>
@@ -1017,7 +1017,7 @@ export function CodexPane(props: CodexPaneProps) {
 
   return (
     <article
-      className={`grid h-full min-h-0 min-w-0 grid-rows-[28px_1fr] overflow-hidden bg-[var(--mx-editor-bg)] ${className ?? ""}`}
+      className={`grid h-full min-h-0 min-w-0 grid-rows-[length:var(--mx-paneheader-h)_1fr] overflow-hidden bg-[var(--mx-editor-bg)] ${className ?? ""}`}
       onMouseDown={() => onFocusPane?.(paneId)}
     >
       {/* header:tab 条 + 右侧按钮组。 */}

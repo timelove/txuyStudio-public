@@ -40,6 +40,9 @@ export const SHELL_KIND_META: Record<
   // HTML 预览:纯 UI 面板(不走 PTY),贴 HTML 源码即时 iframe srcdoc 沙箱预览。
   // glyph 🌐(浏览器地球,表「网页预览」;与 filetree ▤ 等符号不同,用 emoji 直观表意)。
   htmlpreview: { accent: "#fb7185", glyph: "🌐", label: "shellkind.htmlpreview", defaultTitle: "shellkind.htmlpreview" },
+  // 笔记:纯 UI 面板(不走 PTY),Typora 式 md 编辑(左源码右实时预览),存项目根 .note 文件
+  // (可 git、可被 claude/codex 读写联动)。一个 tab = 一篇笔记(tab.cwd 存文件绝对路径)。
+  notes: { accent: "#a3e635", glyph: "✎", label: "shellkind.notes", defaultTitle: "shellkind.notes" },
 };
 
 /**
@@ -59,7 +62,7 @@ export const NEW_SHELL_GROUPS: { title: string; kinds: ShellKind[] }[] = [
   { title: "AI CLI", kinds: ["claudepane", "codexpane"] },
   { title: "shellgroup.tui", kinds: ["lazygit", "yazi", "fresh"] },
   { title: "shellgroup.session", kinds: ["sessionbrowser"] },
-  { title: "shellgroup.browse", kinds: ["filetree", "htmlpreview"] },
+  { title: "shellgroup.browse", kinds: ["filetree", "htmlpreview", "notes"] },
 ];
 
 /** 新建菜单暴露的全部 shell 类型(NEW_SHELL_GROUPS 的扁平投影)。 */

@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
+import { useSettings } from "../settings/SettingsProvider";
 import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import type { ReadFileResult } from "../domain/fileTree";
@@ -71,6 +72,7 @@ export function HtmlPreviewPane({
   className,
 }: HtmlPreviewPaneProps) {
   const { t } = useTranslation();
+  const { bgSetting } = useSettings();
   const [menuMode, setMenuMode] = useState<"tab" | null>(null);
   /** 左侧 HTML 编辑区是否显示(false = 仅预览,占满全宽)。per pane(非 per tab)。 */
   const [showEditor, setShowEditor] = useState(true);
@@ -141,7 +143,8 @@ export function HtmlPreviewPane({
 
   return (
     <article
-      className={`grid h-full min-h-0 min-w-0 grid-rows-[28px_1fr] overflow-hidden bg-[var(--mx-editor-bg)] ${className ?? ""}`}
+      className={`grid h-full min-h-0 min-w-0 grid-rows-[length:var(--mx-paneheader-h)_1fr] overflow-hidden bg-[var(--mx-editor-bg)] ${className ?? ""}`}
+      style={bgSetting.path ? { background: "transparent" } : undefined}
       onMouseDown={() => onFocusPane?.(paneId)}
     >
       {/* header:tab 条 + 右侧按钮组(+ 新 tab / ▥ 分屏 / × 关 pane),与 TerminalPane/ClaudePane 同构。 */}
@@ -159,13 +162,13 @@ export function HtmlPreviewPane({
                   <TooltipTrigger asChild>
                     <TabsTrigger asChild value={s.id}>
                       <div
-                        className={`mx-tab-item group/tab flex h-[24px] min-w-0 shrink cursor-pointer items-center gap-1 px-2 transition-colors ${
+                        className={`mx-tab-item group/tab flex h-[length:var(--mx-tab-h)] min-w-0 shrink cursor-pointer items-center gap-1 px-2 transition-colors ${
                           isActive
                             ? "text-[var(--mx-text-bright)]"
                             : "text-[var(--mx-text-dim)] hover:text-[var(--mx-text)]"
                         }`}
                       >
-                        <span className="truncate text-[11px] font-[600]">{t(s.name)}</span>
+                        <span className="min-w-0 max-w-[180px] truncate text-[length:var(--mx-ui-fs-sm)] font-[600]">{t(s.name)}</span>
                         {sessions.length > 1 && onCloseTab && (
                           <Button
                             variant="ghost"
@@ -306,10 +309,17 @@ export function HtmlPreviewPane({
           </div>
         )}
         {/* 编辑 + 预览:showEditor 时两栏(grid-cols-2 + 分割线),隐藏编辑后预览独占全宽(grid-cols-1,无分割线)。 */}
-        <div className={`grid min-h-0 min-w-0 flex-1 ${showEditor ? "grid-cols-2 gap-px bg-[var(--mx-border-strong)]" : "grid-cols-1"}`}>
+        <div
+          className={`grid min-h-0 min-w-0 flex-1 ${showEditor ? "grid-cols-2 gap-px" : "grid-cols-1"}`}
+          // 背景开时 grid 容器透明(原 bg-border-strong 在透明子面板下会透白雾);分割线由预览区左边框承担。
+          style={bgSetting.path ? { background: "transparent" } : showEditor ? { background: "var(--mx-border-strong)" } : undefined}
+        >
           {/* 编辑区:贴/改 HTML,onChange 实时更新右侧预览。showEditor=false 时整个移除(预览占满)。 */}
           {showEditor && (
-            <div className="flex min-h-0 min-w-0 flex-col bg-[var(--mx-editor-bg)]">
+            <div
+              className="flex min-h-0 min-w-0 flex-col bg-[var(--mx-editor-bg)]"
+              style={bgSetting.path ? { background: "transparent" } : undefined}
+            >
               <div className="flex shrink-0 items-center justify-between border-b border-[var(--mx-border)] px-2 py-1 text-[10px] text-[var(--mx-faint)]">
                 <span>{t("htmlpreview.source")}</span>
                 <button
@@ -326,11 +336,13 @@ export function HtmlPreviewPane({
                 spellCheck={false}
                 placeholder={t("htmlpreview.placeholder")}
                 className="mx-scroll-pretty min-h-0 flex-1 resize-none bg-transparent p-3 font-mono text-[12px] leading-relaxed text-[var(--mx-text)] outline-none placeholder:text-[var(--mx-faint)]"
+                style={bgSetting.path ? { background: "transparent" } : undefined}
               />
             </div>
           )}
-          {/* 预览区:srcdoc 渲染 html;sandbox="" 全禁(无脚本/表单/同源),纯排版样式即时可见。 */}
-          <div className="min-h-0 min-w-0 bg-white">
+          {/* 预览区:srcdoc 渲染 html;sandbox="" 全禁(无脚本/表单/同源),纯排版样式即时可见。
+              bg-white 保留(网页预览需白底看真实效果);双栏时左边框作分割线(替代 grid gap+容器底色)。 */}
+          <div className={`min-h-0 min-w-0 bg-white ${showEditor ? "border-l border-[var(--mx-border-strong)]" : ""}`}>
             <iframe
               title={t("htmlpreview.preview")}
               sandbox=""

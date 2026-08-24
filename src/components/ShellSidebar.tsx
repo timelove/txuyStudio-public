@@ -55,7 +55,7 @@ export function ShellSidebar({
       {NEW_SHELL_GROUPS.map((group, gi) => (
         <div key={group.title}>
           {gi > 0 && <div className="my-1 border-t border-[var(--mx-border-strong)]" />}
-          <div className="px-3 pb-0.5 text-[10px] uppercase tracking-wide text-[var(--mx-faint)]">{t(group.title)}</div>
+          <div className="px-3 pb-0.5 text-[length:var(--mx-ui-fs-xs)] uppercase tracking-wide text-[var(--mx-faint)]">{t(group.title)}</div>
           {group.kinds.map((kind) => (
             <button
               key={kind}
@@ -118,7 +118,7 @@ export function ShellSidebar({
                         size="icon-md"
                         onClick={() => onFocusPane({ projectId: project.id, paneId: pane.id })}
                         className={[
-                          "h-8 w-8 text-[13px] font-bold",
+                          "h-[length:var(--mx-sidebar-icon)] w-[length:var(--mx-sidebar-icon)] text-[length:var(--mx-ui-fs)] font-bold",
                           isFocused
                             ? "bg-[var(--mx-selected-bg)] text-white hover:bg-[var(--mx-selected-bg)]"
                             : "bg-[var(--mx-surface-soft)] text-[var(--mx-text)] hover:bg-[var(--mx-border-soft)]",
@@ -175,7 +175,7 @@ export function ShellSidebar({
                 variant="accent"
                 size="icon-md"
                 onMouseDown={(e) => e.stopPropagation()}
-                className="h-8 w-8 text-[16px] text-[var(--mx-accent-bright)]"
+                className="h-[length:var(--mx-sidebar-icon)] w-[length:var(--mx-sidebar-icon)] text-[length:var(--mx-ui-fs-lg)] text-[var(--mx-accent-bright)]"
               >
                 +
               </Button>

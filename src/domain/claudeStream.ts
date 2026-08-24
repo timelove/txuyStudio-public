@@ -289,16 +289,63 @@ function finalizePendingTools(blocks: ClaudeBlock[]): ClaudeBlock[] {
 }
 
 /**
+ * 合并同 message.id 的 assistant blocks(增量归并)。
+ *
+ * claude/glm stream-json 对同一条 assistant 消息是**逐 block 增量推送**的:每个 assistant 事件的
+ * `content` 只含「新完成的那个 block」(实测顺序 thinking → text → tool_use…),共用同一 message.id。
+ * 官方 CLI 与 glm 代理皆然(写盘的 jsonl 历史也是一行一个 block)。因此不能用新快照整体替换旧
+ * blocks——那会丢掉先到的 thinking 块(「思考输出缺失」的根因)。按稳定 key 增量合并:
+ * - tool_use 按 id 匹配:同 id 已存在则更新 input/name,保留已回填的 result/status;
+ * - thinking:一轮通常一个,已存在则替换(带 signature 的完整块,可能重投);
+ * - text:追加为新块(每个 text 事件是一段完整正文)。
+ */
+function mergeAssistantBlocks(oldBlocks: ClaudeBlock[], newBlocks: ClaudeBlock[]): ClaudeBlock[] {
+  const merged = [...oldBlocks];
+  for (const nb of newBlocks) {
+    if (nb.type === "tool_use") {
+      const idx = merged.findIndex((b) => b.type === "tool_use" && b.id === nb.id);
+      if (idx >= 0) {
+        const ob = merged[idx] as Extract<ClaudeBlock, { type: "tool_use" }>;
+        merged[idx] = {
+          ...nb,
+          // 增量推送的 tool_use 块不带 result;已回填的结果/状态不能被新块的 null 覆盖。
+          result: ob.result ?? nb.result,
+          status: ob.result ? ob.status : nb.status,
+        };
+        continue;
+      }
+      merged.push(nb);
+      continue;
+    }
+    if (nb.type === "thinking") {
+      // 同一轮 thinking 块通常只有一个;已存在则替换(带 signature 的完整块)。
+      const idx = merged.findIndex((b) => b.type === "thinking");
+      if (idx >= 0) {
+        merged[idx] = nb;
+        continue;
+      }
+      merged.push(nb);
+      continue;
+    }
+    // text 块:追加。
+    merged.push(nb);
+  }
+  return merged;
+}
+
+/**
  * 纯函数:把一个事件 payload 归并进 state,返回新 state(不可变更新)。
  *
  * 归并规则:
  * - init:记 meta,清 terminatedReason,status=running(会话开始)。
- * - assistant:按 message.id 归并——messageIndex 有则覆盖该消息 blocks(最新快照)、无则追加。
- *   遍历 blocks 建 toolUseIndex(tool_use id → 位置)。status=running。
+ * - assistant:按 message.id 归并——messageIndex 无则追加;有则**增量合并 blocks**(mergeAssistantBlocks)。
+ *   同 id 的 assistant 事件逐 block 增量到达(thinking → text → tool_use),每个事件只带新 block,
+ *   按 tool_use id / thinking / text 追加合并,而非整体替换(否则先到的 thinking 被后到的 text 覆盖)。
+ *   遍历合并后的 blocks 建 toolUseIndex。status=running。
  * - user:若 content 含 tool_result → 用 toolUseIndex 找对应 tool_use 回填 result + status=done/error;
  *   若是用户输入文本 → 追加 user 消息(stream-json 一般不回显用户输入,此分支少触发)。
- * - thinking:status=thinking,把文本累积到最近 assistant 消息的最后一个 thinking block
- *   (无则新建)。MVP:thinking 文本仅作状态提示,不强制展示。
+ * - thinking:status=thinking。后端 thinking_tokens 是纯计数心跳(text 空,仅驱动状态);真实思考
+ *   内容随 assistant 的 thinking block 到达。仅当 payload 带非空文本时累积到最近 assistant 消息。
  * - result:status=done/error,把最近 assistant 消息置 streaming=false,记 lastResult。
  * - terminated:status=error,记 terminatedReason,最近 assistant 消息 streaming=false。
  */
@@ -360,30 +407,12 @@ export function applyEvent(state: ClaudeStreamState, payload: ClaudeEventPayload
         // tool_result 不出现在 assistant 消息里(它在 user 消息);兜底跳过。
         return { type: "text", text: "" };
       });
-      // 保留旧 blocks 里已回填的 tool_result(新快照可能还没带 result,不能丢)。
+      // 增量合并:同 message.id 的后续事件只带新 block(thinking/text/tool_use 逐块到达),
+      // 用 mergeAssistantBlocks 追加合并而非整体替换(否则先到的 thinking 会被后到的 text 覆盖)。
+      // tool_use 已回填的 result/status 由合并函数保留。
       if (existing !== undefined) {
         const oldMsg = next.messages[existing];
-        const merged = blocks.map((nb, ni) => {
-          if (nb.type !== "tool_use") return nb;
-          // 找旧 block 同 id 的 result/status 回填。
-          const oldBlock = oldMsg.blocks.find(
-            (ob) => ob.type === "tool_use" && ob.id === nb.id,
-          ) as Extract<ClaudeBlock, { type: "tool_use" }> | undefined;
-          if (oldBlock && oldBlock.result) {
-            return { ...nb, result: oldBlock.result, status: oldBlock.status };
-          }
-          // glm 等代理快照间 tool_use id 漂移:id 配不上时按同位置继承旧块已回填的 result/status,
-          // 防已 done 的工具卡被新快照重置回 pending 转圈(轮末全量扫兜底之外的前置防线)。
-          const oldByPos = oldMsg.blocks[ni];
-          if (
-            oldByPos?.type === "tool_use" &&
-            oldByPos.result &&
-            !nb.result
-          ) {
-            return { ...nb, result: oldByPos.result, status: oldByPos.status };
-          }
-          return nb;
-        });
+        const merged = mergeAssistantBlocks(oldMsg.blocks, blocks);
         next.messages[existing] = {
           id: msgId,
           role: "assistant",
@@ -529,7 +558,10 @@ export function applyEvent(state: ClaudeStreamState, payload: ClaudeEventPayload
     }
     case "thinking": {
       next.status = "thinking";
-      // 找最近一条 assistant 消息,追加/累积 thinking block。
+      // 后端 thinking_tokens 是纯计数心跳(text 恒空),真实思考内容随 assistant 的 thinking block
+      // 到达(经 assistant 分支 mergeAssistantBlocks 合并)。仅当 payload 带非空文本时才累积到
+      // 最近 assistant 消息的 thinking block,防空心跳污染已合并的真实思考。
+      if (!payload.text) return next;
       for (let i = next.messages.length - 1; i >= 0; i--) {
         if (next.messages[i].role === "assistant") {
           const m = next.messages[i];

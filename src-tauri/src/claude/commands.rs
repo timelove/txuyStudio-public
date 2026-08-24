@@ -28,10 +28,60 @@ use super::{
 use crate::pty::commands::{command_no_window, resolve_on_path, validate_cwd};
 use crate::state::AppState;
 
-/// thinking_tokens 攒批阈值:累计到这么多字符就 flush 一次 emit,避免逐 token IPC 风暴。
-const THINKING_BATCH_CHARS: usize = 200;
+/// thinking_tokens 攒批阈值:累计到这么多 token 就 flush 一次心跳 emit,避免逐 token IPC 风暴。
+const THINKING_BATCH_TOKENS: u64 = 50;
 /// thinking_tokens flush 间隔:即使没到阈值,这么久也 flush 一次,让 UI 感知「在思考」。
-const THINKING_FLUSH_INTERVAL: Duration = Duration::from_millis(50);
+/// thinking_tokens 事件本身**不含思考文本**(只有 estimated_tokens 计数);真实思考内容随
+/// assistant 消息的 `thinking` content block 到达(见 run_read_loop assistant 分支)。
+/// 故这里 emit 的 Thinking 事件只是「仍在思考」的轻量状态心跳,text 恒为空。
+const THINKING_FLUSH_INTERVAL: Duration = Duration::from_millis(400);
+
+/// 定位 claude 可执行文件(优先原生安装包)。
+///
+/// 背景:官方对 npm 安装方式随时可能下线,原生安装包(Windows `irm https://claude.ai/install.ps1 | iex`)
+/// 是最可靠渠道:产物是独立 .exe,无 node/npm 依赖,也无 `.cmd` shim 在长进程 stdin 管道上的
+/// 传递问题(见 `start_claude_session` 的 Windows .cmd 包装注释)。原生安装默认落
+/// `%USERPROFILE%\.local\bin\claude.exe`,安装器虽会把自己加入 PATH,但 PATH 顺序可能被
+/// npm/volta 等其他安装方式抢占,故**显式优先探测**原生位置。
+///
+/// 优先级:
+/// 1. `~/.local/bin/claude[.exe]` -- 原生安装包默认位置;
+/// 2. PATH 解析(`where.exe`,volta/npm 的 .cmd shim 或用户手动放置的 .exe);
+/// 3. `~/.claude/local/claude[.exe|.cmd|.bat]` -- 旧版 `claude migrate-installer` 迁移位置;
+/// 4. 非 Windows 兜底原名 "claude"(`Command::new` 本就搜 PATH);Windows 全找不到返回 None
+///    (调用方发友好安装提示,不让 spawn 报生硬的 OS 错误)。
+///
+/// `pub(crate)`:`system::commands::check_commands_installed` 探测 claude 是否安装时复用,
+/// 保证「探测」与「spawn」用同一解析逻辑(探测说装了 spawn 就一定能找到)。
+pub(crate) fn resolve_claude_program() -> Option<String> {
+    let home = dirs::home_dir();
+    let exe = if cfg!(windows) { "claude.exe" } else { "claude" };
+    // 1) 原生安装包默认位置。
+    if let Some(home) = &home {
+        let native = home.join(".local").join("bin").join(exe);
+        if native.is_file() {
+            return Some(native.to_string_lossy().into_owned());
+        }
+    }
+    // 2) PATH(where.exe;volta/npm shim 等)。
+    if let Some(p) = resolve_on_path("claude") {
+        return Some(p.to_string_lossy().into_owned());
+    }
+    // 3) 旧版 migrate-installer 迁移位置(npm 时代可能留下 .cmd/.bat shim)。
+    if let Some(home) = &home {
+        for name in [exe, "claude.cmd", "claude.bat"] {
+            let p = home.join(".claude").join("local").join(name);
+            if p.is_file() {
+                return Some(p.to_string_lossy().into_owned());
+            }
+        }
+    }
+    // 4) 非 Windows:Command::new 本就搜 PATH,兜底原名让 spawn 自行解析(与旧行为一致)。
+    if !cfg!(windows) {
+        return Some("claude".to_string());
+    }
+    None
+}
 
 /// 定位 claude 可执行文件(优先原生安装包)。
 ///
@@ -780,7 +830,8 @@ pub(super) fn kill_child_tree(child: &mut std::process::Child) {
 /// - `result` → flush thinking + 置 Idle(进程不退)+ emit Result
 fn run_read_loop(app: AppHandle, project_id: String, tab_id: String, stdout: std::process::ChildStdout) {
     let reader = std::io::BufReader::new(stdout);
-    let mut thinking_buf = String::new();
+    // thinking_tokens 是纯计数心跳(无文本),真实思考内容在 assistant 的 thinking block 里。
+    let mut thinking_tokens: u64 = 0;
     let mut last_thinking_flush = Instant::now();
 
     for line in reader.lines() {
@@ -847,8 +898,13 @@ fn run_read_loop(app: AppHandle, project_id: String, tab_id: String, stdout: std
                         },
                     );
                 } else if subtype == "thinking_tokens" {
-                    thinking_buf.push('.');
-                    if thinking_buf.len() >= THINKING_BATCH_CHARS
+                    // 纯计数心跳(无文本):累计 token 到阈值或定时 flush 一次空 Thinking,
+                    // 驱动前端 status=thinking 状态指示。真实思考文本随 assistant thinking block 到达。
+                    thinking_tokens += v
+                        .get("estimated_tokens_delta")
+                        .and_then(|d| d.as_u64())
+                        .unwrap_or(1);
+                    if thinking_tokens >= THINKING_BATCH_TOKENS
                         || last_thinking_flush.elapsed() >= THINKING_FLUSH_INTERVAL
                     {
                         let _ = app.emit(
@@ -857,10 +913,11 @@ fn run_read_loop(app: AppHandle, project_id: String, tab_id: String, stdout: std
                                 project_id: project_id.clone(),
                                 tab_id: tab_id.clone(),
                                 payload: ClaudeEventPayload::Thinking {
-                                    text: std::mem::take(&mut thinking_buf),
+                                    text: String::new(),
                                 },
                             },
                         );
+                        thinking_tokens = 0;
                         last_thinking_flush = Instant::now();
                     }
                 } else if subtype == "status" {
@@ -968,7 +1025,10 @@ fn run_read_loop(app: AppHandle, project_id: String, tab_id: String, stdout: std
                 }
             }
             "assistant" => {
-                flush_thinking(&app, &project_id, &tab_id, &mut thinking_buf);
+                // 进入 assistant/user/result:思考阶段结束,复位计数心跳(真实思考内容已随
+                // assistant 的 thinking block 到达,无需残留 flush)。
+                thinking_tokens = 0;
+                last_thinking_flush = Instant::now();
                 let message = v.get("message").cloned().unwrap_or(serde_json::Value::Null);
                 let _ = app.emit(
                     "claude-event",
@@ -990,7 +1050,10 @@ fn run_read_loop(app: AppHandle, project_id: String, tab_id: String, stdout: std
                 if is_replay && content_str.contains("<local-command-stdout>") {
                     continue;
                 }
-                flush_thinking(&app, &project_id, &tab_id, &mut thinking_buf);
+                // 进入 assistant/user/result:思考阶段结束,复位计数心跳(真实思考内容已随
+                // assistant 的 thinking block 到达,无需残留 flush)。
+                thinking_tokens = 0;
+                last_thinking_flush = Instant::now();
                 let message = v.get("message").cloned().unwrap_or(serde_json::Value::Null);
                 let _ = app.emit(
                     "claude-event",
@@ -1002,7 +1065,10 @@ fn run_read_loop(app: AppHandle, project_id: String, tab_id: String, stdout: std
                 );
             }
             "result" => {
-                flush_thinking(&app, &project_id, &tab_id, &mut thinking_buf);
+                // 进入 assistant/user/result:思考阶段结束,复位计数心跳(真实思考内容已随
+                // assistant 的 thinking block 到达,无需残留 flush)。
+                thinking_tokens = 0;
+                last_thinking_flush = Instant::now();
                 // 长进程:result 仅标志一轮结束,置 Idle(child 保持 Some,进程不退)。
                 let _ = set_session_status(&app, &project_id, &tab_id, ClaudeStatus::Idle);
                 let success = v.get("subtype").and_then(|s| s.as_str()) == Some("success");
@@ -1071,23 +1137,6 @@ fn run_read_loop(app: AppHandle, project_id: String, tab_id: String, stdout: std
     let _ = take_stdin(&app, &project_id, &tab_id);
     log::info!(
         "claude read loop ended, tab {tab_id} project {project_id}, killed={killed}"
-    );
-}
-
-/// flush 残留 thinking_buf(若非空)并 emit Thinking,重置 last_flush 由调用方负责。
-fn flush_thinking(app: &AppHandle, project_id: &str, tab_id: &str, buf: &mut String) {
-    if buf.is_empty() {
-        return;
-    }
-    let _ = app.emit(
-        "claude-event",
-        ClaudeEvent {
-            project_id: project_id.to_string(),
-            tab_id: tab_id.to_string(),
-            payload: ClaudeEventPayload::Thinking {
-                text: std::mem::take(buf),
-            },
-        },
     );
 }
 

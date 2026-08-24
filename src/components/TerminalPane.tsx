@@ -8,6 +8,7 @@ import type { TerminalTransport } from "../domain/terminalTransport";
 import { useSettings } from "../settings/SettingsProvider";
 import { useTheme } from "../theme/ThemeProvider";
 import { TERMINAL_THEMES } from "../domain/themes";
+import { colorWithAlpha } from "../domain/bg";
 import { ShellMenu } from "./ShellMenu";
 import { SplitPaneButtons } from "./SplitPaneButtons";
 import { Popover, PopoverContent, PopoverTrigger } from "./ui/Popover";
@@ -110,7 +111,7 @@ export function TerminalPane({
   className,
 }: TerminalPaneProps) {
   const { t } = useTranslation();
-  const { fontSize } = useSettings();
+  const { fontSize, bgSetting } = useSettings();
   const surfaceRef = useRef<HTMLDivElement | null>(null);
   const paneRef = useRef<HTMLElement | null>(null);
   /** tab id → 常驻 xterm 资源。tab 首次可见时懒创建,切走不销毁。 */
@@ -132,14 +133,26 @@ export function TerminalPane({
   getTransportRef.current = getTransport;
 
   const { themeId } = useTheme();
-  const terminalTheme = TERMINAL_THEMES[themeId];
+  // 背景图开时 xterm **完全透明**(贴合主题图):theme.background 置 rgba(...,0) + 容器
+  // article 也不再垫 editor-bg(见渲染层 inline style),文字直接浮在背景图的暗化层上,
+  // 可读性由用户调「暗化」滑杆掌控。**必须开 allowTransparency**——xterm 默认 false 时垫
+  // 不透明底,rgba 也不会真正透明。
+  const terminalTheme = useMemo(() => {
+    const t = TERMINAL_THEMES[themeId];
+    if (!bgSetting.path) return t;
+    const bg = t.background ? colorWithAlpha(t.background, 0) : null;
+    return bg ? { ...t, background: bg } : t;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [themeId, bgSetting.path]);
 
-  // 主题热切:themeId 变时更新所有已创建 terminal 的 ANSI 配色(xterm 运行时支持 options.theme)。
+  // 主题热切:themeId/背景开关变时更新所有已创建 terminal 的配色(xterm 运行时支持
+  // options.theme / options.allowTransparency)。
   useEffect(() => {
     terminalsRef.current.forEach((tt) => {
-      tt.terminal.options.theme = TERMINAL_THEMES[themeId];
+      tt.terminal.options.allowTransparency = !!bgSetting.path;
+      tt.terminal.options.theme = terminalTheme;
     });
-  }, [themeId]);
+  }, [terminalTheme, bgSetting.path]);
 
   // session 字典:tab id → session。渲染 tab 容器 + 创建 xterm 时用。
   const sessionById = useMemo(() => {
@@ -170,6 +183,8 @@ export function TerminalPane({
       fontSize,
       lineHeight: 1.1,
       theme: terminalTheme,
+      // 背景图开时允许透明(theme.background 是 rgba);关闭时保持默认 false(有渲染优化差异)。
+      allowTransparency: !!bgSetting.path,
       allowProposedApi: false,
     });
     const fitAddon = new FitAddon();
@@ -387,7 +402,10 @@ export function TerminalPane({
   return (
     <article
       ref={paneRef}
-      className={`terminal-pane grid h-full min-h-0 min-w-0 grid-rows-[28px_1fr] overflow-hidden rounded-none bg-[var(--mx-editor-bg)] ${className ?? ""}`}
+      className={`terminal-pane grid h-full min-h-0 min-w-0 grid-rows-[length:var(--mx-paneheader-h)_1fr] overflow-hidden rounded-none bg-[var(--mx-editor-bg)] ${className ?? ""}`}
+      // 背景图开时容器完全透明(inline 覆盖 class 的 editor-bg),终端贴合主题图;
+      // 文字可读性由背景层的暗化遮罩(设置滑杆)保证。关闭背景图后回落 class 实色。
+      style={bgSetting.path ? { background: "transparent" } : undefined}
       onMouseDown={() => onFocusPane?.(paneId)}
     >
       <header className={`flex min-w-0 items-center justify-between gap-2 px-2 text-xs transition-colors ${"bg-[var(--mx-tabbar-bg)]"}`}>
@@ -406,13 +424,13 @@ export function TerminalPane({
               <TabsTrigger asChild value={s.id}>
               <div
                 key={s.id}
-                className={`mx-tab-item group/tab flex h-[24px] min-w-0 shrink cursor-pointer items-center gap-1 px-2 transition-colors ${
+                className={`mx-tab-item group/tab flex h-[length:var(--mx-tab-h)] min-w-0 shrink cursor-pointer items-center gap-1 px-2 transition-colors ${
                   isActive
                     ? "text-[var(--mx-text-bright)]"
                     : "text-[var(--mx-text-dim)] hover:text-[var(--mx-text)]"
                 }`}
               >
-                <span className="truncate text-[11px] font-[600]">{t(s.name)}</span>
+                <span className="min-w-0 max-w-[180px] truncate text-[length:var(--mx-ui-fs-sm)] font-[600]">{t(s.name)}</span>
                 {sessions.length > 1 && onCloseTab && (
                   <Tooltip>
                   <TooltipTrigger asChild>

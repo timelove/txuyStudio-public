@@ -132,7 +132,7 @@ export function StatusBar({ focusedProject, gitBranch, claudeStatuses, codexStat
 
   return (
     <>
-    <footer className="flex h-[26px] shrink-0 items-center justify-between gap-3 px-3 text-[11px] text-[var(--mx-muted)] select-none">
+    <footer className="flex h-[length:var(--mx-statusbar-h)] shrink-0 items-center justify-between gap-3 px-3 text-[length:var(--mx-ui-fs-sm)] text-[var(--mx-muted)] select-none">
       {/* 左:设置齿轮 + 聚焦项目绝对路径(截断 + title 全路径)+ git 分支。 */}
       <div className="flex min-w-0 items-center gap-2">
         <Tooltip>

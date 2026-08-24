@@ -21,6 +21,26 @@ import { createContext, useContext, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { clampFontSize, DEFAULT_FONT_SIZE } from "./index";
 import { normalizeCodexSandbox, type CodexSandboxId } from "../domain/codexSandbox";
+import { DEFAULT_BG_SETTING, type BgSetting } from "../domain/bg";
+
+/** 背景图设置的 localStorage 键(纯视觉,不走后端 state.json)。 */
+const BG_SETTING_KEY = "mx.bgSetting";
+
+/** 从 localStorage 读背景图设置(损坏/缺字段回退默认)。 */
+function loadBgSetting(): BgSetting {
+  try {
+    const raw = localStorage.getItem(BG_SETTING_KEY);
+    if (!raw) return DEFAULT_BG_SETTING;
+    const parsed = JSON.parse(raw) as Partial<BgSetting>;
+    return {
+      path: typeof parsed.path === "string" ? parsed.path : "",
+      blur: typeof parsed.blur === "number" ? parsed.blur : DEFAULT_BG_SETTING.blur,
+      dim: typeof parsed.dim === "number" ? parsed.dim : DEFAULT_BG_SETTING.dim,
+    };
+  } catch {
+    return DEFAULT_BG_SETTING;
+  }
+}
 
 type SettingsContextValue = {
   /** 当前字体大小(px),已 clamp 到 [MIN, MAX]。 */
@@ -31,6 +51,10 @@ type SettingsContextValue = {
   codexSandbox: CodexSandboxId;
   /** 改 Codex 默认 sandbox 档位:归一 + setState + 后端落盘(仅影响新建会话)。 */
   changeCodexSandbox: (sandbox: string) => void;
+  /** 背景图设置(path 空 = 关)。 */
+  bgSetting: BgSetting;
+  /** 改背景图设置(局部合并)+ localStorage 持久化。 */
+  changeBgSetting: (patch: Partial<BgSetting>) => void;
 };
 
 const SettingsContext = createContext<SettingsContextValue | null>(null);
@@ -50,6 +74,19 @@ export function SettingsProvider({
   const [codexSandbox, setCodexSandbox] = useState<CodexSandboxId>(() =>
     normalizeCodexSandbox(initialCodexSandbox),
   );
+  const [bgSetting, setBgSetting] = useState<BgSetting>(loadBgSetting);
+
+  const changeBgSetting = (patch: Partial<BgSetting>) => {
+    setBgSetting((prev) => {
+      const next = { ...prev, ...patch };
+      try {
+        localStorage.setItem(BG_SETTING_KEY, JSON.stringify(next));
+      } catch {
+        /* 写失败(隐私模式)忽略,仅内存生效 */
+      }
+      return next;
+    });
+  };
 
   const changeFontSize = (size: number) => {
     const clamped = clampFontSize(size);
@@ -68,7 +105,7 @@ export function SettingsProvider({
   };
 
   return (
-    <SettingsContext.Provider value={{ fontSize, changeFontSize, codexSandbox, changeCodexSandbox }}>
+    <SettingsContext.Provider value={{ fontSize, changeFontSize, codexSandbox, changeCodexSandbox, bgSetting, changeBgSetting }}>
       {children}
     </SettingsContext.Provider>
   );

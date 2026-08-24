@@ -65,8 +65,14 @@ export function MdPreview({ content, inline = false }: { content: string; inline
           // 允许基础排版标签;ADD_ATTR 不放开(防 on* 事件)。链接默认允许 target 经 rel 控制。
           ALLOWED_ATTR: ["href", "src", "alt", "title", "class", "id", "colspan", "rowspan", "target", "rel"],
         });
+        // 通过外层容器承载横向滚动，避免直接把 table 改成 block 破坏表格布局。
+        // marked 输出的 table 不会嵌套 table；非贪婪匹配只包裹当前表格节点。
+        const withScrollableTables = safe.replace(
+          /<table\b[^>]*>[\s\S]*?<\/table>/gi,
+          (table) => `<div class="mx-md-table-scroll">${table}</div>`,
+        );
         if (alive) {
-          setHtml(safe);
+          setHtml(withScrollableTables);
           setLoading(false);
         }
       })

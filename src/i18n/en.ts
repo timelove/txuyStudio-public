@@ -155,6 +155,14 @@ const en = {
       title: "Codex sandbox",
       hint: "Default policy for new Codex sessions; existing sessions keep their own and can be switched in their status bar",
     },
+    bg: {
+      title: "Background image",
+      choose: "Choose image…",
+      clear: "Clear",
+      blur: "Blur",
+      dim: "Dim",
+      hint: "Panels become translucent glass over the blurred background",
+    },
   },
   about: {
     description: "An AI CLI terminal workspace for Windows developers. Run claude, codex, regular shells, test commands and project tasks in parallel.",
@@ -339,11 +347,12 @@ const en = {
     sessionbrowser: "Sessions",
     filetree: "Probe",
     htmlpreview: "HTML Preview",
+    notes: "Notes",
   },
   shellgroup: {
     tui: "TUI tools",
     session: "Sessions",
-    browse: "Probes",
+    browse: "Probe / Notes",
   },
   // HTML preview pane (HtmlPreviewPane: editor + sandboxed preview + open local file)
   htmlpreview: {
@@ -359,6 +368,23 @@ const en = {
     loadErrorBinary: "Not a previewable text HTML file",
     loadTruncated: "File too large, previewing first 512KB only",
     loadErrorRead: "Failed to read{{error}}",
+  },
+  // Notes pane (NotesPane: Typora-style md editor, left source + right live preview, stored as .note files in project root)
+  notes: {
+    newNote: "New note",
+    openNote: "Open note",
+    source: "Markdown source",
+    preview: "Preview",
+    saved: "Saved",
+    unsaved: "Unsaved",
+    saving: "Saving…",
+    loadFailed: "Failed to load",
+    saveFailed: "Save failed",
+    empty: "No notes yet — click ✎ to create one",
+    emptyNotesDir: "No note files",
+    defaultTitle: "Note",
+    hideEditor: "Hide editor",
+    showEditor: "Show editor",
   },
   tip: {
     water: { tip: "💧 Drink some water", done: "💧 Drank water" },

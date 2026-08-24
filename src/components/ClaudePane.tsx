@@ -354,13 +354,13 @@ const ClaudeTabChip = memo(function ClaudeTabChip({
       <TooltipTrigger asChild>
         <TabsTrigger asChild value={session.id}>
           <div
-            className={`mx-tab-item group/tab flex h-[24px] min-w-0 shrink cursor-pointer items-center gap-1 px-2 transition-colors ${
+            className={`mx-tab-item group/tab flex h-[length:var(--mx-tab-h)] min-w-0 shrink cursor-pointer items-center gap-1 px-2 transition-colors ${
               isActive
                 ? "text-[var(--mx-text-bright)]"
                 : "text-[var(--mx-text-dim)] hover:text-[var(--mx-text)]"
             }`}
           >
-            <span className="truncate text-[11px] font-[600]">{t(session.name)}</span>
+            <span className="min-w-0 max-w-[180px] truncate text-[length:var(--mx-ui-fs-sm)] font-[600]">{t(session.name)}</span>
             <TabStatusDot kind={kind} />
             {showClose && onCloseTab && (
               <Button
@@ -416,7 +416,7 @@ function QuickResumeLast({
           onClick={() => onPick(item.sessionId)}
         >
           <span className="shrink-0 text-[var(--mx-accent)]">↶</span>
-          <span className="min-w-0 flex-1 truncate text-[11px] text-[var(--mx-text)]">{title}</span>
+          <span className="min-w-0 flex-1 truncate text-[length:var(--mx-ui-fs-sm)] text-[var(--mx-text)]">{title}</span>
           <span className="shrink-0 text-[10px] text-[var(--mx-faint)]">{relativeTime(item.lastAt, locale)}</span>
         </button>
       </TooltipTrigger>
@@ -1175,8 +1175,12 @@ export function ClaudePane(props: ClaudePaneProps) {
     }
     setInput("");
     setSlashOpen(false);
+    // 发送前立即贴底:用户手动发消息后若已上滚看历史,此时仍强制滚到底,
+    // 避免用户消息插入后还留在原视口(optimistic 插入 + transport.send 异步,时序抖动),
+    // 也与 stickRef 在 send 后已为 true 的 useLayoutEffect 行为一致。
+    scrollToBottom();
     void transport.send(text);
-  }, [activeTabId, input, busy, shellRunning]);
+  }, [activeTabId, input, busy, shellRunning, scrollToBottom]);
 
   const handleInterrupt = useCallback(() => {
     const transport = getClaudeTransportRef.current(activeTabId);
@@ -1575,7 +1579,7 @@ export function ClaudePane(props: ClaudePaneProps) {
 
   return (
     <article
-      className={`grid h-full min-h-0 min-w-0 grid-rows-[28px_1fr] overflow-hidden bg-[var(--mx-editor-bg)] ${className ?? ""}`}
+      className={`grid h-full min-h-0 min-w-0 grid-rows-[length:var(--mx-paneheader-h)_1fr] overflow-hidden bg-[var(--mx-editor-bg)] ${className ?? ""}`}
       onMouseDown={() => onFocusPane?.(paneId)}
     >
       {/* header:tab 条 + 右侧按钮组(+ 新 tab / ▥ 分屏 / × 关 pane),与 TerminalPane/SessionBrowserPane 同构。 */}
@@ -2607,6 +2611,51 @@ const MessageRow = memo(function MessageRow({
   );
 });
 
+/**
+ * thinking 手风琴块(仿 claudecodeui Reasoning)。
+ *
+ * 展开行为:思考中(streaming)默认展开实时显示思考过程,本轮结束(streaming→false)自动收起
+ * 保持对话紧凑。用户手动点过 summary 后,以用户操作为准不再自动收/展(避免和用户抢控制权)。
+ * 每轮 assistant 是新挂载的消息,内部状态随消息生命周期,不跨轮残留。
+ */
+function ThinkingBlock({ text, streaming, t }: { text: string; streaming: boolean; t: (k: string) => string }) {
+  // 内部 open 状态:仅在「用户尚未手动操作」时跟随 streaming(思考中开、结束关)。
+  const [userToggled, setUserToggled] = useState(false);
+  const [open, setOpen] = useState(streaming);
+  useEffect(() => {
+    if (!userToggled) setOpen(streaming);
+  }, [streaming, userToggled]);
+  return (
+    <details
+      className="group"
+      open={open}
+      onToggle={(e) => {
+        setUserToggled(true);
+        setOpen((e.currentTarget as HTMLDetailsElement).open);
+      }}
+    >
+      <summary className="flex cursor-pointer list-none items-center gap-1.5 py-0.5 text-xs text-[var(--mx-muted)] transition-colors hover:text-[var(--mx-text)]">
+        <svg
+          className="h-3 w-3 flex-shrink-0 transition-transform duration-150 group-open:rotate-90"
+          fill="none"
+          stroke="currentColor"
+          viewBox="0 0 24 24"
+          aria-hidden
+        >
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+        </svg>
+        <span className="italic">{t("claudepane.thinking")}</span>
+        {text && <span className="text-[var(--mx-faint)]">· {text.length} chars</span>}
+      </summary>
+      <div className="mt-1.5 pl-[18px]">
+        <div className="whitespace-pre-wrap break-words text-xs italic leading-relaxed text-[var(--mx-muted)]">
+          {text || "…"}
+        </div>
+      </div>
+    </details>
+  );
+}
+
 /** 单个 block 渲染:text / thinking / tool_use(忠实复刻 claudecodeui MessageComponent 分支)。 */
 function BlockView({
   block,
@@ -2673,29 +2722,7 @@ function BlockView({
     );
   }
   if (block.type === "thinking") {
-    // thinking 手风琴折叠(仿 claudecodeui Reasoning):默认折叠,展开看完整思考。
-    return (
-      <details className="group">
-        <summary className="flex cursor-pointer list-none items-center gap-1.5 py-0.5 text-xs text-[var(--mx-muted)] transition-colors hover:text-[var(--mx-text)]">
-          <svg
-            className="h-3 w-3 flex-shrink-0 transition-transform duration-150 group-open:rotate-90"
-            fill="none"
-            stroke="currentColor"
-            viewBox="0 0 24 24"
-            aria-hidden
-          >
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-          </svg>
-          <span className="italic">{t("claudepane.thinking")}</span>
-          {block.text && <span className="text-[var(--mx-faint)]">· {block.text.length} chars</span>}
-        </summary>
-        <div className="mt-1.5 pl-[18px]">
-          <div className="whitespace-pre-wrap break-words text-xs italic leading-relaxed text-[var(--mx-muted)]">
-            {block.text || "…"}
-          </div>
-        </div>
-      </details>
-    );
+    return <ThinkingBlock text={block.text} streaming={streaming} t={t} />;
   }
   // tool_use
   return (

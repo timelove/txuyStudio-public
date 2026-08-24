@@ -522,7 +522,7 @@ export function FileTreePane({
 
   return (
     <article
-      className="grid h-full min-h-0 min-w-0 grid-rows-[28px_1fr] overflow-hidden bg-[var(--mx-editor-bg)]"
+      className="grid h-full min-h-0 min-w-0 grid-rows-[length:var(--mx-paneheader-h)_1fr] overflow-hidden bg-[var(--mx-editor-bg)]"
       onMouseDown={() => onFocusPane?.(paneId)}
     >
       {/* 顶部 header:tab 条 + 右侧按钮组(刷新 / + 新 tab / ▥ 分屏 / × 关 pane),与 TerminalPane/SessionBrowserPane 同构。 */}
@@ -544,13 +544,13 @@ export function FileTreePane({
               <TabsTrigger asChild value={s.id}>
               <div
                 key={s.id}
-                className={`mx-tab-item group/tab flex h-[24px] min-w-0 shrink cursor-pointer items-center gap-1 px-2 transition-colors ${
+                className={`mx-tab-item group/tab flex h-[length:var(--mx-tab-h)] min-w-0 shrink cursor-pointer items-center gap-1 px-2 transition-colors ${
                   isActive
                     ? "text-[var(--mx-text-bright)]"
                     : "text-[var(--mx-text-dim)] hover:text-[var(--mx-text)]"
                 }`}
               >
-                <span className="truncate text-[11px] font-[600]">{t(s.name)}</span>
+                <span className="min-w-0 max-w-[180px] truncate text-[length:var(--mx-ui-fs-sm)] font-[600]">{t(s.name)}</span>
                 {sessions.length > 1 && onCloseTab && (
                   <Tooltip>
                   <TooltipTrigger asChild>
