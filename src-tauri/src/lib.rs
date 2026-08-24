@@ -18,7 +18,7 @@ use codex::commands::{
     list_codex_models, send_codex_message, set_codex_session_model,
 };
 use codex::CodexRegistry;
-use filetree::commands::{list_dir, list_files, read_file, start_fs_watch, stop_fs_watch, write_file};
+use filetree::commands::{ensure_dir, list_dir, list_files, read_file, start_fs_watch, stop_fs_watch, write_file};
 use filetree::FsWatcherRegistry;
 use log::LevelFilter;
 use pty::commands::{kill_pty, resize_pty, spawn_pty, write_pty};
@@ -357,7 +357,9 @@ pub fn run() {
             read_file,
             start_fs_watch,
             stop_fs_watch,
-            write_file
+            write_file,
+            // 笔记 pane:首次建笔记时创建 notes/ 目录(write_file 不建父目录)。
+            ensure_dir
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

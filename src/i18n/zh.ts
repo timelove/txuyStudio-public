@@ -155,6 +155,14 @@ const zh = {
       title: "Codex 沙箱",
       hint: "新建 Codex 会话的默认策略;已开会话不受影响,可在其状态栏单独切换",
     },
+    bg: {
+      title: "背景图",
+      choose: "选择图片…",
+      clear: "清除",
+      blur: "模糊",
+      dim: "暗化",
+      hint: "开启后前景面板半透明,透出虚化背景图",
+    },
   },
   about: {
     description: "面向 Windows 开发者的 AI CLI 终端工作台。并行管理 claude、codex、常规 shell、测试命令与项目任务。",
@@ -342,12 +350,13 @@ const zh = {
     sessionbrowser: "会话列表",
     filetree: "探针",
     htmlpreview: "HTML 预览",
+    notes: "笔记",
   },
   // 新建菜单分组标题(Shell/AI CLI 为英文,回退 key 本身)
   shellgroup: {
     tui: "TUI 工具",
     session: "会话",
-    browse: "探针",
+    browse: "探针/笔记",
   },
   // HTML 预览面板(HtmlPreviewPane:编辑 + 沙箱预览 + 打开本地文件)
   htmlpreview: {
@@ -363,6 +372,23 @@ const zh = {
     loadErrorBinary: "该文件不是可预览的文本 HTML",
     loadTruncated: "文件过大,仅预览前 512KB",
     loadErrorRead: "读取失败{{error}}",
+  },
+  // 笔记面板(NotesPane:Typora 式 md 编辑,左源码右实时预览,存项目根 .note 文件)
+  notes: {
+    newNote: "新建笔记",
+    openNote: "打开笔记",
+    source: "Markdown 源码",
+    preview: "预览",
+    saved: "已保存",
+    unsaved: "未保存",
+    saving: "保存中…",
+    loadFailed: "读取失败",
+    saveFailed: "保存失败",
+    empty: "项目里还没有笔记,点 ✎ 新建一篇",
+    emptyNotesDir: "暂无笔记文件",
+    defaultTitle: "笔记",
+    hideEditor: "隐藏编辑区",
+    showEditor: "显示编辑区",
   },
   // 健康 tip(StatusBar HEALTH_TIPS 数据驱动,emoji 保留)
   tip: {

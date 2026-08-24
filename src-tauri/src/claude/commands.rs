@@ -28,10 +28,13 @@ use super::{
 use crate::pty::commands::{command_no_window, resolve_on_path, validate_cwd};
 use crate::state::AppState;
 
-/// thinking_tokens 攒批阈值:累计到这么多字符就 flush 一次 emit,避免逐 token IPC 风暴。
-const THINKING_BATCH_CHARS: usize = 200;
+/// thinking_tokens 攒批阈值:累计到这么多 token 就 flush 一次心跳 emit,避免逐 token IPC 风暴。
+const THINKING_BATCH_TOKENS: u64 = 50;
 /// thinking_tokens flush 间隔:即使没到阈值,这么久也 flush 一次,让 UI 感知「在思考」。
-const THINKING_FLUSH_INTERVAL: Duration = Duration::from_millis(50);
+/// thinking_tokens 事件本身**不含思考文本**(只有 estimated_tokens 计数);真实思考内容随
+/// assistant 消息的 `thinking` content block 到达(见 run_read_loop assistant 分支)。
+/// 故这里 emit 的 Thinking 事件只是「仍在思考」的轻量状态心跳,text 恒为空。
+const THINKING_FLUSH_INTERVAL: Duration = Duration::from_millis(400);
 
 /// 定位 claude 可执行文件(优先原生安装包)。
 ///
@@ -780,7 +783,8 @@ pub(super) fn kill_child_tree(child: &mut std::process::Child) {
 /// - `result` → flush thinking + 置 Idle(进程不退)+ emit Result
 fn run_read_loop(app: AppHandle, project_id: String, tab_id: String, stdout: std::process::ChildStdout) {
     let reader = std::io::BufReader::new(stdout);
-    let mut thinking_buf = String::new();
+    // thinking_tokens 是纯计数心跳(无文本),真实思考内容在 assistant 的 thinking block 里。
+    let mut thinking_tokens: u64 = 0;
     let mut last_thinking_flush = Instant::now();
 
     for line in reader.lines() {
@@ -847,8 +851,13 @@ fn run_read_loop(app: AppHandle, project_id: String, tab_id: String, stdout: std
                         },
                     );
                 } else if subtype == "thinking_tokens" {
-                    thinking_buf.push('.');
-                    if thinking_buf.len() >= THINKING_BATCH_CHARS
+                    // 纯计数心跳(无文本):累计 token 到阈值或定时 flush 一次空 Thinking,
+                    // 驱动前端 status=thinking 状态指示。真实思考文本随 assistant thinking block 到达。
+                    thinking_tokens += v
+                        .get("estimated_tokens_delta")
+                        .and_then(|d| d.as_u64())
+                        .unwrap_or(1);
+                    if thinking_tokens >= THINKING_BATCH_TOKENS
                         || last_thinking_flush.elapsed() >= THINKING_FLUSH_INTERVAL
                     {
                         let _ = app.emit(
@@ -857,10 +866,11 @@ fn run_read_loop(app: AppHandle, project_id: String, tab_id: String, stdout: std
                                 project_id: project_id.clone(),
                                 tab_id: tab_id.clone(),
                                 payload: ClaudeEventPayload::Thinking {
-                                    text: std::mem::take(&mut thinking_buf),
+                                    text: String::new(),
                                 },
                             },
                         );
+                        thinking_tokens = 0;
                         last_thinking_flush = Instant::now();
                     }
                 } else if subtype == "status" {
@@ -968,7 +978,10 @@ fn run_read_loop(app: AppHandle, project_id: String, tab_id: String, stdout: std
                 }
             }
             "assistant" => {
-                flush_thinking(&app, &project_id, &tab_id, &mut thinking_buf);
+                // 进入 assistant/user/result:思考阶段结束,复位计数心跳(真实思考内容已随
+                // assistant 的 thinking block 到达,无需残留 flush)。
+                thinking_tokens = 0;
+                last_thinking_flush = Instant::now();
                 let message = v.get("message").cloned().unwrap_or(serde_json::Value::Null);
                 let _ = app.emit(
                     "claude-event",
@@ -990,7 +1003,10 @@ fn run_read_loop(app: AppHandle, project_id: String, tab_id: String, stdout: std
                 if is_replay && content_str.contains("<local-command-stdout>") {
                     continue;
                 }
-                flush_thinking(&app, &project_id, &tab_id, &mut thinking_buf);
+                // 进入 assistant/user/result:思考阶段结束,复位计数心跳(真实思考内容已随
+                // assistant 的 thinking block 到达,无需残留 flush)。
+                thinking_tokens = 0;
+                last_thinking_flush = Instant::now();
                 let message = v.get("message").cloned().unwrap_or(serde_json::Value::Null);
                 let _ = app.emit(
                     "claude-event",
@@ -1002,7 +1018,10 @@ fn run_read_loop(app: AppHandle, project_id: String, tab_id: String, stdout: std
                 );
             }
             "result" => {
-                flush_thinking(&app, &project_id, &tab_id, &mut thinking_buf);
+                // 进入 assistant/user/result:思考阶段结束,复位计数心跳(真实思考内容已随
+                // assistant 的 thinking block 到达,无需残留 flush)。
+                thinking_tokens = 0;
+                last_thinking_flush = Instant::now();
                 // 长进程:result 仅标志一轮结束,置 Idle(child 保持 Some,进程不退)。
                 let _ = set_session_status(&app, &project_id, &tab_id, ClaudeStatus::Idle);
                 let success = v.get("subtype").and_then(|s| s.as_str()) == Some("success");
@@ -1071,23 +1090,6 @@ fn run_read_loop(app: AppHandle, project_id: String, tab_id: String, stdout: std
     let _ = take_stdin(&app, &project_id, &tab_id);
     log::info!(
         "claude read loop ended, tab {tab_id} project {project_id}, killed={killed}"
-    );
-}
-
-/// flush 残留 thinking_buf(若非空)并 emit Thinking,重置 last_flush 由调用方负责。
-fn flush_thinking(app: &AppHandle, project_id: &str, tab_id: &str, buf: &mut String) {
-    if buf.is_empty() {
-        return;
-    }
-    let _ = app.emit(
-        "claude-event",
-        ClaudeEvent {
-            project_id: project_id.to_string(),
-            tab_id: tab_id.to_string(),
-            payload: ClaudeEventPayload::Thinking {
-                text: std::mem::take(buf),
-            },
-        },
     );
 }
 

@@ -107,14 +107,14 @@ export function TopProjectBar({
             strokeLinejoin="round"
           />
         </svg>
-        <div className="pointer-events-none text-[12px] font-[760] tracking-[0.02em]">txuyStudio</div>
+        <div className="pointer-events-none text-[length:var(--mx-ui-fs)] font-[760] tracking-[0.02em]">txuyStudio</div>
       </div>
 
       {/* 中部:单项目模式 → 精简栏(项目名 + dock back);否则 → 项目 tabs。 */}
       <div data-tauri-drag-region className="min-w-0">
         {singleProjectMode ? (
           <div className="flex min-w-0 items-center gap-2">
-            <span className="mx-chip flex h-[24px] min-w-0 items-center gap-[6px] bg-[var(--mx-selected-bg)] px-[10px] text-xs text-white">
+            <span className="mx-chip flex h-[length:var(--mx-tab-h)] min-w-0 items-center gap-[6px] bg-[var(--mx-selected-bg)] px-[10px] text-xs text-white">
               {/* 项目稳定色 dot(与主窗口顶栏 chip/下拉同色源,跨窗口同项目同色)。 */}
               <span
                 aria-hidden
@@ -135,7 +135,7 @@ export function TopProjectBar({
                 size="icon-md"
                 onClick={onDockBack}
                 onMouseDown={(e) => e.stopPropagation()}
-                className="mx-chip h-[24px] gap-1 bg-[var(--mx-surface-soft)] px-[10px] text-xs text-[var(--mx-muted)] hover:bg-[var(--mx-hover-bg)] hover:text-[var(--mx-text)]"
+                className="mx-chip h-[length:var(--mx-tab-h)] gap-1 bg-[var(--mx-surface-soft)] px-[10px] text-xs text-[var(--mx-muted)] hover:bg-[var(--mx-hover-bg)] hover:text-[var(--mx-text)]"
               >
                 {t("topbar.backToMainBtn")}
               </Button>

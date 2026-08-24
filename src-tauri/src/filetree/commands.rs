@@ -171,6 +171,25 @@ pub async fn write_file(path: String, content: String) -> Result<(), String> {
     .map_err(|e| format!("join write_file: {e}"))?
 }
 
+/// 确保目录存在(`create_dir_all`,已存在幂等成功)。路径校验同 `list_dir`(绝对 + 拒 `..`)。
+///
+/// 供笔记 pane 首次建笔记时创建项目根的 `notes/` 目录(`write_file` 不建父目录)。
+/// 已存在(含非空)返回 Ok,不递归删除任何内容(纯创建语义,安全)。
+#[tauri::command]
+pub async fn ensure_dir(path: String) -> Result<(), String> {
+    let normalized = validate_path(&path)?;
+    tokio::task::spawn_blocking(move || {
+        match std::fs::create_dir_all(&normalized) {
+            Ok(()) => Ok(()),
+            // AlreadyExists 在 create_dir_all 下不该出现(它内部已幂等),防御保留。
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+            Err(e) => Err(e.to_string()),
+        }
+    })
+    .await
+    .map_err(|e| format!("join ensure_dir: {e}"))?
+}
+
 /// 由扩展名(小写)判断是否图片(与前端 `IMAGE_EXTS` 保持一致)。
 fn is_image_ext(path: &str) -> bool {
     match Path::new(path)

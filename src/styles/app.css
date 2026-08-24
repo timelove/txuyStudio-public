@@ -63,6 +63,21 @@
   /* 自绘标题栏高度(顶栏 grid 行高 + TopProjectBar + WindowControls 容器统一引用)。
    * 收窄到 32px(贴近 VS Code/系统标题栏观感);改高度只动这一处,控件靠 items-center/h-full 自适应。 */
   --mx-titlebar-h: 32px;
+  /* chrome 尺寸/字号 token:默认值 = 历史固定值,观感零变化。AppShell 按全局 fontSize 等比
+   * 运行时覆写(documentElement inline 优先级高于本 :root 规则,Radix portal 弹层也继承),
+   * 使顶栏/状态栏/侧栏/pane 头/tab 的高宽与 chrome 字号随字体设置自适应。
+   * --text-xs/--text-sm 是 Tailwind v4 主题变量(utility 编译为 var() 引用),AppShell 同样
+   * 覆写 -> 所有 text-xs/text-sm 用法零改动全局缩放。 */
+  --mx-statusbar-h: 26px;
+  --mx-sidebar-w: 44px;
+  --mx-sidebar-icon: 32px;
+  --mx-paneheader-h: 28px;
+  --mx-tab-h: 24px;
+  --mx-chip-h: 26px;
+  --mx-ui-fs: 12px;
+  --mx-ui-fs-lg: 16px;
+  --mx-ui-fs-sm: 11px;
+  --mx-ui-fs-xs: 10px;
   /* 扩展语义 token:收口高频硬编码色,主题切换时随 [data-theme] 一并覆盖。
    * 值 = 改动前的硬编码值,故默认(midnight)观感零变化。 */
   --mx-editor-bg: #0b1020;
@@ -495,7 +510,8 @@ button {
 .mx-md-preview ol { margin: 0.6em 0; padding-left: 1.6em; }
 .mx-md-preview li { margin: 0.25em 0; }
 .mx-md-preview hr { border: none; border-top: 1px solid var(--mx-border); margin: 1.2em 0; }
-.mx-md-preview table { border-collapse: collapse; margin: 0.8em 0; }
+.mx-md-preview table { border-collapse: collapse; margin: 0; width: max-content; min-width: 100%; }
+.mx-md-table-scroll { max-width: 100%; overflow-x: auto; margin: 0.8em 0; }
 .mx-md-preview th,
 .mx-md-preview td { border: 1px solid var(--mx-border); padding: 0.35em 0.7em; }
 .mx-md-preview th { background: rgba(148, 163, 184, 0.1); }
@@ -517,4 +533,18 @@ button {
 }
 .mx-tab-item:hover:not([data-state="active"]) {
   color: var(--mx-text);
+}
+
+/* ============================================================
+ * 分屏分隔线拖拽(SplitHandle):拖拽期间 body 加 .mx-dragging-split,
+ * 禁文本选中 + 全局 resize 光标(拖出手柄范围也保持光标,避免闪烁)。
+ * ============================================================ */
+body.mx-dragging-split,
+body.mx-dragging-split * {
+  user-select: none !important;
+  cursor: col-resize !important;
+}
+body.mx-dragging-split.dragging-vertical,
+body.mx-dragging-split.dragging-vertical * {
+  cursor: row-resize !important;
 }

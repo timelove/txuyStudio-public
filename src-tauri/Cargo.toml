@@ -1,6 +1,6 @@
 [package]
 name = "txuy-studio"
-version = "0.1.4"
+version = "0.1.5"
 description = "AI CLI terminal workspace for Windows developers"
 authors = ["txuyStudio Contributors"]
 edition = "2021"
@@ -13,7 +13,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-opener = "2"
 tauri-plugin-log = "2"
 log = "0.4"
@@ -27,3 +27,6 @@ sysinfo = "0.32"
 dirs = "6"
 notify = "6"
 base64 = "0.22"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61", features = ["Win32_UI_HiDpi", "Win32_Foundation"] }

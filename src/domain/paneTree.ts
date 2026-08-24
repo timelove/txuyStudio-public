@@ -181,6 +181,26 @@ export function closePane(root: PaneNode, targetPaneId: string): PaneNode | null
   return { ...root, children: [newLeft, newRight] };
 }
 
+/**
+ * 设置某 split 节点的 ratio(拖拽分隔线用)。递归按 split `id` 定位(形如
+ * `ps-1::split-horizontal`,splitId 稳定身份),clamp 到 [0.15, 0.85](留最小可用宽度/高度),
+ * 不可变更新。找不到该 split 原样返回。ratio 持久化到 state.json(split 节点 ratio 字段已在 serde 模型里)。
+ */
+export function setSplitRatio(root: PaneNode, splitId: string, ratio: number): PaneNode {
+  const clamped = Math.max(0.15, Math.min(0.85, ratio));
+  if (root.type === "pane") return root;
+  if (root.id === splitId) {
+    // ratio 未变(含已 clamp 到同值)返回原引用,避免无谓的 setState/持久化。
+    if (root.ratio === clamped) return root;
+    return { ...root, ratio: clamped };
+  }
+  const left = setSplitRatio(root.children[0], splitId, clamped);
+  const right = setSplitRatio(root.children[1], splitId, clamped);
+  // 两子树均未变(目标不在此子树)返回原引用,保引用相等供调用方短路。
+  if (left === root.children[0] && right === root.children[1]) return root;
+  return { ...root, children: [left, right] };
+}
+
 /** 列出所有叶子 pane(左栏 shell 列表用)。 */
 export function listPanes(root: PaneNode): PaneLeaf[] {
   if (root.type === "pane") return [root];
@@ -226,6 +246,24 @@ export function addTab(root: PaneNode, paneId: string, newTab: PaneTab): PaneNod
     ...root,
     children: [addTab(root.children[0], paneId, newTab), addTab(root.children[1], paneId, newTab)],
   };
+}
+
+/**
+ * 重命名某 pane 某 tab 的标题(笔记 pane 随 md 一级标题更新 tab 名用)。
+ * 找不到 pane/tab 原样返回;标题与现值相同也原样返回(避免无谓的持久化)。
+ */
+export function renameTab(root: PaneNode, paneId: string, tabId: string, title: string): PaneNode {
+  if (root.type === "pane") {
+    if (root.id !== paneId) return root;
+    const tab = root.tabs.find((t) => t.id === tabId);
+    if (!tab || tab.title === title) return root;
+    const tabs = root.tabs.map((t) => (t.id === tabId ? { ...t, title } : t));
+    return { ...root, tabs };
+  }
+  const left = renameTab(root.children[0], paneId, tabId, title);
+  const right = renameTab(root.children[1], paneId, tabId, title);
+  if (left === root.children[0] && right === root.children[1]) return root;
+  return { ...root, children: [left, right] };
 }
 
 /**

@@ -1,4 +1,5 @@
 import { useTranslation } from "react-i18next";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { SANDBOX_MODES } from "../domain/codexSandbox";
 import { SHORTCUT_GROUPS } from "../domain/shortcuts";
 import { useI18n } from "../i18n/I18nProvider";
@@ -40,7 +41,7 @@ type SettingsModalProps = {
 export function SettingsModal({ open, onClose }: SettingsModalProps) {
   const { t } = useTranslation();
   const { locale, changeLanguage } = useI18n();
-  const { fontSize, changeFontSize, codexSandbox, changeCodexSandbox } = useSettings();
+  const { fontSize, changeFontSize, codexSandbox, changeCodexSandbox, bgSetting, changeBgSetting } = useSettings();
   const { themeId, changeTheme, themes } = useTheme();
 
   return (
@@ -160,6 +161,85 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
                   <span>{FONT_SIZE_MAX}</span>
                 </div>
                 <div className="mt-1.5 text-[10px] text-[var(--mx-faint)]">{t("settings.fontSize.hint")}</div>
+              </section>
+
+              {/* 背景图分区:选图(系统文件选择器,仅图片)+ 模糊/暗化滑杆 + 清除。
+                  开启后前景面板半透明(玻璃态)透出虚化背景。 */}
+              <section className="mt-4 border-t border-[var(--mx-border)] pt-3">
+                <div className="mb-2 flex items-center justify-between">
+                  <span className="text-[10px] uppercase tracking-wide text-[var(--mx-faint)]">{t("settings.bg.title")}</span>
+                  <div className="flex items-center gap-2">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => {
+                        void openDialog({
+                          multiple: false,
+                          filters: [{ name: "Image", extensions: ["png", "jpg", "jpeg", "webp", "gif", "bmp"] }],
+                        })
+                          .then((sel) => {
+                            if (typeof sel === "string" && sel) changeBgSetting({ path: sel });
+                          })
+                          .catch(() => { /* 非 Tauri 环境,静默 */ });
+                      }}
+                    >
+                      {t("settings.bg.choose")}
+                    </Button>
+                    {bgSetting.path && (
+                      <button
+                        type="button"
+                        onClick={() => changeBgSetting({ path: "" })}
+                        className="text-[11px] text-[var(--mx-faint)] transition-colors hover:text-[var(--mx-text)]"
+                      >
+                        {t("settings.bg.clear")}
+                      </button>
+                    )}
+                  </div>
+                </div>
+                {bgSetting.path && (
+                  <>
+                    <div className="mb-0.5 truncate text-[10px] text-[var(--mx-faint)]" title={bgSetting.path}>
+                      {bgSetting.path}
+                    </div>
+                    {/* 模糊滑杆:0-40px。 */}
+                    <div className="mb-1 flex items-center justify-between text-[10px] text-[var(--mx-faint)]">
+                      <span>{t("settings.bg.blur")}</span>
+                      <span className="tabular-nums">{bgSetting.blur}px</span>
+                    </div>
+                    <Slider
+                      value={[bgSetting.blur]}
+                      min={0}
+                      max={40}
+                      step={1}
+                      onValueChange={(v) => changeBgSetting({ blur: v[0] })}
+                      aria-label={t("settings.bg.blur")}
+                    >
+                      <SliderTrack>
+                        <SliderRange />
+                      </SliderTrack>
+                      <SliderThumb />
+                    </Slider>
+                    {/* 暗化滑杆:0-0.85。 */}
+                    <div className="mb-1 mt-2 flex items-center justify-between text-[10px] text-[var(--mx-faint)]">
+                      <span>{t("settings.bg.dim")}</span>
+                      <span className="tabular-nums">{Math.round(bgSetting.dim * 100)}%</span>
+                    </div>
+                    <Slider
+                      value={[bgSetting.dim]}
+                      min={0}
+                      max={0.85}
+                      step={0.05}
+                      onValueChange={(v) => changeBgSetting({ dim: v[0] })}
+                      aria-label={t("settings.bg.dim")}
+                    >
+                      <SliderTrack>
+                        <SliderRange />
+                      </SliderTrack>
+                      <SliderThumb />
+                    </Slider>
+                  </>
+                )}
+                <div className="mt-1.5 text-[10px] text-[var(--mx-faint)]">{t("settings.bg.hint")}</div>
               </section>
 
               {/* Codex 沙箱分区:默认档三选一(ToggleGroup,与 CodexPane 状态栏同源 SANDBOX_MODES)。

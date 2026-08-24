@@ -1,4 +1,4 @@
-export type SessionKind = "claude" | "claudepane" | "codex" | "codexpane" | "shell" | "test" | "lazygit" | "fresh" | "yazi" | "sessionbrowser" | "filetree" | "htmlpreview";
+export type SessionKind = "claude" | "claudepane" | "codex" | "codexpane" | "shell" | "test" | "lazygit" | "fresh" | "yazi" | "sessionbrowser" | "filetree" | "htmlpreview" | "notes";
 
 export type SessionStatus =
   | "running"

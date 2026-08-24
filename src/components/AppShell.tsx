@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { useTranslation } from "react-i18next";
 import { useSettings } from "../settings/SettingsProvider";
+import { DEFAULT_FONT_SIZE } from "../settings";
+import { colorWithAlpha } from "../domain/bg";
+import { useTheme } from "../theme/ThemeProvider";
 import type { ProjectId, ProjectSnapshot } from "../domain/projects";
 import type { ShellKind, PaneNode, PaneLeaf, PaneRef, SplitDirection, PaneTab } from "../domain/paneTree";
 import type { ProjectRecord } from "../domain/appState";
@@ -16,7 +19,9 @@ import {
   focusPane,
   getActiveTab,
   listPanes,
+  renameTab,
   setActiveTab,
+  setSplitRatio,
   splitPaneWithPane,
   surfaceKey,
   transportKey,
@@ -95,8 +100,61 @@ export function AppShell({
   onNewWindow,
 }: AppShellProps) {
   const { t } = useTranslation();
-  // 全局设置:Codex 默认 sandbox 档位(新建 codex 会话的初始 -s;已开会话不跟随,其状态栏单独切)。
-  const { codexSandbox } = useSettings();
+  // 全局设置:Codex 默认 sandbox 档位(新建 codex 会话的初始 -s;已开会话不跟随,其状态栏单独切)
+  // + 全局 fontSize(驱动 chrome 等比缩放,见下方 effect)。
+  const { codexSandbox, fontSize, bgSetting } = useSettings();
+
+  // chrome 等比缩放:全局 fontSize(默认 14 为 1.0)驱动顶栏/状态栏/侧栏/pane 头/tab/chip 的
+  // 高宽与 chrome 字号。在 documentElement 上覆写 CSS 变量:inline style 优先级高于 app.css
+  // 的 :root 默认值,且 Radix portal 弹层(portal 到 body 下)也能继承。text-xs/text-sm 是
+  // Tailwind v4 主题变量(utility 编译为 var() 引用),一并覆写 -> 所有 text-xs/text-sm 用法
+  // 零组件改动全局缩放;line-height 用无单位值随 font-size 自动等比。
+  useEffect(() => {
+    const scale = fontSize / DEFAULT_FONT_SIZE;
+    const r = document.documentElement.style;
+    const px = (v: number) => `${Math.round(v * scale)}px`;
+    r.setProperty("--mx-titlebar-h", px(32));
+    r.setProperty("--mx-statusbar-h", px(26));
+    r.setProperty("--mx-sidebar-w", px(44));
+    r.setProperty("--mx-sidebar-icon", px(32));
+    r.setProperty("--mx-paneheader-h", px(28));
+    r.setProperty("--mx-tab-h", px(24));
+    r.setProperty("--mx-chip-h", px(26));
+    r.setProperty("--mx-ui-fs", px(12));
+    r.setProperty("--mx-ui-fs-lg", px(16));
+    r.setProperty("--mx-ui-fs-sm", px(11));
+    r.setProperty("--mx-ui-fs-xs", px(10));
+    r.setProperty("--text-xs", px(12));
+    r.setProperty("--text-sm", px(14));
+    r.setProperty("--text-xs--line-height", "1.3333");
+    r.setProperty("--text-sm--line-height", "1.4286");
+  }, [fontSize]);
+
+  // 背景图玻璃化覆写(详见 docs/theme-guide.md「背景图兼容」)。背景开启时按层级覆写表面 token:
+  // - --mx-bg / --mx-editor-bg → transparent:主窗口底与内容区/终端底完全透,背景图直接透出;
+  // - --mx-card-bg @0.82:输入框/卡片半透明玻璃(可读但有层次);
+  // - --mx-tabbar-bg @0.72:顶栏/底栏/pane 头 tabs 半透明(注意 one-dark 是实色 #21252b,
+  //   midnight 是透明浅罩,必须统一覆写,否则实色主题的 pane tabs 透不出背景)。
+  // 未覆写的 token(--mx-surface/--mx-border/文字色)保持主题原色,保证弹层/边框/文字可读。
+  // 先 removeProperty 再读 computedStyle 取主题原值(非上次覆写值);主题切换后 effect 重跑。
+  const { themeId: bgThemeId } = useTheme();
+  useEffect(() => {
+    const r = document.documentElement.style;
+    r.removeProperty("--mx-bg");
+    r.removeProperty("--mx-editor-bg");
+    r.removeProperty("--mx-card-bg");
+    r.removeProperty("--mx-tabbar-bg");
+    if (!bgSetting.path) return;
+    r.setProperty("--mx-bg", "transparent");
+    r.setProperty("--mx-editor-bg", "transparent");
+    const cs = getComputedStyle(document.documentElement);
+    const cardOrig = cs.getPropertyValue("--mx-card-bg").trim();
+    const cardGlass = cardOrig ? colorWithAlpha(cardOrig, 0.82) : null;
+    if (cardGlass) r.setProperty("--mx-card-bg", cardGlass);
+    const tabbarOrig = cs.getPropertyValue("--mx-tabbar-bg").trim();
+    const tabbarGlass = tabbarOrig ? colorWithAlpha(tabbarOrig, 0.72) : null;
+    if (tabbarGlass) r.setProperty("--mx-tabbar-bg", tabbarGlass);
+  }, [bgSetting.path, bgThemeId]);
   // 每项目一棵 pane tree(从 workspace.paneTree 初始化;deriver 已迁移旧形态到 tabs)。
   const [treesByProject, setTreesByProject] = useState<Record<string, PaneNode>>(() => {
     const init: Record<string, PaneNode> = {};
@@ -303,6 +361,48 @@ export function AppShell({
     });
   }, []);
 
+  /**
+   * 拖拽分屏分隔线调比例。commit=false(拖拽中):只更新内存态 treesByProject,不刷后端
+   * (高频 pointermove 落盘会刷屏);commit=true(松手):走 commitTree 落盘 save_pane_tree。
+   * splitId 带 keyPrefix(projectId::split-...),而树里 split.id 不带前缀,定位前剥掉。
+   */
+  const handleSetSplitRatio = useCallback(
+    (projectId: ProjectId, splitId: string, ratio: number, commit: boolean) => {
+      // 用函数式更新读最新树:拖拽中 onMove 闭包可能持有旧 handleSetSplitRatio,
+      // 经 setState updater 总是拿到 prev 最新值,避免基于过期树计算。
+      const prefix = `${projectId}::`;
+      const bareId = splitId.startsWith(prefix) ? splitId.slice(prefix.length) : splitId;
+      setTreesByProject((prev) => {
+        const cur = prev[projectId];
+        if (!cur) return prev;
+        const next = setSplitRatio(cur, bareId, ratio);
+        if (next === cur) return prev;
+        if (commit) {
+          // commit:落盘(异步 invoke,不阻塞);内存态也更新。
+          invoke("save_pane_tree", { projectId, paneTree: next }).catch((err) => {
+            console.warn("[AppShell] save_pane_tree failed:", err);
+          });
+        }
+        return { ...prev, [projectId]: next };
+      });
+    },
+    [],
+  );
+
+  /**
+   * 重命名某项目某 pane 的某 tab 标题(笔记 pane 随 md 一级标题更新用)。
+   * 短锁改 tree + commitTree 落盘;标题未变时 renameTab 原样返回不触发写入。
+   */
+  const handleRenameTab = useCallback(
+    (projectId: ProjectId, paneId: string, tabId: string, title: string) => {
+      const cur = treesByProject[projectId];
+      if (!cur) return;
+      const next = renameTab(cur, paneId, tabId, title);
+      if (next !== cur) commitTree(projectId, next);
+    },
+    [treesByProject, commitTree],
+  );
+
   // 聚焦某项目的某 pane,并把该项目设为 active(状态行上下文跟随)。
   const focusPaneRef = useCallback(
     (projectId: string, paneId: string) => {
@@ -373,8 +473,9 @@ export function AppShell({
   );
 
   // 新建 tab:在焦点 pane 追加一个指定 kind 的 tab 并设为 active。
+  // cwdOverride:笔记 pane 传笔记文件绝对路径(存 tab.cwd);titleOverride:笔记传文件名(tab 标题)。
   const handleAddTab = useCallback(
-    async (projectId: string, paneId: string, kind: ShellKind, cwdOverride?: string): Promise<string | undefined> => {
+    async (projectId: string, paneId: string, kind: ShellKind, cwdOverride?: string, titleOverride?: string): Promise<string | undefined> => {
       if (!(await ensureToolAndDeps(kind))) return; // TUI 未装(含 yazi+依赖合并提示)→ 弹模态,不建 tab。
       const cur = treesByProject[projectId];
       if (!cur) return;
@@ -384,7 +485,7 @@ export function AppShell({
       const newTab: PaneTab = {
         id: nextId("tab"),
         shellKind: kind,
-        title: SHELL_KIND_META[kind].defaultTitle,
+        title: titleOverride ?? SHELL_KIND_META[kind].defaultTitle,
         ...(cwd ? { cwd } : {}),
       };
       // 用领域纯函数 addTab 追加并设 active。
@@ -913,7 +1014,25 @@ export function AppShell({
   );
 
   return (
-    <main className="grid h-screen min-h-0 grid-rows-[var(--mx-titlebar-h)_1fr_26px] overflow-hidden bg-[var(--mx-bg)]">
+    <main className="relative isolate grid h-screen min-h-0 grid-rows-[var(--mx-titlebar-h)_1fr_var(--mx-statusbar-h)] overflow-hidden bg-[var(--mx-bg)]">
+      {/* 背景图层:main 加 relative+isolate 建立 stacking context,背景层 z-[-1] 沉到所有内容
+          之下(之前 fixed + auto z-index 在某些情况下浮到内容之上)。absolute inset-0 充满 main,
+          图片 cover + blur(scale 1.15 防 blur 边缘渗白)+ 暗化遮罩。pointer-events-none 不挡交互。 */}
+      {bgSetting.path && (
+        <div aria-hidden className="pointer-events-none absolute inset-0 z-[-1] overflow-hidden">
+          <div
+            className="absolute inset-0"
+            style={{
+              backgroundImage: `url("${convertFileSrc(bgSetting.path)}")`,
+              backgroundSize: "cover",
+              backgroundPosition: "center",
+              filter: bgSetting.blur > 0 ? `blur(${bgSetting.blur}px)` : undefined,
+              transform: "scale(1.15)",
+            }}
+          />
+          <div className="absolute inset-0" style={{ background: `rgba(0, 0, 0, ${bgSetting.dim})` }} />
+        </div>
+      )}
       <TopProjectBar
         projects={projects}
         activeProjectId={activeProjectId}
@@ -932,7 +1051,7 @@ export function AppShell({
         onOpenRecentToWindow={onOpenRecentToWindow}
         onNewWindow={onNewWindow}
       />
-      <div className="grid min-h-0 grid-cols-[44px_1fr]">
+      <div className="grid min-h-0 grid-cols-[length:var(--mx-sidebar-w)_1fr]">
         <div className="flex min-h-0 flex-col">
           {hasProject ? (
             <ShellSidebar
@@ -949,7 +1068,7 @@ export function AppShell({
             </div>
           )}
         </div>
-        <div className="min-h-0 min-w-0 p-2">
+        <div className="min-h-0 min-w-0 py-2 pr-2">
           {hasProject ? (
             <div
               className="grid h-full min-h-0 min-w-0 gap-[6px]"
@@ -968,13 +1087,17 @@ export function AppShell({
                   getShellRunTransport={(paneId, tabId) => getShellRunTransport(p.id, paneId, tabId)}
                   onSplitPane={(paneId, kind, direction) => handleSplitWithKind(p.id, paneId, kind, direction)}
                   onClosePane={(paneId) => handleClosePane(p.id, paneId)}
-                  onAddTab={(paneId, kind) => handleAddTab(p.id, paneId, kind)}
+                  onAddTab={(paneId, kind, cwd, title) => handleAddTab(p.id, paneId, kind, cwd, title)}
                   onResumeSession={(provider, sessionId, cwd) => handleResumeSession(p.id, provider, sessionId, cwd)}
                   onCloseTab={(paneId, tabId) => handleCloseTab(p.id, paneId, tabId)}
                   onSetActiveTab={(paneId, tabId) => handleSetActiveTab(p.id, paneId, tabId)}
                   onMeasurePane={(paneId, size) =>
                     paneRectsRef.current.set(surfaceKey(p.id, paneId), size)
                   }
+                  onSetSplitRatio={(splitId, ratio, commit) =>
+                    handleSetSplitRatio(p.id, splitId, ratio, commit)
+                  }
+                  onRenameTab={(paneId, tabId, title) => handleRenameTab(p.id, paneId, tabId, title)}
                 />
               ))}
             </div>

@@ -119,7 +119,7 @@ export function ProjectTabs({ projects, activeProjectId, pinnedProjectIds, onSel
                 onMouseDown={(e) => e.stopPropagation()}
                 style={chipProjects.length > 0 ? { maxWidth: `${chipMaxW}px` } : undefined}
                 className={[
-                  "mx-chip flex h-[26px] min-w-0 items-center gap-[6px] px-[10px] text-xs transition-colors cursor-pointer",
+                  "mx-chip flex h-[length:var(--mx-chip-h)] min-w-0 items-center gap-[6px] px-[10px] text-xs transition-colors cursor-pointer",
                   activeProject
                     ? "bg-[var(--mx-selected-bg)] text-white"
                     : "bg-[var(--mx-surface-soft)] text-[var(--mx-muted)] hover:bg-[var(--mx-hover-bg)] hover:text-[var(--mx-text)]",
@@ -344,7 +344,7 @@ export function ProjectTabs({ projects, activeProjectId, pinnedProjectIds, onSel
                   variant="accent"
                   size="icon-md"
                   onMouseDown={(e) => e.stopPropagation()}
-                  className="h-[24px] w-[24px] text-[var(--mx-accent-bright)]"
+                  className="h-[length:var(--mx-tab-h)] w-[length:var(--mx-tab-h)] text-[var(--mx-accent-bright)]"
                 >
                   {/* sparkles(lucide 24 viewBox 缩放 15px):主四角星 + 两小星点缀。 */}
                   <svg
@@ -400,7 +400,7 @@ export function ProjectTabs({ projects, activeProjectId, pinnedProjectIds, onSel
             )}
             <div aria-hidden className="my-1 h-px bg-[var(--mx-border)]" />
             {/* 历史项目:关闭项目/工作台关窗时后端归档;点击恢复并钉住,✕ 删历史记录。 */}
-            <div className="px-3 pt-[2px] pb-[4px] text-[10px] font-[600] tracking-[0.04em] text-[var(--mx-muted)]">
+            <div className="px-3 pt-[2px] pb-[4px] text-[length:var(--mx-ui-fs-xs)] font-[600] tracking-[0.04em] text-[var(--mx-muted)]">
               {t("project.recentSection")}
             </div>
             {visibleRecent.length === 0 ? (

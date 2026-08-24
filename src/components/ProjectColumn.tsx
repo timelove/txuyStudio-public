@@ -24,11 +24,15 @@ type ProjectColumnProps = {
   getShellRunTransport: (paneId: string, tabId: string) => ShellRunTransport;
   onSplitPane: (paneId: string, kind: ShellKind, direction: SplitDirection) => void;
   onClosePane: (paneId: string) => void;
-  onAddTab: (paneId: string, kind: ShellKind) => void;
+  onAddTab: (paneId: string, kind: ShellKind, cwdOverride?: string, titleOverride?: string) => void;
   onResumeSession: (provider: "claude" | "codex", sessionId: string, cwd?: string | null) => void;
   onCloseTab: (paneId: string, tabId: string) => void;
   onSetActiveTab: (paneId: string, tabId: string) => void;
   onMeasurePane?: (paneId: string, size: { width: number; height: number }) => void;
+  /** 拖拽分屏分隔线调比例(透传给 PaneSurface)。 */
+  onSetSplitRatio?: (splitId: string, ratio: number, commit: boolean) => void;
+  /** 重命名某 tab(笔记随 md 标题更新用,透传给 PaneSurface)。 */
+  onRenameTab?: (paneId: string, tabId: string, title: string) => void;
 };
 
 /**
@@ -53,6 +57,8 @@ export function ProjectColumn({
   onCloseTab,
   onSetActiveTab,
   onMeasurePane,
+  onSetSplitRatio,
+  onRenameTab,
 }: ProjectColumnProps) {
   // deriveSessions 已遍历 pane 的 tabs,每个 tab 派生一个 session(id=tabId, paneId=pane.id)。
   const sessions = useMemo(() => deriveSessions(paneTree, project.rootPath), [paneTree, project.rootPath]);
@@ -78,6 +84,9 @@ export function ProjectColumn({
           onMeasurePane={onMeasurePane}
           keyPrefix={project.id}
           projectId={project.id}
+          rootPath={project.rootPath}
+          onSetSplitRatio={onSetSplitRatio}
+          onRenameTab={onRenameTab}
         />
       </div>
     </section>
