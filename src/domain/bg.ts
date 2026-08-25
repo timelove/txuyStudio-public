@@ -18,7 +18,13 @@ export type BgSetting = {
 
 export const DEFAULT_BG_SETTING: BgSetting = { path: "", blur: 20, dim: 0.45 };
 
-/** 把 #rgb/#rrggbb/#rrggbbaa 或 rgba()/rgb() 颜色转成 rgba(r,g,b,alpha)。失败返回 null。 */
+/**
+ * 把 #rgb/#rrggbb/#rrggbbaa 或 rgba()/rgb() 颜色转成 rgba(r,g,b,alpha)。失败返回 null。
+ *
+ * alpha 是**不透明度上限**而非硬替换:原色自带 alpha 时按预乘合成(最终 alpha = alpha × 原 alpha),
+ * 已比目标更透的浅罩保持更透。否则会把 midnight tabbar 这类 0.055 淡罩抬成 0.72 实色块,
+ * 背景图反而被挡住(玻璃化要的是"最多这么实",不是"统一这么实")。
+ */
 export function colorWithAlpha(color: string, alpha: number): string | null {
   const c = color.trim();
   // #hex 形态。
@@ -30,9 +36,10 @@ export function colorWithAlpha(color: string, alpha: number): string | null {
     const g = parseInt(hex.slice(2, 4), 16);
     const b = parseInt(hex.slice(4, 6), 16);
     if ([r, g, b].some(Number.isNaN)) return null;
-    return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+    const orig = hex.length === 8 ? parseInt(hex.slice(6, 8), 16) / 255 : 1;
+    return `rgba(${r}, ${g}, ${b}, ${roundAlpha(alpha * orig)})`;
   }
-  // rgb()/rgba() 形态:取前三个数替换 alpha。
+  // rgb()/rgba() 形态:取前三个数,与原 alpha(缺省 1)预乘。
   const m = /^rgba?\(([^)]+)\)$/.exec(c);
   if (m) {
     const parts = m[1].split(/[\s,/]+/).filter(Boolean);
@@ -40,7 +47,14 @@ export function colorWithAlpha(color: string, alpha: number): string | null {
     const g = parseInt(parts[1] ?? "", 10);
     const b = parseInt(parts[2] ?? "", 10);
     if ([r, g, b].some(Number.isNaN)) return null;
-    return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+    const orig = parts.length >= 4 ? parseFloat(parts[3]) : 1;
+    if (Number.isNaN(orig)) return null;
+    return `rgba(${r}, ${g}, ${b}, ${roundAlpha(alpha * orig)})`;
   }
   return null;
+}
+
+/** 乘积抖到 4 位小数,避免 0.055*0.72=0.039600000000000005 这类浮点尾串进 CSS。 */
+function roundAlpha(a: number): number {
+  return +a.toFixed(4);
 }
