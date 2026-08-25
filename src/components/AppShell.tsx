@@ -133,8 +133,10 @@ export function AppShell({
   // 背景图玻璃化覆写(详见 docs/theme-guide.md「背景图兼容」)。背景开启时按层级覆写表面 token:
   // - --mx-bg / --mx-editor-bg → transparent:主窗口底与内容区/终端底完全透,背景图直接透出;
   // - --mx-card-bg @0.82:输入框/卡片半透明玻璃(可读但有层次);
-  // - --mx-tabbar-bg @0.72:顶栏/底栏/pane 头 tabs 半透明(注意 one-dark 是实色 #21252b,
-  //   midnight 是透明浅罩,必须统一覆写,否则实色主题的 pane tabs 透不出背景)。
+  // - --mx-tabbar-bg @0.72:顶栏/底栏/pane 头 tabs 半透明。0.72/0.82 是不透明度**上限**
+  //   (colorWithAlpha 预乘原 alpha):实色主题(one-dark #21252b)被压到半透玻璃;
+  //   midnight 的 tabbar 本就是 0.055 淡罩,预乘后保持淡罩透出背景——若硬替换 alpha
+  //   会把淡罩抬成实色块,背景反而被 pane tabs 挡住(v0.1.5 的 bug)。
   // 未覆写的 token(--mx-surface/--mx-border/文字色)保持主题原色,保证弹层/边框/文字可读。
   // 先 removeProperty 再读 computedStyle 取主题原值(非上次覆写值);主题切换后 effect 重跑。
   const { themeId: bgThemeId } = useTheme();
