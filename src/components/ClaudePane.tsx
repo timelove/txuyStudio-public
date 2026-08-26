@@ -2014,7 +2014,9 @@ export function ClaudePane(props: ClaudePaneProps) {
                       }}
                       rows={2}
                       placeholder={t("claudepane.slashHint")}
-                      className="relative max-h-[160px] min-h-[36px] w-full resize-none bg-transparent p-0 font-mono caret-[var(--mx-text)] text-[var(--mx-text)] outline-none placeholder:text-[var(--mx-faint)]"
+                      /* field-sizing-content:随内容在 min-h~max-h 间自动长高,超高才内部滚动(滚轮仍可滚);
+                         滚动条隐藏而非美化:占宽会让 textarea 换行窄于 inset-0 高亮层,chip 背景与文字错行。 */
+                      className="relative max-h-[160px] min-h-[36px] w-full field-sizing-content resize-none bg-transparent p-0 font-mono caret-[var(--mx-text)] text-[var(--mx-text)] outline-none placeholder:text-[var(--mx-faint)] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
                       style={{ fontSize, lineHeight: "1.5" }}
                     />
                     </div>
