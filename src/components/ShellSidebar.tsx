@@ -84,7 +84,7 @@ export function ShellSidebar({
   return (
     <>
       <nav
-        className="flex min-h-0 w-full flex-col items-center gap-[8px] overflow-y-auto px-0 pb-2 pt-2"
+        className="flex min-h-0 w-full flex-col items-center gap-[8px] overflow-y-auto px-0 pb-2"
         aria-label={t("sidebar.openShellsByProject")}
       >
         {visibleProjects.map((project, idx) => {

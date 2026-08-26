@@ -1,5 +1,6 @@
 import type { ProjectId, ProjectSnapshot } from "../domain/projects";
 import type { ProjectRecord } from "../domain/appState";
+import type { PinnedLayout } from "../domain/pinnedLayout";
 import { projectAccentColor } from "../domain/projects";
 import { ProjectTabs } from "./ProjectTabs";
 import { WindowControls } from "./WindowControls";
@@ -33,6 +34,12 @@ type TopProjectBarProps = {
   onOpenRecentToWindow?: (rootPath: string) => void | Promise<void>;
   /** + 菜单「新窗口」:新建空白工作台窗口。 */
   onNewWindow?: () => void;
+  /** 并排可见项目数(钉住 + active);<2 时 ProjectTabs 不渲染布局按钮。 */
+  visibleProjectCount?: number;
+  /** 并排布局偏好(流向+分组),透传 ProjectTabs → PinnedLayoutButton。 */
+  pinnedLayout?: PinnedLayout;
+  /** 修改并排布局偏好(部分字段 patch),透传。 */
+  onPinnedLayoutChange?: (patch: Partial<PinnedLayout>) => void;
 };
 
 /**
@@ -61,6 +68,9 @@ export function TopProjectBar({
   onRemoveRecent,
   onOpenRecentToWindow,
   onNewWindow,
+  visibleProjectCount,
+  pinnedLayout,
+  onPinnedLayoutChange,
 }: TopProjectBarProps) {
   const { t } = useTranslation();
   const activeProject = projects.find((p) => p.id === activeProjectId) ?? null;
@@ -160,6 +170,9 @@ export function TopProjectBar({
             onRemoveRecent={onRemoveRecent}
             onOpenRecentToWindow={onOpenRecentToWindow}
             onNewWindow={onNewWindow}
+            visibleProjectCount={visibleProjectCount}
+            pinnedLayout={pinnedLayout}
+            onPinnedLayoutChange={onPinnedLayoutChange}
           />
         )}
       </div>

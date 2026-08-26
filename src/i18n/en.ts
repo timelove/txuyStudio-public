@@ -48,6 +48,15 @@ const en = {
     focusDetached: "Focus detached window",
     empty: "No project selected. Use ✦ at top right to open a project, window, or recent project.",
     emptyHint: "Click ✦ at top right to open a project",
+    pinLimitReached: "Pinned limit reached (10)",
+    layout: {
+      button: "Pinned layout",
+      flow: "Flow",
+      flowRow: "Horizontal",
+      flowColumn: "Vertical",
+      groups: "Groups",
+      groupHint: "{{count}} projects",
+    },
   },
   session: {
     all: "All",
