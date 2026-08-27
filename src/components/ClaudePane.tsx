@@ -1924,6 +1924,20 @@ export function ClaudePane(props: ClaudePaneProps) {
                         if (highlightRef.current) highlightRef.current.scrollTop = e.currentTarget.scrollTop;
                       }}
                       onKeyDown={(e) => {
+                        // Alt+Enter 恒为换行(优先于 @/slash 面板选中与发送;
+                        // Windows Chromium textarea 对带 Alt 的 Enter 默认不插换行,故手动补)。
+                        if (e.key === "Enter" && e.altKey && !e.nativeEvent.isComposing) {
+                          e.preventDefault();
+                          const ta = e.currentTarget;
+                          const start = ta.selectionStart;
+                          const end = ta.selectionEnd;
+                          setInput(input.slice(0, start) + "\n" + input.slice(end));
+                          // 受控 value 更新后光标会被重置,rAF(渲染后)恢复到换行符之后。
+                          requestAnimationFrame(() => {
+                            ta.selectionStart = ta.selectionEnd = start + 1;
+                          });
+                          return;
+                        }
                         // ↑/↓ 浏览输入历史(类 shell 命令历史):slash 面板关闭 + 非 IME 组合输入时;
                         // 仅当光标在首行拦 ↑、末行拦 ↓(否则放行让光标在多行文本里正常上下移动)。
                         if (!slashOpen && !atOpen && !e.nativeEvent.isComposing && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
@@ -2002,7 +2016,7 @@ export function ClaudePane(props: ClaudePaneProps) {
                           cycleMode();
                           return;
                         }
-                        // 回车发送(无 Shift)、Shift+Enter 换行。IME 组合输入中不触发(防打断中文输入)。
+                        // 回车发送(无 Shift/Alt)、Shift+Enter 或 Alt+Enter 换行。IME 组合输入中不触发(防打断中文输入)。
                         // 发送守卫与 canSend 同源:claudeMissing/compactRunning/shellRunning 时拦 Enter
                         // (仅按钮 disabled 拦不住键盘;busy 不拦--handleSend 会先 interrupt 再发,
                         // 与 claude 对话路径语义一致;shellRunning 拦--! 命令与 claude 对话串行,

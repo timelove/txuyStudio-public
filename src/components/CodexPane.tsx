@@ -1275,6 +1275,20 @@ export function CodexPane(props: CodexPaneProps) {
                           if (highlightRef.current) highlightRef.current.scrollTop = e.currentTarget.scrollTop;
                         }}
                         onKeyDown={(e) => {
+                          // Alt+Enter 恒为换行(优先于 @/slash 面板选中与发送;
+                          // Windows Chromium textarea 对带 Alt 的 Enter 默认不插换行,故手动补)。
+                          if (e.key === "Enter" && e.altKey && !e.nativeEvent.isComposing) {
+                            e.preventDefault();
+                            const ta = e.currentTarget;
+                            const start = ta.selectionStart;
+                            const end = ta.selectionEnd;
+                            setInput(input.slice(0, start) + "\n" + input.slice(end));
+                            // 受控 value 更新后光标会被重置,rAF(渲染后)恢复到换行符之后。
+                            requestAnimationFrame(() => {
+                              ta.selectionStart = ta.selectionEnd = start + 1;
+                            });
+                            return;
+                          }
                           // ↑/↓ 浏览输入历史。
                           if (!slashOpen && !atOpen && !e.nativeEvent.isComposing && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
                             const ta = inputRef.current;
@@ -1349,7 +1363,7 @@ export function CodexPane(props: CodexPaneProps) {
                             cycleSandbox();
                             return;
                           }
-                          // 回车发送(IME 组合输入中不触发)。shellRunning 时拦(! 命令与 codex 串行)。
+                          // 回车发送(IME 组合输入中不触发;Shift/Alt+Enter 换行已在前置分支)。shellRunning 时拦(! 命令与 codex 串行)。
                           if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing && !codexMissing && !shellRunning) {
                             e.preventDefault();
                             handleSend();
