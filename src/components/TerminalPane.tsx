@@ -151,6 +151,9 @@ export function TerminalPane({
     terminalsRef.current.forEach((tt) => {
       tt.terminal.options.allowTransparency = !!bgSetting.path;
       tt.terminal.options.theme = terminalTheme;
+      // .xterm 的 padding 留白区背景(xterm.css 用 var(--mx-editor-bg)):玻璃化时 canvas
+      // 全透明,留白区也要透明才一体(玻璃化下 --mx-editor-bg 被覆写成半透明,会反成实色块)。
+      if (tt.terminal.element) tt.terminal.element.style.background = bgSetting.path ? "transparent" : "";
     });
   }, [terminalTheme, bgSetting.path]);
 
@@ -190,6 +193,8 @@ export function TerminalPane({
     const fitAddon = new FitAddon();
     terminal.loadAddon(fitAddon);
     terminal.open(container);
+    // 玻璃化下新建 terminal 也要透明 padding 区(theme effect 依赖不变不会重跑,此处补一次)。
+    if (bgSetting.path && terminal.element) terminal.element.style.background = "transparent";
     // Ctrl+C 智能复制(Windows Terminal 行为):有非空选区时 Ctrl+C = 复制选中文本到剪贴板 +
     // 清选区(吞掉,不作为 \x03 发给 PTY);无选区时放行,Ctrl+C 照常中断。选区是 xterm 层的
     // (非 DOM selection),用 hasSelection() 判断;复制走 navigator.clipboard(与 ClaudePane
@@ -560,9 +565,8 @@ export function TerminalPane({
         </div>
       </header>
       {/* 终端区:每个 tab 一个绝对定位容器,active 显隐。xterm 懒建并常驻。
-          容器四边 inset 内缩(而非 padding):FitAddon 量 parent computed height(含 padding)
-          算行数,padding-bottom 会让它多算行、底部行被裁;inset 收缩后容器高度即真实视口高,
-          底部 6px 留白(提示符/光标不贴 pane 底沿),留白区透 article 背景与终端同色。 */}
+          容器满铺(inset-0),四周留白由 .xterm 自身 padding 提供(见 xterm.css),
+          留白区是终端背景的一部分、一整块颜色,非外部拼色。 */}
       <div ref={surfaceRef} className="relative min-h-0 min-w-0">
         {sessions.map((s) => {
           const isActive = s.id === activeTabId;
@@ -573,7 +577,7 @@ export function TerminalPane({
                 if (el) tabContainerRefs.current.set(s.id, el);
                 else tabContainerRefs.current.delete(s.id);
               }}
-              className="absolute inset-x-2 bottom-1.5 top-1.5 overflow-hidden"
+              className="absolute inset-0 overflow-hidden"
               style={{ display: isActive ? "block" : "none" }}
             />
           );
