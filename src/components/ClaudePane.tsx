@@ -1,5 +1,6 @@
 import { lazy, memo, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { selectEnclosingPre } from "../lib/selectEnclosingPre";
 import { SettingsModal } from "./SettingsModal";
 import { Dialog, DialogContent, DialogTitle } from "./ui/Dialog";
 import { useTranslation } from "react-i18next";
@@ -1327,6 +1328,21 @@ export function ClaudePane(props: ClaudePaneProps) {
     requestAnimationFrame(() => inputRef.current?.focus());
   }, []);
 
+  // —— Ctrl+A 智能选框(pane focused 时)——
+  // 选区锚点(最后点击处)落在消息流某个 <pre> 输出框内 → 只全选该框,配合 Ctrl+C 整块复制;
+  // 否则放行系统默认(全选整条消息流)。输入框聚焦时让浏览器原生全选 textarea 文本。
+  useEffect(() => {
+    if (!focused) return;
+    const handler = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey) || e.key.toLowerCase() !== "a" || e.altKey || e.shiftKey) return;
+      const active = document.activeElement;
+      if (active instanceof HTMLTextAreaElement || active instanceof HTMLInputElement) return;
+      if (selectEnclosingPre(scrollRef.current)) e.preventDefault();
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [focused]);
+
   // —— 双击 Esc 中断快捷键(对齐 claude code)——
   // pane focused 时监听 window keydown:slash 面板打开时单击 Esc 只关面板(由 textarea 处理,这里跳过);
   // 面板关闭状态下,400ms 内连续两次 Esc → 中断当前轮。用 ref 镜像避免 stale closure。
@@ -2635,14 +2651,25 @@ const MessageRow = memo(function MessageRow({
  * 展开行为:思考中(streaming)默认展开实时显示思考过程,本轮结束(streaming→false)自动收起
  * 保持对话紧凑。用户手动点过 summary 后,以用户操作为准不再自动收/展(避免和用户抢控制权)。
  * 每轮 assistant 是新挂载的消息,内部状态随消息生命周期,不跨轮残留。
+ *
+ * 展开态限高(长思考内部滚动,防几 k 字思考霸屏挤走消息流);流式中自动贴底——
+ * 实时跟随最新思考,上文收进滚动区,用户上翻回看即暂停贴底,滚回底部附近才恢复。
  */
 function ThinkingBlock({ text, streaming, t }: { text: string; streaming: boolean; t: (k: string) => string }) {
   // 内部 open 状态:仅在「用户尚未手动操作」时跟随 streaming(思考中开、结束关)。
   const [userToggled, setUserToggled] = useState(false);
   const [open, setOpen] = useState(streaming);
+  const bodyRef = useRef<HTMLDivElement>(null);
+  // 贴底标记:仅当滚动位置在底部附近(距底 <24px)时为 true,用户上翻后暂停自动贴底。
+  const stickToBottom = useRef(true);
   useEffect(() => {
     if (!userToggled) setOpen(streaming);
   }, [streaming, userToggled]);
+  // streaming 且展开时 text 增长 → 贴底(依赖含 open:details 展开后内容 div 才挂载)。
+  useEffect(() => {
+    const el = bodyRef.current;
+    if (streaming && el && stickToBottom.current) el.scrollTop = el.scrollHeight;
+  }, [text, streaming, open]);
   return (
     <details
       className="group"
@@ -2666,7 +2693,14 @@ function ThinkingBlock({ text, streaming, t }: { text: string; streaming: boolea
         {text && <span className="text-[var(--mx-faint)]">· {text.length} chars</span>}
       </summary>
       <div className="mt-1.5 pl-[18px]">
-        <div className="whitespace-pre-wrap break-words text-xs italic leading-relaxed text-[var(--mx-muted)]">
+        <div
+          ref={bodyRef}
+          onScroll={() => {
+            const el = bodyRef.current;
+            if (el) stickToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
+          }}
+          className="mx-scroll-pretty max-h-[min(40vh,320px)] overflow-y-auto whitespace-pre-wrap break-words text-xs italic leading-relaxed text-[var(--mx-muted)]"
+        >
           {text || "…"}
         </div>
       </div>

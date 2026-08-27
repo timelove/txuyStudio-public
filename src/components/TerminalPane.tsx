@@ -559,7 +559,10 @@ export function TerminalPane({
           )}
         </div>
       </header>
-      {/* 终端区:每个 tab 一个绝对定位容器,active 显隐。xterm 懒建并常驻。 */}
+      {/* 终端区:每个 tab 一个绝对定位容器,active 显隐。xterm 懒建并常驻。
+          容器四边 inset 内缩(而非 padding):FitAddon 量 parent computed height(含 padding)
+          算行数,padding-bottom 会让它多算行、底部行被裁;inset 收缩后容器高度即真实视口高,
+          底部 6px 留白(提示符/光标不贴 pane 底沿),留白区透 article 背景与终端同色。 */}
       <div ref={surfaceRef} className="relative min-h-0 min-w-0">
         {sessions.map((s) => {
           const isActive = s.id === activeTabId;
@@ -570,7 +573,7 @@ export function TerminalPane({
                 if (el) tabContainerRefs.current.set(s.id, el);
                 else tabContainerRefs.current.delete(s.id);
               }}
-              className="absolute inset-0 overflow-hidden px-2 pt-1.5"
+              className="absolute inset-x-2 bottom-1.5 top-1.5 overflow-hidden"
               style={{ display: isActive ? "block" : "none" }}
             />
           );

@@ -1,5 +1,6 @@
 import { lazy, memo, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { selectEnclosingPre } from "../lib/selectEnclosingPre";
 import { homeDir } from "@tauri-apps/api/path";
 import { useTranslation } from "react-i18next";
 import type { ShellKind, SplitDirection } from "../domain/paneTree";
@@ -900,6 +901,22 @@ export function CodexPane(props: CodexPaneProps) {
   busyRef.current = busy;
   const handleInterruptRef = useRef(handleInterrupt);
   handleInterruptRef.current = handleInterrupt;
+  // —— Ctrl+A 智能选框(pane focused 时)——
+  // 选区锚点(最后点击处)落在消息流某个 <pre> 输出框内 → 只全选该框,配合 Ctrl+C 整块复制;
+  // 否则放行系统默认(全选整条消息流)。输入框聚焦时让浏览器原生全选 textarea 文本。
+  useEffect(() => {
+    if (!focused) return;
+    const handler = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey) || e.key.toLowerCase() !== "a" || e.altKey || e.shiftKey) return;
+      const active = document.activeElement;
+      if (active instanceof HTMLTextAreaElement || active instanceof HTMLInputElement) return;
+      if (selectEnclosingPre(scrollRef.current)) e.preventDefault();
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [focused]);
+
+  // 双击 Esc 中断(上文 ref 声明区)。
   useEffect(() => {
     if (!focused) return;
     const handler = (e: KeyboardEvent) => {
