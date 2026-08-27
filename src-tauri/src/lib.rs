@@ -32,7 +32,7 @@ use state::commands::{
 };
 use system::commands::{
     check_commands_installed, delete_ai_cli_session, get_ai_cli_session_messages, get_git_branch,
-    get_system_memory, list_ai_cli_providers, list_ai_cli_sessions,
+    get_system_memory, list_ai_cli_providers, list_ai_cli_sessions, reveal_in_folder,
 };
 use std::collections::HashSet;
 use std::sync::Mutex;
@@ -351,6 +351,8 @@ pub fn run() {
             list_ai_cli_sessions,
             delete_ai_cli_session,
             get_ai_cli_session_messages,
+            // 资源管理器定位文件/目录(/select 选中或打开所在文件夹)
+            reveal_in_folder,
             // 嵌入式文件树(方案 C:list_dir 只读列一层 + notify 实时监听 + read_file 预览 + write_file M2 编辑落盘)
             list_dir,
             list_files,

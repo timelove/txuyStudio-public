@@ -140,14 +140,23 @@ export function TopProjectBar({
             {onDockBack && (
               <Tooltip>
               <TooltipTrigger asChild>
+              {/* dock back 纯图标按钮(窗口框+左箭头):高度对齐项目 chip,方形 icon 档。
+                  叉窗/Alt+F4 关掉整个窗口同为回到主窗口(后端 CloseRequested 统一 emit)。
+                  拖拽区内 Radix hover 可能失效,保留原生 title 兜底(同左 chip 做法)。 */}
               <Button
                 variant="ghost"
                 size="icon-md"
                 onClick={onDockBack}
                 onMouseDown={(e) => e.stopPropagation()}
-                className="mx-chip h-[length:var(--mx-tab-h)] gap-1 bg-[var(--mx-surface-soft)] px-[10px] text-xs text-[var(--mx-muted)] hover:bg-[var(--mx-hover-bg)] hover:text-[var(--mx-text)]"
+                title={t("topbar.backToMain")}
+                aria-label={t("topbar.backToMain")}
+                className="mx-chip h-[length:var(--mx-tab-h)] w-[length:var(--mx-tab-h)] bg-[var(--mx-surface-soft)] text-[var(--mx-muted)] hover:bg-[var(--mx-hover-bg)] hover:text-[var(--mx-text)]"
               >
-                {t("topbar.backToMainBtn")}
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                  <rect x="3" y="5" width="18" height="14" rx="2.5" />
+                  <path d="M14.5 12H8.5" />
+                  <path d="M11.5 9l-3 3 3 3" />
+                </svg>
               </Button>
               </TooltipTrigger>
               <TooltipContent>{t("topbar.backToMain")}</TooltipContent>

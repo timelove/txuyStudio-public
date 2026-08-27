@@ -203,7 +203,6 @@ const zh = {
   },
   topbar: {
     backToMain: "回到主窗口",
-    backToMainBtn: "← 主窗口",
     project: "项目",
   },
   sidebar: {
@@ -225,6 +224,7 @@ const zh = {
     bgTaskDoneLabel: "后台任务完成",
     bgTaskFailedLabel: "后台任务失败",
     bgCountBadge: "后台 ×{{n}}",
+    revealInFolder: "在文件夹中显示",
     mainTask: "主对话",
     mainWaiting: "等待确认",
     mainIdle: "空闲 · 可继续对话",

@@ -1,7 +1,6 @@
 import { lazy, memo, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { homeDir } from "@tauri-apps/api/path";
-import { openPath } from "@tauri-apps/plugin-opener";
 import { useTranslation } from "react-i18next";
 import type { ShellKind, SplitDirection } from "../domain/paneTree";
 import type { WorkspaceSession } from "../domain/sessions";
@@ -580,11 +579,11 @@ export function CodexPane(props: CodexPaneProps) {
     [sessions, activeTabId],
   );
 
-  /** 打开 ~/.codex 下指定文件(auth.json/config.toml/AGENTS.md),用系统默认程序。 */
+  /** 资源管理器定位 ~/.codex 下指定文件(auth.json/config.toml/AGENTS.md),用户自行决定怎么打开。 */
   const openCodexHomeFile = useCallback(
     (file: string) => {
       void homeDir()
-        .then((home) => openPath(`${home}/.codex/${file}`).catch(() => {}))
+        .then((home) => void invoke("reveal_in_folder", { path: `${home}/.codex/${file}` }).catch(() => {}))
         .catch(() => setUnsupportedMsg(t("codexpane.unsupportedNoCwd")));
     },
     [t],
@@ -638,9 +637,9 @@ export function CodexPane(props: CodexPaneProps) {
           break;
         }
         case "init": {
-          // 打开项目 AGENTS.md(codex 的项目指令文件,非 CLAUDE.md)。
+          // 资源管理器定位项目 AGENTS.md(codex 的项目指令文件,非 CLAUDE.md)。
           const cwd = sessions.find((s) => s.id === activeTabId)?.cwd;
-          if (cwd) void openPath(`${cwd}/AGENTS.md`).catch(() => {});
+          if (cwd) void invoke("reveal_in_folder", { path: `${cwd}/AGENTS.md`, cwd }).catch(() => {});
           else setUnsupportedMsg(t("codexpane.unsupportedNoCwd"));
           break;
         }

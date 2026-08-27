@@ -6,7 +6,7 @@
 //! `list_ai_cli_sessions` 例外:涉及多文件遍历 + 逐行解析,用 `spawn_blocking` 包裹。
 
 use std::io::BufRead;
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 
 use sysinfo::System;
 
@@ -143,6 +143,44 @@ pub async fn check_commands_installed(
         out.insert(cmd, installed);
     }
     Ok(out)
+}
+
+/// 在资源管理器中定位文件/目录(消息流工具卡片的文件路径、/memory 等配置入口点击)。
+///
+/// 文件存在 → `/select` 打开父目录并选中该文件;路径本身是目录 → 直接打开;
+/// 不存在 → 打开上级目录。**不经编辑器**:由用户在资源管理器里自行决定后续操作。
+///
+/// - `path` 通常已是绝对路径(claude/codex 工具输入的 file_path);相对时以 `cwd` 解析,
+///   再词法规范化(不要求路径存在,与 get_git_branch 同思路)。
+/// - explorer 是 GUI 程序,spawn 出的句柄随即丢弃(detach),不弹控制台。
+#[tauri::command]
+pub async fn reveal_in_folder(path: String, cwd: Option<String>) -> Result<(), String> {
+    // 解析绝对路径:相对路径 join cwd(项目根),词法规范化消化 `.`/`..` 段。
+    let mut abs = PathBuf::from(&path);
+    if !abs.is_absolute() {
+        if let Some(cwd) = cwd {
+            abs = Path::new(&cwd).join(&path);
+        }
+    }
+    let abs = lexical_normalize(&abs);
+
+    #[cfg(windows)]
+    {
+        let spawn = if abs.is_file() {
+            std::process::Command::new("explorer").arg("/select,").arg(&abs).spawn()
+        } else if abs.is_dir() {
+            std::process::Command::new("explorer").arg(&abs).spawn()
+        } else {
+            let parent = abs.parent().map(Path::to_path_buf).unwrap_or_else(|| abs.clone());
+            std::process::Command::new("explorer").arg(&parent).spawn()
+        };
+        if let Err(e) = spawn {
+            log::warn!("reveal_in_folder: explorer failed for {abs:?}: {e}");
+        }
+    }
+    // 非 Windows 无 explorer:项目面向 Windows,此分支不做额外兜底(编译通过即可)。
+    log::info!("reveal_in_folder: {abs:?}");
+    Ok(())
 }
 
 /// 构造一个带 `CREATE_NO_WINDOW` 的 `Command`（Windows）。

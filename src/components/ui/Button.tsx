@@ -29,7 +29,7 @@ export type ButtonSize =
   | "md"
   | "lg"
   | "icon-sm" // 20px 方块(工具栏 +/split/×)
-  | "icon-md" // 24px 方块(项目加号、dock back)
+  | "icon-md" // 24px 方块(项目加号、侧栏/布局图标按钮;只放图标,不放文字)
   | "icon-lg"; // 44px 全高方块(窗口控制按钮)
 export type ButtonVariant =
   | "default" // 主按钮:accent 实心

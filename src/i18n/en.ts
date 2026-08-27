@@ -203,7 +203,6 @@ const en = {
   },
   topbar: {
     backToMain: "Back to main window",
-    backToMainBtn: "← Main",
     project: "Project",
   },
   sidebar: {
@@ -224,6 +223,7 @@ const en = {
     bgTaskDoneLabel: "Background task done",
     bgTaskFailedLabel: "Background task failed",
     bgCountBadge: "bg ×{{n}}",
+    revealInFolder: "Reveal in folder",
     mainTask: "Main chat",
     mainWaiting: "Waiting for confirmation",
     mainIdle: "Idle · ready to chat",

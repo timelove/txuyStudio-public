@@ -1,6 +1,5 @@
 import { lazy, memo, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { openPath } from "@tauri-apps/plugin-opener";
 import { SettingsModal } from "./SettingsModal";
 import { Dialog, DialogContent, DialogTitle } from "./ui/Dialog";
 import { useTranslation } from "react-i18next";
@@ -947,9 +946,10 @@ export function ClaudePane(props: ClaudePaneProps) {
         case "agents":
         case "skills":
         case "mcp": {
-          // 打开 claude 配置位置(agents/skills 目录 / mcp 的 .claude.json)用系统默认程序管理。
+          // 在资源管理器定位 claude 配置位置(agents/skills 目录 / mcp 的 .claude.json),
+          // 用户自行决定用什么打开(后端 reveal_in_folder)。
           invoke<string>("get_claude_config_path", { target: cmd.name })
-            .then((p) => void openPath(p).catch(() => {}))
+            .then((p) => void invoke("reveal_in_folder", { path: p }).catch(() => {}))
             .catch(() => setUnsupportedMsg(t("claudepane.unsupported", { cmd: `/${cmd.name}` })));
           break;
         }
@@ -965,9 +965,9 @@ export function ClaudePane(props: ClaudePaneProps) {
           setRewindOpen(true);
           break;
         case "memory": {
-          // 打开项目 CLAUDE.md(系统默认编辑器);无 cwd 则提示。
+          // 资源管理器定位项目 CLAUDE.md;无 cwd 则提示。
           const cwd = state?.meta?.cwd;
-          if (cwd) void openPath(`${cwd}/CLAUDE.md`).catch(() => {});
+          if (cwd) void invoke("reveal_in_folder", { path: `${cwd}/CLAUDE.md`, cwd }).catch(() => {});
           else setUnsupportedMsg(t("claudepane.unsupportedNoCwd"));
           break;
         }
@@ -2508,18 +2508,20 @@ const MessageRow = memo(function MessageRow({
     return (
       <div className="my-2 flex items-center gap-3 select-none">
         <div className="h-px flex-1" style={{ borderTop: "1px dashed rgba(148,163,184,0.32)", background: "transparent" }} />
-        <span className="flex shrink-0 items-center gap-1.5 text-[10px] text-[var(--mx-faint)]">
+        {/* 容器可收缩(min-w-0 shrink)+suffix anywhere 断行:后台任务 summary 是 claude 原文
+            (常含无空格长命令串),不可断会撑高整行 min-content,顶出消息流横向滚动条。 */}
+        <span className="flex min-w-0 shrink items-center gap-1.5 text-[10px] text-[var(--mx-faint)]">
           {stopped ? (
-            <svg width="10" height="10" viewBox="0 0 24 24" fill={tone} aria-hidden>
+            <svg width="10" height="10" viewBox="0 0 24 24" fill={tone} className="shrink-0" aria-hidden>
               <rect x="6" y="6" width="12" height="12" rx="2" />
             </svg>
           ) : (
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke={tone} strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke={tone} strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" className="shrink-0" aria-hidden>
               {ok ? <path d="M20 6L9 17l-5-5" /> : <path d="M18 6L6 18M6 6l12 12" />}
             </svg>
           )}
-          <span style={{ color: tone }}>{label}</span>
-          {suffix}
+          <span className="shrink-0" style={{ color: tone }}>{label}</span>
+          {suffix && <span className="min-w-0 [overflow-wrap:anywhere]">{suffix}</span>}
         </span>
         <div className="h-px flex-1" style={{ borderTop: "1px dashed rgba(148,163,184,0.32)", background: "transparent" }} />
       </div>
@@ -3438,7 +3440,7 @@ function DiffToolView({
   const badge = config.getBadge?.(block.input);
   const [open, setOpen] = useState(config.defaultOpen ?? true);
   const segments = useMemo(() => extractDiffSegments(block), [block]);
-  /** 文件绝对路径(点击 → openPath 系统默认程序打开,类 claude code 的文件超链接)。 */
+  /** 文件绝对路径(点击 → 资源管理器定位该文件,类 claude code 的文件超链接;编辑与否用户自决)。 */
   const filePath = useMemo(() => {
     const fp = (block.input as Record<string, unknown> | null)?.file_path;
     return typeof fp === "string" ? fp : "";
@@ -3467,8 +3469,8 @@ function DiffToolView({
         {value && (
           <span
             className={`min-w-0 flex-1 truncate text-left font-mono text-[var(--mx-text)] ${filePath ? "cursor-pointer hover:underline" : ""}`}
-            title={filePath ? `打开 ${filePath}` : value}
-            onClick={filePath ? (e) => { e.stopPropagation(); void openPath(filePath).catch(() => {}); } : undefined}
+            title={filePath ? `${t("claudepane.revealInFolder")} ${filePath}` : value}
+            onClick={filePath ? (e) => { e.stopPropagation(); void invoke("reveal_in_folder", { path: filePath }).catch(() => {}); } : undefined}
           >
             {value}
           </span>
