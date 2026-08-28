@@ -1,5 +1,6 @@
 import type { ProjectId, ProjectSnapshot } from "../domain/projects";
 import type { ProjectRecord } from "../domain/appState";
+import type { PinnedLayout } from "../domain/pinnedLayout";
 import { projectAccentColor } from "../domain/projects";
 import { ProjectTabs } from "./ProjectTabs";
 import { WindowControls } from "./WindowControls";
@@ -33,6 +34,12 @@ type TopProjectBarProps = {
   onOpenRecentToWindow?: (rootPath: string) => void | Promise<void>;
   /** + 菜单「新窗口」:新建空白工作台窗口。 */
   onNewWindow?: () => void;
+  /** 并排可见项目数(钉住 + active);<2 时 ProjectTabs 不渲染布局按钮。 */
+  visibleProjectCount?: number;
+  /** 并排布局偏好(流向+分组),透传 ProjectTabs → PinnedLayoutButton。 */
+  pinnedLayout?: PinnedLayout;
+  /** 修改并排布局偏好(部分字段 patch),透传。 */
+  onPinnedLayoutChange?: (patch: Partial<PinnedLayout>) => void;
 };
 
 /**
@@ -61,6 +68,9 @@ export function TopProjectBar({
   onRemoveRecent,
   onOpenRecentToWindow,
   onNewWindow,
+  visibleProjectCount,
+  pinnedLayout,
+  onPinnedLayoutChange,
 }: TopProjectBarProps) {
   const { t } = useTranslation();
   const activeProject = projects.find((p) => p.id === activeProjectId) ?? null;
@@ -113,7 +123,11 @@ export function TopProjectBar({
       {/* 中部:单项目模式 → 精简栏(项目名 + dock back);否则 → 项目 tabs。 */}
       <div data-tauri-drag-region className="min-w-0">
         {singleProjectMode ? (
-          <div className="flex min-w-0 items-center gap-2">
+          /* 内层 flex 满铺中部(flex stretch),必须自带 drag-region:tauri drag.js 的 bare
+             attr 只认「点击的直接目标」(el === composedPath[0]),这层无 attr 时点击空白
+             target 落在它身上,向上到带 attr 的父级已不满足 path[0] → 独立窗口拖不动。
+             主窗口无此层(ProjectTabs 容器自带 attr),行为对齐。 */
+          <div data-tauri-drag-region className="flex min-w-0 items-center gap-2">
             <span className="mx-chip flex h-[length:var(--mx-tab-h)] min-w-0 items-center gap-[6px] bg-[var(--mx-selected-bg)] px-[10px] text-xs text-white">
               {/* 项目稳定色 dot(与主窗口顶栏 chip/下拉同色源,跨窗口同项目同色)。 */}
               <span
@@ -130,14 +144,23 @@ export function TopProjectBar({
             {onDockBack && (
               <Tooltip>
               <TooltipTrigger asChild>
+              {/* dock back 纯图标按钮(窗口框+左箭头):高度对齐项目 chip,方形 icon 档。
+                  叉窗/Alt+F4 关掉整个窗口同为回到主窗口(后端 CloseRequested 统一 emit)。
+                  拖拽区内 Radix hover 可能失效,保留原生 title 兜底(同左 chip 做法)。 */}
               <Button
                 variant="ghost"
                 size="icon-md"
                 onClick={onDockBack}
                 onMouseDown={(e) => e.stopPropagation()}
-                className="mx-chip h-[length:var(--mx-tab-h)] gap-1 bg-[var(--mx-surface-soft)] px-[10px] text-xs text-[var(--mx-muted)] hover:bg-[var(--mx-hover-bg)] hover:text-[var(--mx-text)]"
+                title={t("topbar.backToMain")}
+                aria-label={t("topbar.backToMain")}
+                className="mx-chip h-[length:var(--mx-tab-h)] w-[length:var(--mx-tab-h)] bg-[var(--mx-surface-soft)] text-[var(--mx-muted)] hover:bg-[var(--mx-hover-bg)] hover:text-[var(--mx-text)]"
               >
-                {t("topbar.backToMainBtn")}
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                  <rect x="3" y="5" width="18" height="14" rx="2.5" />
+                  <path d="M14.5 12H8.5" />
+                  <path d="M11.5 9l-3 3 3 3" />
+                </svg>
               </Button>
               </TooltipTrigger>
               <TooltipContent>{t("topbar.backToMain")}</TooltipContent>
@@ -160,6 +183,9 @@ export function TopProjectBar({
             onRemoveRecent={onRemoveRecent}
             onOpenRecentToWindow={onOpenRecentToWindow}
             onNewWindow={onNewWindow}
+            visibleProjectCount={visibleProjectCount}
+            pinnedLayout={pinnedLayout}
+            onPinnedLayoutChange={onPinnedLayoutChange}
           />
         )}
       </div>

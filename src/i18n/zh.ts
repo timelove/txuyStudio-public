@@ -48,6 +48,15 @@ const zh = {
     focusDetached: "聚焦独立窗口",
     empty: "未选择项目。点右上 ✦ 打开项目 / 新窗口 / 历史项目。",
     emptyHint: "点右上 ✦ 打开项目",
+    pinLimitReached: "已达钉住上限(10)",
+    layout: {
+      button: "并排布局",
+      flow: "流向",
+      flowRow: "横向",
+      flowColumn: "纵向",
+      groups: "分组",
+      groupHint: "{{count}} 个项目",
+    },
   },
   session: {
     all: "全部",
@@ -194,7 +203,6 @@ const zh = {
   },
   topbar: {
     backToMain: "回到主窗口",
-    backToMainBtn: "← 主窗口",
     project: "项目",
   },
   sidebar: {
@@ -216,6 +224,7 @@ const zh = {
     bgTaskDoneLabel: "后台任务完成",
     bgTaskFailedLabel: "后台任务失败",
     bgCountBadge: "后台 ×{{n}}",
+    revealInFolder: "在文件夹中显示",
     mainTask: "主对话",
     mainWaiting: "等待确认",
     mainIdle: "空闲 · 可继续对话",

@@ -27,6 +27,14 @@ import {
   transportKey,
 } from "../domain/paneTree";
 import { SHELL_KIND_META } from "../domain/shellKinds";
+import type { PinnedLayout } from "../domain/pinnedLayout";
+import {
+  MAX_PINNED_PROJECTS,
+  chunkByGroups,
+  loadPinnedLayout,
+  resolveGroups,
+  savePinnedLayout,
+} from "../domain/pinnedLayout";
 import { isTuiTool, TUI_TOOLS, toolPromptSpec, YAZI_DEPS, type PromptSpec } from "../domain/toolInstall";
 import type { TerminalTransport } from "../domain/terminalTransport";
 import { TauriPtyTransport } from "../domain/tauriPtyTransport";
@@ -113,7 +121,7 @@ export function AppShell({
     const scale = fontSize / DEFAULT_FONT_SIZE;
     const r = document.documentElement.style;
     const px = (v: number) => `${Math.round(v * scale)}px`;
-    r.setProperty("--mx-titlebar-h", px(32));
+    r.setProperty("--mx-titlebar-h", px(36));
     r.setProperty("--mx-statusbar-h", px(26));
     r.setProperty("--mx-sidebar-w", px(44));
     r.setProperty("--mx-sidebar-icon", px(32));
@@ -165,6 +173,16 @@ export function AppShell({
   });
   // 钉住到并排视图的项目(前端 view 态,本轮不持久化)。
   const [pinnedProjectIds, setPinnedProjectIds] = useState<string[]>([]);
+  // 并排布局偏好(流向+分组):localStorage 轻持久化(与 bgSetting 同模式,纯视觉不走后端)。
+  // 不进 SettingsProvider:唯一消费者是 AppShell。groups 存用户上次点选形态,渲染期归一。
+  const [pinnedLayout, setPinnedLayout] = useState<PinnedLayout>(loadPinnedLayout);
+  const changePinnedLayout = useCallback((patch: Partial<PinnedLayout>) => {
+    setPinnedLayout((prev) => {
+      const next = { ...prev, ...patch };
+      savePinnedLayout(next);
+      return next;
+    });
+  }, []);
   // 焦点:复合身份(哪个项目的哪个 pane)。tab 级 active 存在树里(activeTabId)。
   const [focused, setFocused] = useState<PaneRef | null>(null);
 
@@ -718,35 +736,43 @@ export function AppShell({
   // 顶栏下拉切换:设为 active;若旧 active 已被钉住(已有并排视图),则把被点击的
   // 项目也钉住,使其加入并排视图,契合「点历史/点项目 = 回到眼前」的预期。
   // 旧 active 未钉住(无并排视图)时纯切换 active,不钉,避免默认项目被钉住误触发。
+  // 钉满上限时跳过联动钉住(切换 active 不受影响;超限提示见 ProjectTabs 下拉顶部)。
   const handleSelectFromDropdown = useCallback(
     (projectId: ProjectId) => {
       setPinnedProjectIds((prev) => {
         if (projectId === activeProjectId) return prev;
         // 旧 active 未被钉住:无需联动钉住,只切换 active。
         if (!activeProjectId || !prev.includes(activeProjectId)) return prev;
-        // 旧 active 已钉住 -> 把新选也钉住(若尚未钉)。
-        return prev.includes(projectId) ? prev : [...prev, projectId];
+        // 旧 active 已钉住 -> 把新选也钉住(若尚未钉且未满)。
+        if (prev.includes(projectId) || prev.length >= MAX_PINNED_PROJECTS) return prev;
+        return [...prev, projectId];
       });
       onSelectProject(projectId);
     },
     [activeProjectId, onSelectProject],
   );
 
-  // 顶栏切换钉住。
+  // 顶栏切换钉住。钉新项目时受上限约束(取消钉住不受限)。
   const handleTogglePin = useCallback((projectId: string) => {
-    setPinnedProjectIds((prev) =>
-      prev.includes(projectId) ? prev.filter((id) => id !== projectId) : [...prev, projectId],
-    );
+    setPinnedProjectIds((prev) => {
+      if (prev.includes(projectId)) return prev.filter((id) => id !== projectId);
+      return prev.length >= MAX_PINNED_PROJECTS ? prev : [...prev, projectId];
+    });
   }, []);
 
   // + 菜单历史项点击:恢复项目(App.tsx 调后端移回打开列表并设 active),
   // 成功后立即钉住到并排视图(用户预期:点历史 = 回到眼前,而不是只出现在下拉里)。
+  // 钉满上限时跳过自动钉住(恢复本身不受影响)。
   const handleOpenRecent = useCallback(
     async (rootPath: string) => {
       if (!onOpenRecent) return;
       const projectId = await onOpenRecent(rootPath);
       if (projectId) {
-        setPinnedProjectIds((prev) => (prev.includes(projectId) ? prev : [...prev, projectId]));
+        setPinnedProjectIds((prev) =>
+          prev.includes(projectId) || prev.length >= MAX_PINNED_PROJECTS
+            ? prev
+            : [...prev, projectId],
+        );
       }
     },
     [onOpenRecent],
@@ -992,6 +1018,11 @@ export function AppShell({
 
   const hasProject = visibleProjects.length > 0;
 
+  // 并排区分组:布局偏好 groups 按当前项目数保形归一后切行(渲染两层 grid 用)。
+  const layoutGroups = resolveGroups(pinnedLayout.groups, visibleProjects.length);
+  const projectRows = chunkByGroups(visibleProjects, layoutGroups);
+  const layoutRowFlow = pinnedLayout.flow === "row";
+
   // 聚焦项目(选中 shell 所属项目):供底部状态栏显示其绝对路径。
   const focusedProject = focused ? projects.find((p) => p.id === focused.projectId) ?? null : null;
 
@@ -1052,6 +1083,9 @@ export function AppShell({
         onRemoveRecent={onRemoveRecent}
         onOpenRecentToWindow={onOpenRecentToWindow}
         onNewWindow={onNewWindow}
+        visibleProjectCount={visibleProjects.length}
+        pinnedLayout={pinnedLayout}
+        onPinnedLayoutChange={changePinnedLayout}
       />
       <div className="grid min-h-0 grid-cols-[length:var(--mx-sidebar-w)_1fr]">
         <div className="flex min-h-0 flex-col">
@@ -1070,37 +1104,61 @@ export function AppShell({
             </div>
           )}
         </div>
-        <div className="min-h-0 min-w-0 py-2 pr-2">
+        {/* 中央区留白:紧凑贴边——上下零留白(终端区直贴顶栏/状态栏,原 py-2 的 8px 空带
+            会稀释栏高、造成内容不居中的错觉),仅右侧 6px 与窗口边隔开。 */}
+        <div className="min-h-0 min-w-0 pr-[6px]">
           {hasProject ? (
+            // 并排区两层嵌套 grid(布局偏好 = 流向 + 行分组):
+            // 外层 = 组(row 流时组沿纵向均分行,column 沿横向均分列),
+            // 内层 = 组内格子(方向与外层垂直)。groups 与项目数失配由 resolveGroups 保形归一
+            // (存储不覆写,n 恢复后形态自动找回);组间/组内均 1fr 均分,gap 保持 6px 观感。
+            // groups=[n] + row 时等价历史单排横排。容器变化由 TerminalPane 的 ResizeObserver
+            // 自动 fit → resize_pty,无需额外接线。
             <div
               className="grid h-full min-h-0 min-w-0 gap-[6px]"
-              style={{ gridTemplateColumns: `repeat(${visibleProjects.length}, minmax(0, 1fr))` }}
+              style={
+                layoutRowFlow
+                  ? { gridTemplateRows: `repeat(${layoutGroups.length}, minmax(0, 1fr))` }
+                  : { gridTemplateColumns: `repeat(${layoutGroups.length}, minmax(0, 1fr))` }
+              }
             >
-              {visibleProjects.map((p) => (
-                <ProjectColumn
-                  key={p.id}
-                  project={p}
-                  paneTree={treesByProject[p.id] ?? defaultPaneTree()}
-                  focusedPaneId={focused?.projectId === p.id ? focused.paneId : null}
-                  onFocusPane={(paneId) => focusPaneRef(p.id, paneId)}
-                  getTransport={(paneId, tabId) => getTransport(p.id, paneId, tabId)}
-                  getClaudeTransport={(paneId, tabId) => getClaudeTransport(p.id, paneId, tabId)}
-                  getCodexTransport={(paneId, tabId) => getCodexTransport(p.id, paneId, tabId)}
-                  getShellRunTransport={(paneId, tabId) => getShellRunTransport(p.id, paneId, tabId)}
-                  onSplitPane={(paneId, kind, direction) => handleSplitWithKind(p.id, paneId, kind, direction)}
-                  onClosePane={(paneId) => handleClosePane(p.id, paneId)}
-                  onAddTab={(paneId, kind, cwd, title) => handleAddTab(p.id, paneId, kind, cwd, title)}
-                  onResumeSession={(provider, sessionId, cwd) => handleResumeSession(p.id, provider, sessionId, cwd)}
-                  onCloseTab={(paneId, tabId) => handleCloseTab(p.id, paneId, tabId)}
-                  onSetActiveTab={(paneId, tabId) => handleSetActiveTab(p.id, paneId, tabId)}
-                  onMeasurePane={(paneId, size) =>
-                    paneRectsRef.current.set(surfaceKey(p.id, paneId), size)
+              {projectRows.map((rowProjects, i) => (
+                <div
+                  key={i}
+                  className="grid min-h-0 min-w-0 gap-[6px]"
+                  style={
+                    layoutRowFlow
+                      ? { gridTemplateColumns: `repeat(${rowProjects.length}, minmax(0, 1fr))` }
+                      : { gridTemplateRows: `repeat(${rowProjects.length}, minmax(0, 1fr))` }
                   }
-                  onSetSplitRatio={(splitId, ratio, commit) =>
-                    handleSetSplitRatio(p.id, splitId, ratio, commit)
-                  }
-                  onRenameTab={(paneId, tabId, title) => handleRenameTab(p.id, paneId, tabId, title)}
-                />
+                >
+                  {rowProjects.map((p) => (
+                    <ProjectColumn
+                      key={p.id}
+                      project={p}
+                      paneTree={treesByProject[p.id] ?? defaultPaneTree()}
+                      focusedPaneId={focused?.projectId === p.id ? focused.paneId : null}
+                      onFocusPane={(paneId) => focusPaneRef(p.id, paneId)}
+                      getTransport={(paneId, tabId) => getTransport(p.id, paneId, tabId)}
+                      getClaudeTransport={(paneId, tabId) => getClaudeTransport(p.id, paneId, tabId)}
+                      getCodexTransport={(paneId, tabId) => getCodexTransport(p.id, paneId, tabId)}
+                      getShellRunTransport={(paneId, tabId) => getShellRunTransport(p.id, paneId, tabId)}
+                      onSplitPane={(paneId, kind, direction) => handleSplitWithKind(p.id, paneId, kind, direction)}
+                      onClosePane={(paneId) => handleClosePane(p.id, paneId)}
+                      onAddTab={(paneId, kind, cwd, title) => handleAddTab(p.id, paneId, kind, cwd, title)}
+                      onResumeSession={(provider, sessionId, cwd) => handleResumeSession(p.id, provider, sessionId, cwd)}
+                      onCloseTab={(paneId, tabId) => handleCloseTab(p.id, paneId, tabId)}
+                      onSetActiveTab={(paneId, tabId) => handleSetActiveTab(p.id, paneId, tabId)}
+                      onMeasurePane={(paneId, size) =>
+                        paneRectsRef.current.set(surfaceKey(p.id, paneId), size)
+                      }
+                      onSetSplitRatio={(splitId, ratio, commit) =>
+                        handleSetSplitRatio(p.id, splitId, ratio, commit)
+                      }
+                      onRenameTab={(paneId, tabId, title) => handleRenameTab(p.id, paneId, tabId, title)}
+                    />
+                  ))}
+                </div>
               ))}
             </div>
           ) : (
@@ -1121,4 +1179,3 @@ export function AppShell({
     </main>
   );
 }
-

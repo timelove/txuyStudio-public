@@ -1,7 +1,7 @@
 import { lazy, memo, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { selectEnclosingPre } from "../lib/selectEnclosingPre";
 import { homeDir } from "@tauri-apps/api/path";
-import { openPath } from "@tauri-apps/plugin-opener";
 import { useTranslation } from "react-i18next";
 import type { ShellKind, SplitDirection } from "../domain/paneTree";
 import type { WorkspaceSession } from "../domain/sessions";
@@ -580,11 +580,11 @@ export function CodexPane(props: CodexPaneProps) {
     [sessions, activeTabId],
   );
 
-  /** 打开 ~/.codex 下指定文件(auth.json/config.toml/AGENTS.md),用系统默认程序。 */
+  /** 资源管理器定位 ~/.codex 下指定文件(auth.json/config.toml/AGENTS.md),用户自行决定怎么打开。 */
   const openCodexHomeFile = useCallback(
     (file: string) => {
       void homeDir()
-        .then((home) => openPath(`${home}/.codex/${file}`).catch(() => {}))
+        .then((home) => void invoke("reveal_in_folder", { path: `${home}/.codex/${file}` }).catch(() => {}))
         .catch(() => setUnsupportedMsg(t("codexpane.unsupportedNoCwd")));
     },
     [t],
@@ -638,9 +638,9 @@ export function CodexPane(props: CodexPaneProps) {
           break;
         }
         case "init": {
-          // 打开项目 AGENTS.md(codex 的项目指令文件,非 CLAUDE.md)。
+          // 资源管理器定位项目 AGENTS.md(codex 的项目指令文件,非 CLAUDE.md)。
           const cwd = sessions.find((s) => s.id === activeTabId)?.cwd;
-          if (cwd) void openPath(`${cwd}/AGENTS.md`).catch(() => {});
+          if (cwd) void invoke("reveal_in_folder", { path: `${cwd}/AGENTS.md`, cwd }).catch(() => {});
           else setUnsupportedMsg(t("codexpane.unsupportedNoCwd"));
           break;
         }
@@ -901,6 +901,22 @@ export function CodexPane(props: CodexPaneProps) {
   busyRef.current = busy;
   const handleInterruptRef = useRef(handleInterrupt);
   handleInterruptRef.current = handleInterrupt;
+  // —— Ctrl+A 智能选框(pane focused 时)——
+  // 选区锚点(最后点击处)落在消息流某个 <pre> 输出框内 → 只全选该框,配合 Ctrl+C 整块复制;
+  // 否则放行系统默认(全选整条消息流)。输入框聚焦时让浏览器原生全选 textarea 文本。
+  useEffect(() => {
+    if (!focused) return;
+    const handler = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey) || e.key.toLowerCase() !== "a" || e.altKey || e.shiftKey) return;
+      const active = document.activeElement;
+      if (active instanceof HTMLTextAreaElement || active instanceof HTMLInputElement) return;
+      if (selectEnclosingPre(scrollRef.current)) e.preventDefault();
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [focused]);
+
+  // 双击 Esc 中断(上文 ref 声明区)。
   useEffect(() => {
     if (!focused) return;
     const handler = (e: KeyboardEvent) => {
@@ -1209,9 +1225,10 @@ export function CodexPane(props: CodexPaneProps) {
                 busy 全程可见 -- 与 ClaudePane 对等,长命令运行中用户也能察觉会话仍在进行。 */}
             {busy && (
               <div
-                className={`mb-1.5 flex items-center gap-2 px-1 text-[11px] ${
+                className={`mb-1.5 flex items-center gap-2 px-1 ${
                   thinkingNow ? "text-[var(--mx-violet)]" : "text-[var(--mx-accent)]"
                 }`}
+                style={{ fontSize: statusFontPx }}
               >
                 <ThinkingDots />
                 <span>
@@ -1276,6 +1293,20 @@ export function CodexPane(props: CodexPaneProps) {
                           if (highlightRef.current) highlightRef.current.scrollTop = e.currentTarget.scrollTop;
                         }}
                         onKeyDown={(e) => {
+                          // Alt+Enter 恒为换行(优先于 @/slash 面板选中与发送;
+                          // Windows Chromium textarea 对带 Alt 的 Enter 默认不插换行,故手动补)。
+                          if (e.key === "Enter" && e.altKey && !e.nativeEvent.isComposing) {
+                            e.preventDefault();
+                            const ta = e.currentTarget;
+                            const start = ta.selectionStart;
+                            const end = ta.selectionEnd;
+                            setInput(input.slice(0, start) + "\n" + input.slice(end));
+                            // 受控 value 更新后光标会被重置,rAF(渲染后)恢复到换行符之后。
+                            requestAnimationFrame(() => {
+                              ta.selectionStart = ta.selectionEnd = start + 1;
+                            });
+                            return;
+                          }
                           // ↑/↓ 浏览输入历史。
                           if (!slashOpen && !atOpen && !e.nativeEvent.isComposing && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
                             const ta = inputRef.current;
@@ -1350,7 +1381,7 @@ export function CodexPane(props: CodexPaneProps) {
                             cycleSandbox();
                             return;
                           }
-                          // 回车发送(IME 组合输入中不触发)。shellRunning 时拦(! 命令与 codex 串行)。
+                          // 回车发送(IME 组合输入中不触发;Shift/Alt+Enter 换行已在前置分支)。shellRunning 时拦(! 命令与 codex 串行)。
                           if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing && !codexMissing && !shellRunning) {
                             e.preventDefault();
                             handleSend();
@@ -1358,7 +1389,9 @@ export function CodexPane(props: CodexPaneProps) {
                         }}
                         rows={2}
                         placeholder={t("codexpane.slashHint")}
-                        className="relative max-h-[160px] min-h-[36px] w-full resize-none bg-transparent p-0 font-mono caret-[var(--mx-text)] text-[var(--mx-text)] outline-none placeholder:text-[var(--mx-faint)]"
+                        /* field-sizing-content:随内容在 min-h~max-h 间自动长高,超高才内部滚动(滚轮仍可滚);
+                           滚动条隐藏而非美化:占宽会让 textarea 换行窄于覆盖层,造成视觉错位。 */
+                        className="relative max-h-[160px] min-h-[36px] w-full field-sizing-content resize-none bg-transparent p-0 font-mono caret-[var(--mx-text)] text-[var(--mx-text)] outline-none placeholder:text-[var(--mx-faint)] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
                         style={{ fontSize, lineHeight: "1.5" }}
                       />
                     </div>

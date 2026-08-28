@@ -15,6 +15,68 @@ import {
   DialogTitle,
 } from "./ui/Dialog";
 import { Slider, SliderRange, SliderThumb, SliderTrack } from "./ui/Slider";
+
+/**
+ * 滑杆 + 左右 −/+ 步进按钮(设置面板统一规格)。
+ * 点击按钮步进一个 step(浮点步进经 round 修误差,clamp 到 [min,max]);
+ * 中间滑杆照常拖拽。三处滑杆(字体/模糊/暗化)共用,± 视觉与面板小按钮一致。
+ */
+function StepperSlider({
+  value,
+  min,
+  max,
+  step,
+  onValueChange,
+  ariaLabel,
+}: {
+  value: number;
+  min: number;
+  max: number;
+  step: number;
+  onValueChange: (v: number) => void;
+  ariaLabel: string;
+}) {
+  // 浮点 step(0.05)累积误差:先按 step 取整回栅格,再 clamp(min/max 兜住 0.85 这类端点)。
+  const clamp = (v: number) => Math.min(max, Math.max(min, Math.round(v / step) * step));
+  const btn =
+    "grid h-5 w-5 place-items-center rounded-[var(--mx-radius-md)] text-[13px] leading-none text-[var(--mx-muted)] transition-colors hover:bg-[var(--mx-hover-bg)] hover:text-[var(--mx-text)] disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:bg-transparent disabled:hover:text-[var(--mx-muted)]";
+  return (
+    <div className="flex items-center gap-2">
+      <button
+        type="button"
+        aria-label={`- ${ariaLabel}`}
+        disabled={value <= min}
+        onClick={() => onValueChange(clamp(value - step))}
+        className={btn}
+      >
+        −
+      </button>
+      <Slider
+        value={[value]}
+        min={min}
+        max={max}
+        step={step}
+        onValueChange={(v) => onValueChange(v[0])}
+        aria-label={ariaLabel}
+        className="flex-1"
+      >
+        <SliderTrack>
+          <SliderRange />
+        </SliderTrack>
+        <SliderThumb />
+      </Slider>
+      <button
+        type="button"
+        aria-label={`+ ${ariaLabel}`}
+        disabled={value >= max}
+        onClick={() => onValueChange(clamp(value + step))}
+        className={btn}
+      >
+        +
+      </button>
+    </div>
+  );
+}
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./ui/Tabs";
 import { ToggleGroup, ToggleGroupItem } from "./ui/ToggleGroup";
 
@@ -143,19 +205,14 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
                     </button>
                   </div>
                 </div>
-                <Slider
-                  value={[fontSize]}
+                <StepperSlider
+                  value={fontSize}
                   min={FONT_SIZE_MIN}
                   max={FONT_SIZE_MAX}
                   step={1}
-                  onValueChange={(v) => changeFontSize(v[0])}
-                  aria-label={t("settings.fontSize.title")}
-                >
-                  <SliderTrack>
-                    <SliderRange />
-                  </SliderTrack>
-                  <SliderThumb />
-                </Slider>
+                  onValueChange={changeFontSize}
+                  ariaLabel={t("settings.fontSize.title")}
+                />
                 <div className="mt-1 flex justify-between text-[10px] tabular-nums text-[var(--mx-faint)]">
                   <span>{FONT_SIZE_MIN}</span>
                   <span>{FONT_SIZE_MAX}</span>
@@ -206,37 +263,27 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
                       <span>{t("settings.bg.blur")}</span>
                       <span className="tabular-nums">{bgSetting.blur}px</span>
                     </div>
-                    <Slider
-                      value={[bgSetting.blur]}
+                    <StepperSlider
+                      value={bgSetting.blur}
                       min={0}
                       max={40}
                       step={1}
-                      onValueChange={(v) => changeBgSetting({ blur: v[0] })}
-                      aria-label={t("settings.bg.blur")}
-                    >
-                      <SliderTrack>
-                        <SliderRange />
-                      </SliderTrack>
-                      <SliderThumb />
-                    </Slider>
+                      onValueChange={(v) => changeBgSetting({ blur: v })}
+                      ariaLabel={t("settings.bg.blur")}
+                    />
                     {/* 暗化滑杆:0-0.85。 */}
                     <div className="mb-1 mt-2 flex items-center justify-between text-[10px] text-[var(--mx-faint)]">
                       <span>{t("settings.bg.dim")}</span>
                       <span className="tabular-nums">{Math.round(bgSetting.dim * 100)}%</span>
                     </div>
-                    <Slider
-                      value={[bgSetting.dim]}
+                    <StepperSlider
+                      value={bgSetting.dim}
                       min={0}
                       max={0.85}
                       step={0.05}
-                      onValueChange={(v) => changeBgSetting({ dim: v[0] })}
-                      aria-label={t("settings.bg.dim")}
-                    >
-                      <SliderTrack>
-                        <SliderRange />
-                      </SliderTrack>
-                      <SliderThumb />
-                    </Slider>
+                      onValueChange={(v) => changeBgSetting({ dim: v })}
+                      ariaLabel={t("settings.bg.dim")}
+                    />
                   </>
                 )}
                 <div className="mt-1.5 text-[10px] text-[var(--mx-faint)]">{t("settings.bg.hint")}</div>

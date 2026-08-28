@@ -48,6 +48,15 @@ const en = {
     focusDetached: "Focus detached window",
     empty: "No project selected. Use ✦ at top right to open a project, window, or recent project.",
     emptyHint: "Click ✦ at top right to open a project",
+    pinLimitReached: "Pinned limit reached (10)",
+    layout: {
+      button: "Pinned layout",
+      flow: "Flow",
+      flowRow: "Horizontal",
+      flowColumn: "Vertical",
+      groups: "Groups",
+      groupHint: "{{count}} projects",
+    },
   },
   session: {
     all: "All",
@@ -194,7 +203,6 @@ const en = {
   },
   topbar: {
     backToMain: "Back to main window",
-    backToMainBtn: "← Main",
     project: "Project",
   },
   sidebar: {
@@ -215,6 +223,7 @@ const en = {
     bgTaskDoneLabel: "Background task done",
     bgTaskFailedLabel: "Background task failed",
     bgCountBadge: "bg ×{{n}}",
+    revealInFolder: "Reveal in folder",
     mainTask: "Main chat",
     mainWaiting: "Waiting for confirmation",
     mainIdle: "Idle · ready to chat",

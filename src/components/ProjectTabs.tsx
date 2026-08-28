@@ -2,11 +2,14 @@ import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { ProjectId, ProjectSnapshot } from "../domain/projects";
 import type { ProjectRecord } from "../domain/appState";
+import type { PinnedLayout } from "../domain/pinnedLayout";
+import { MAX_PINNED_PROJECTS } from "../domain/pinnedLayout";
 import { projectAccentColor } from "../domain/projects";
 import { Button } from "./ui/Button";
 import { Popover, PopoverContent, PopoverTrigger } from "./ui/Popover";
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger } from "./ui/ContextMenu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/Tooltip";
+import { PinnedLayoutButton } from "./PinnedLayoutButton";
 
 type ProjectTabsProps = {
   projects: ProjectSnapshot[];
@@ -32,6 +35,12 @@ type ProjectTabsProps = {
   onOpenRecentToWindow?: (rootPath: string) => void | Promise<void>;
   /** + 菜单「新窗口」:新建空白工作台窗口。 */
   onNewWindow?: () => void;
+  /** 并排可见项目数(钉住 + active)。<2 时不渲染布局按钮。 */
+  visibleProjectCount?: number;
+  /** 并排布局偏好(流向+分组),PinnedLayoutButton 数据源。 */
+  pinnedLayout?: PinnedLayout;
+  /** 修改并排布局偏好(部分字段 patch)。 */
+  onPinnedLayoutChange?: (patch: Partial<PinnedLayout>) => void;
 };
 
 /** 钉住+当前这块最多占容器宽的比例(其余留给加号/拖拽区)。 */
@@ -50,7 +59,7 @@ const PINNED_WIDTH_RATIO = 0.6;
  * 下拉用 Radix Popover(PopoverContent 自带 portal,脱离顶栏 overflow 裁切);
  * 右键用 Radix ContextMenu(定位到鼠标坐标)。两者 open/close 均由 Radix 内置。
  */
-export function ProjectTabs({ projects, activeProjectId, pinnedProjectIds, onSelectProject, onTogglePin, onAddProject, onCloseProject, onDetachProject, detachedProjectIds, recentProjects, onOpenRecent, onRemoveRecent, onOpenRecentToWindow, onNewWindow }: ProjectTabsProps) {
+export function ProjectTabs({ projects, activeProjectId, pinnedProjectIds, onSelectProject, onTogglePin, onAddProject, onCloseProject, onDetachProject, detachedProjectIds, recentProjects, onOpenRecent, onRemoveRecent, onOpenRecentToWindow, onNewWindow, visibleProjectCount, pinnedLayout, onPinnedLayoutChange }: ProjectTabsProps) {
   const { t } = useTranslation();
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chipContentRef = useRef<HTMLSpanElement | null>(null);
@@ -195,6 +204,12 @@ export function ProjectTabs({ projects, activeProjectId, pinnedProjectIds, onSel
 
         {/* 下拉列表:PopoverContent 自带 portal(脱离顶栏 overflow 裁切),定位由 anchor 自动算。 */}
         <PopoverContent side="bottom" align="start" sideOffset={2} className="min-w-[200px] max-w-[320px]">
+          {/* 钉满上限提示:此时所有钉住动作 no-op,静态告知原因(项目无 toast 设施)。 */}
+          {pinnedProjectIds.length >= MAX_PINNED_PROJECTS && (
+            <div className="px-3 pt-[4px] text-[length:var(--mx-ui-fs-xs)] text-[var(--mx-faint)]">
+              {t("project.pinLimitReached")}
+            </div>
+          )}
           {projects.length === 0 ? (
             <div className="px-3 py-[6px] text-xs text-[var(--mx-muted)]">{t("project.none")}</div>
           ) : (
@@ -470,6 +485,17 @@ export function ProjectTabs({ projects, activeProjectId, pinnedProjectIds, onSel
             )}
           </PopoverContent>
         </Popover>
+      )}
+
+      {/* 并排布局按钮:钉住 ≥2 个项目时出现(流向横/纵 + 分组预设)。shrink-0 防被压缩。 */}
+      {visibleProjectCount !== undefined && visibleProjectCount >= 2 && pinnedLayout && onPinnedLayoutChange && (
+        <div className="shrink-0" onMouseDown={(e) => e.stopPropagation()}>
+          <PinnedLayoutButton
+            layout={pinnedLayout}
+            onChange={onPinnedLayoutChange}
+            count={visibleProjectCount}
+          />
+        </div>
       )}
 
     </div>

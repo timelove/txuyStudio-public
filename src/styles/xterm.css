@@ -2,6 +2,13 @@
 
 .xterm {
   height: 100%;
+  /* 四周留白(Windows Terminal 式,底部 6px 让提示符/光标不贴 pane 沿):padding 加在
+     .xterm 自身而非父容器——FitAddon 只减去 .xterm 自身 padding 算行列(父容器 padding
+     会被计入视口高致多算行裁切)。背景由 .xterm 提供(padding 区与文字区一整块颜色,
+     非外部拼色):var(--mx-editor-bg) 与 xterm theme.background 同值(主题约束);
+     玻璃化时 TerminalPane inline 置 transparent,与 canvas 全透明一致,仍一体。 */
+  padding: 6px 8px;
+  background: var(--mx-editor-bg);
 }
 
 .xterm .xterm-viewport {
@@ -32,12 +39,12 @@
  * ============================================================ */
 
 /* 滚动条容器:恒定 8px 宽作为 hover 命中区(滑块在内部收窄/展宽),透明轨道。
-   TerminalPane 的 tab 容器有 pr-1.5(6px) 让文字右缩进;scrollbar 用 right:-6px
-   右移到 padding 区,贴 tab 容器右边缘且不盖文字。改 pr 值需同步此 6px。 */
+   .xterm 自身 padding-right 8px(见上),scrollbar 用 right:2px 落在 padding 区内,
+   距 pane 右缘 2px 且不盖文字。改 padding 需同步此值。 */
 .xterm .xterm-scrollable-element > .scrollbar {
   width: 8px !important;
   background: transparent !important;
-  right: -6px !important;
+  right: 2px !important;
 }
 
 /* 滑块:平时 4px 贴右,hover 容器时展宽 12px。transition 让粗细变化平滑。 */

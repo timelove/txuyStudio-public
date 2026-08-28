@@ -1,6 +1,6 @@
 [package]
 name = "txuy-studio"
-version = "0.1.5"
+version = "0.1.6"
 description = "AI CLI terminal workspace for Windows developers"
 authors = ["txuyStudio Contributors"]
 edition = "2021"

@@ -6,7 +6,7 @@
 //! `list_ai_cli_sessions` 例外:涉及多文件遍历 + 逐行解析,用 `spawn_blocking` 包裹。
 
 use std::io::BufRead;
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 
 use sysinfo::System;
 
@@ -143,6 +143,44 @@ pub async fn check_commands_installed(
         out.insert(cmd, installed);
     }
     Ok(out)
+}
+
+/// 在资源管理器中定位文件/目录(消息流工具卡片的文件路径、/memory 等配置入口点击)。
+///
+/// 文件存在 → `/select` 打开父目录并选中该文件;路径本身是目录 → 直接打开;
+/// 不存在 → 打开上级目录。**不经编辑器**:由用户在资源管理器里自行决定后续操作。
+///
+/// - `path` 通常已是绝对路径(claude/codex 工具输入的 file_path);相对时以 `cwd` 解析,
+///   再词法规范化(不要求路径存在,与 get_git_branch 同思路)。
+/// - explorer 是 GUI 程序,spawn 出的句柄随即丢弃(detach),不弹控制台。
+#[tauri::command]
+pub async fn reveal_in_folder(path: String, cwd: Option<String>) -> Result<(), String> {
+    // 解析绝对路径:相对路径 join cwd(项目根),词法规范化消化 `.`/`..` 段。
+    let mut abs = PathBuf::from(&path);
+    if !abs.is_absolute() {
+        if let Some(cwd) = cwd {
+            abs = Path::new(&cwd).join(&path);
+        }
+    }
+    let abs = lexical_normalize(&abs);
+
+    #[cfg(windows)]
+    {
+        let spawn = if abs.is_file() {
+            std::process::Command::new("explorer").arg("/select,").arg(&abs).spawn()
+        } else if abs.is_dir() {
+            std::process::Command::new("explorer").arg(&abs).spawn()
+        } else {
+            let parent = abs.parent().map(Path::to_path_buf).unwrap_or_else(|| abs.clone());
+            std::process::Command::new("explorer").arg(&parent).spawn()
+        };
+        if let Err(e) = spawn {
+            log::warn!("reveal_in_folder: explorer failed for {abs:?}: {e}");
+        }
+    }
+    // 非 Windows 无 explorer:项目面向 Windows,此分支不做额外兜底(编译通过即可)。
+    log::info!("reveal_in_folder: {abs:?}");
+    Ok(())
 }
 
 /// 构造一个带 `CREATE_NO_WINDOW` 的 `Command`（Windows）。
@@ -718,6 +756,71 @@ fn extract_uuid(s: &str) -> Option<&str> {
     None
 }
 
+/// 从 Claude jsonl 的 user 行提取「真实人类输入」文本(标题回退用)。
+///
+/// 排除噪音后取首个非空文本,任一条件不满足返回 None:
+/// - `isMeta:true` 行(caveat 提示、本地命令展开等元消息);
+/// - content 数组里无 text 块(tool_result 回传行,role 虽 user 但非人类输入);
+/// - 文本以 `<command-name>`/`<local-command`/`<system-reminder`/`Caveat:` 开头
+///   (slash 命令与系统注入包装,非用户原话)。
+fn extract_claude_user_text(v: &serde_json::Value) -> Option<String> {
+    if v.get("isMeta")
+        .and_then(|x| x.as_bool())
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    let msg = v.get("message")?;
+    let content = msg.get("content")?;
+    let text = match content {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Array(items) => {
+            let mut buf = String::new();
+            for item in items {
+                if item.get("type").and_then(|t| t.as_str()) == Some("text") {
+                    if let Some(t) = item.get("text").and_then(|x| x.as_str()) {
+                        if !buf.is_empty() {
+                            buf.push(' ');
+                        }
+                        buf.push_str(t);
+                    }
+                }
+            }
+            if buf.is_empty() {
+                None
+            } else {
+                Some(buf)
+            }
+        }
+        _ => None,
+    }?;
+    let t = text.trim();
+    if t.is_empty()
+        || t.starts_with("<command-name>")
+        || t.starts_with("<local-command")
+        || t.starts_with("<system-reminder")
+        || t.starts_with("Caveat:")
+    {
+        return None;
+    }
+    Some(t.to_string())
+}
+
+/// 标题截断(按字符,防切坏多字节;末尾省略号)。Claude/Codex 标题回退共用。
+fn truncate_title(raw: &str) -> Option<String> {
+    const TITLE_MAX: usize = 60;
+    let t = raw.trim();
+    if t.is_empty() {
+        return None;
+    }
+    Some(if t.chars().count() > TITLE_MAX {
+        let cut: String = t.chars().take(TITLE_MAX).collect();
+        format!("{cut}…")
+    } else {
+        t.to_string()
+    })
+}
+
 /// 逐行流式解析 Claude 单个 jsonl,归并出列表项字段(标题/起止时间/消息数/git/cwd)。
 /// 不全量读入内存:`BufReader` 按行读;每行只取字段白名单,丢弃 content/usage/patch 等大字段。
 fn parse_claude_jsonl(path: &Path) -> Result<AiCliSessionListItem, String> {
@@ -725,6 +828,7 @@ fn parse_claude_jsonl(path: &Path) -> Result<AiCliSessionListItem, String> {
     let reader = std::io::BufReader::new(file);
 
     let mut title: Option<String> = None; // 最后一条 ai-title / summary
+    let mut first_user_msg: Option<String> = None; // 首条真实用户输入(无 ai-title 时作标题回退)
     let mut started_at: Option<String> = None; // 首个 timestamp
     let mut last_at: Option<String> = None; // 末个 timestamp
     let mut message_count: u32 = 0;
@@ -782,6 +886,11 @@ fn parse_claude_jsonl(path: &Path) -> Result<AiCliSessionListItem, String> {
             message_count = message_count.saturating_add(1);
         }
 
+        // 首条真实人类输入(无 ai-title/summary 时作标题回退,见文档头)。
+        if first_user_msg.is_none() && !is_sidechain && ty == "user" {
+            first_user_msg = extract_claude_user_text(&v);
+        }
+
         // 元信息取首个出现(通常在首行 user 行)。
         if git_branch.is_none() {
             if let Some(g) = v.get("gitBranch").and_then(|x| x.as_str()) {
@@ -798,7 +907,8 @@ fn parse_claude_jsonl(path: &Path) -> Result<AiCliSessionListItem, String> {
     Ok(AiCliSessionListItem {
         provider_id: String::new(), // 由调用方(scan_*)填。
         session_id: String::new(), // 由调用方填(文件名)。
-        title,
+        // 标题回退链:ai-title(最后一条)> summary > 首条真实用户消息(截 60 字符)。
+        title: title.or_else(|| first_user_msg.as_deref().and_then(truncate_title)),
         started_at,
         last_at,
         message_count,
@@ -820,6 +930,7 @@ fn parse_codex_rollout(path: &Path) -> Result<AiCliSessionListItem, String> {
     let reader = std::io::BufReader::new(file);
 
     let mut title: Option<String> = None; // 首条 user_message(截断)
+    let mut first_user_msg: Option<String> = None; // 旧格式 response_item 用户消息(回退)
     let mut started_at: Option<String> = None;
     let mut last_at: Option<String> = None;
     let mut message_count: u32 = 0;
@@ -898,6 +1009,34 @@ fn parse_codex_rollout(path: &Path) -> Result<AiCliSessionListItem, String> {
                     }
                 }
             }
+        } else if ty == "response_item" {
+            // 旧格式 rollout 无 user_message 事件,用户输入在 response_item.message
+            // (role=user,content[].input_text)。仅作标题回退,不计消息数(与消息流解析口径一致)。
+            if first_user_msg.is_none() {
+                if let Some(p) = payload {
+                    let is_user = p.get("role").and_then(|r| r.as_str()) == Some("user")
+                        && p.get("type").and_then(|t| t.as_str()) == Some("message");
+                    if is_user {
+                        if let Some(content) = p.get("content").and_then(|c| c.as_array()) {
+                            let mut buf = String::new();
+                            for item in content {
+                                if item.get("type").and_then(|t| t.as_str()) == Some("input_text") {
+                                    if let Some(txt) = item.get("text").and_then(|x| x.as_str()) {
+                                        if !buf.is_empty() {
+                                            buf.push(' ');
+                                        }
+                                        buf.push_str(txt);
+                                    }
+                                }
+                            }
+                            let t = buf.trim();
+                            if !t.is_empty() {
+                                first_user_msg = Some(t.to_string());
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -905,7 +1044,8 @@ fn parse_codex_rollout(path: &Path) -> Result<AiCliSessionListItem, String> {
     Ok(AiCliSessionListItem {
         provider_id: String::new(), // 由调用方(scan_*)填。
         session_id: String::new(), // 由调用方填(文件名)。
-        title,
+        // 标题回退链:user_message 事件 > 旧格式 response_item 用户消息(截 60 字符)。
+        title: title.or_else(|| first_user_msg.as_deref().and_then(truncate_title)),
         started_at,
         last_at,
         message_count,

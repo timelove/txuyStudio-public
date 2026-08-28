@@ -61,8 +61,9 @@
   --mx-guarded: #22d3ee;
   --mx-permissive: #f59e0b;
   /* 自绘标题栏高度(顶栏 grid 行高 + TopProjectBar + WindowControls 容器统一引用)。
-   * 收窄到 32px(贴近 VS Code/系统标题栏观感);改高度只动这一处,控件靠 items-center/h-full 自适应。 */
-  --mx-titlebar-h: 32px;
+   * 36px(2026-08-26 起,原 32);改高度动两处:此处默认值 + AppShell fontSize 缩放 effect
+   * 的 px(36) 基准(effect 覆写优先级更高,只改这里会被拉回),控件靠 items-center/h-full 自适应。 */
+  --mx-titlebar-h: 36px;
   /* chrome 尺寸/字号 token:默认值 = 历史固定值,观感零变化。AppShell 按全局 fontSize 等比
    * 运行时覆写(documentElement inline 优先级高于本 :root 规则,Radix portal 弹层也继承),
    * 使顶栏/状态栏/侧栏/pane 头/tab 的高宽与 chrome 字号随字体设置自适应。

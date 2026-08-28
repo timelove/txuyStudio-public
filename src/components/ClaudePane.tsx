@@ -1,6 +1,6 @@
 import { lazy, memo, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { openPath } from "@tauri-apps/plugin-opener";
+import { selectEnclosingPre } from "../lib/selectEnclosingPre";
 import { SettingsModal } from "./SettingsModal";
 import { Dialog, DialogContent, DialogTitle } from "./ui/Dialog";
 import { useTranslation } from "react-i18next";
@@ -947,9 +947,10 @@ export function ClaudePane(props: ClaudePaneProps) {
         case "agents":
         case "skills":
         case "mcp": {
-          // 打开 claude 配置位置(agents/skills 目录 / mcp 的 .claude.json)用系统默认程序管理。
+          // 在资源管理器定位 claude 配置位置(agents/skills 目录 / mcp 的 .claude.json),
+          // 用户自行决定用什么打开(后端 reveal_in_folder)。
           invoke<string>("get_claude_config_path", { target: cmd.name })
-            .then((p) => void openPath(p).catch(() => {}))
+            .then((p) => void invoke("reveal_in_folder", { path: p }).catch(() => {}))
             .catch(() => setUnsupportedMsg(t("claudepane.unsupported", { cmd: `/${cmd.name}` })));
           break;
         }
@@ -965,9 +966,9 @@ export function ClaudePane(props: ClaudePaneProps) {
           setRewindOpen(true);
           break;
         case "memory": {
-          // 打开项目 CLAUDE.md(系统默认编辑器);无 cwd 则提示。
+          // 资源管理器定位项目 CLAUDE.md;无 cwd 则提示。
           const cwd = state?.meta?.cwd;
-          if (cwd) void openPath(`${cwd}/CLAUDE.md`).catch(() => {});
+          if (cwd) void invoke("reveal_in_folder", { path: `${cwd}/CLAUDE.md`, cwd }).catch(() => {});
           else setUnsupportedMsg(t("claudepane.unsupportedNoCwd"));
           break;
         }
@@ -1326,6 +1327,21 @@ export function ClaudePane(props: ClaudePaneProps) {
   const handleFeedback = useCallback(() => {
     requestAnimationFrame(() => inputRef.current?.focus());
   }, []);
+
+  // —— Ctrl+A 智能选框(pane focused 时)——
+  // 选区锚点(最后点击处)落在消息流某个 <pre> 输出框内 → 只全选该框,配合 Ctrl+C 整块复制;
+  // 否则放行系统默认(全选整条消息流)。输入框聚焦时让浏览器原生全选 textarea 文本。
+  useEffect(() => {
+    if (!focused) return;
+    const handler = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey) || e.key.toLowerCase() !== "a" || e.altKey || e.shiftKey) return;
+      const active = document.activeElement;
+      if (active instanceof HTMLTextAreaElement || active instanceof HTMLInputElement) return;
+      if (selectEnclosingPre(scrollRef.current)) e.preventDefault();
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [focused]);
 
   // —— 双击 Esc 中断快捷键(对齐 claude code)——
   // pane focused 时监听 window keydown:slash 面板打开时单击 Esc 只关面板(由 textarea 处理,这里跳过);
@@ -1791,13 +1807,14 @@ export function ClaudePane(props: ClaudePaneProps) {
                 retrying 期间 status 被覆写 running 维持 busy,中断按钮可用;idle → 此条消失。 */}
             {(retrying || busy || compactRunning) && !hasPendingPlan && !hasPendingApproval && (
               <div
-                className={`mb-1.5 flex items-center gap-2 px-1 text-[11px] ${
+                className={`mb-1.5 flex items-center gap-2 px-1 ${
                   retrying
                     ? "text-[var(--mx-warning)]"
                     : thinkingNow || compactRunning
                       ? "text-[var(--mx-violet)]"
                       : "text-[var(--mx-accent)]"
                 }`}
+                style={{ fontSize: statusFontPx }}
               >
                 <ThinkingDots />
                 <span>
@@ -1924,6 +1941,20 @@ export function ClaudePane(props: ClaudePaneProps) {
                         if (highlightRef.current) highlightRef.current.scrollTop = e.currentTarget.scrollTop;
                       }}
                       onKeyDown={(e) => {
+                        // Alt+Enter 恒为换行(优先于 @/slash 面板选中与发送;
+                        // Windows Chromium textarea 对带 Alt 的 Enter 默认不插换行,故手动补)。
+                        if (e.key === "Enter" && e.altKey && !e.nativeEvent.isComposing) {
+                          e.preventDefault();
+                          const ta = e.currentTarget;
+                          const start = ta.selectionStart;
+                          const end = ta.selectionEnd;
+                          setInput(input.slice(0, start) + "\n" + input.slice(end));
+                          // 受控 value 更新后光标会被重置,rAF(渲染后)恢复到换行符之后。
+                          requestAnimationFrame(() => {
+                            ta.selectionStart = ta.selectionEnd = start + 1;
+                          });
+                          return;
+                        }
                         // ↑/↓ 浏览输入历史(类 shell 命令历史):slash 面板关闭 + 非 IME 组合输入时;
                         // 仅当光标在首行拦 ↑、末行拦 ↓(否则放行让光标在多行文本里正常上下移动)。
                         if (!slashOpen && !atOpen && !e.nativeEvent.isComposing && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
@@ -2002,7 +2033,7 @@ export function ClaudePane(props: ClaudePaneProps) {
                           cycleMode();
                           return;
                         }
-                        // 回车发送(无 Shift)、Shift+Enter 换行。IME 组合输入中不触发(防打断中文输入)。
+                        // 回车发送(无 Shift/Alt)、Shift+Enter 或 Alt+Enter 换行。IME 组合输入中不触发(防打断中文输入)。
                         // 发送守卫与 canSend 同源:claudeMissing/compactRunning/shellRunning 时拦 Enter
                         // (仅按钮 disabled 拦不住键盘;busy 不拦--handleSend 会先 interrupt 再发,
                         // 与 claude 对话路径语义一致;shellRunning 拦--! 命令与 claude 对话串行,
@@ -2014,7 +2045,9 @@ export function ClaudePane(props: ClaudePaneProps) {
                       }}
                       rows={2}
                       placeholder={t("claudepane.slashHint")}
-                      className="relative max-h-[160px] min-h-[36px] w-full resize-none bg-transparent p-0 font-mono caret-[var(--mx-text)] text-[var(--mx-text)] outline-none placeholder:text-[var(--mx-faint)]"
+                      /* field-sizing-content:随内容在 min-h~max-h 间自动长高,超高才内部滚动(滚轮仍可滚);
+                         滚动条隐藏而非美化:占宽会让 textarea 换行窄于 inset-0 高亮层,chip 背景与文字错行。 */
+                      className="relative max-h-[160px] min-h-[36px] w-full field-sizing-content resize-none bg-transparent p-0 font-mono caret-[var(--mx-text)] text-[var(--mx-text)] outline-none placeholder:text-[var(--mx-faint)] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
                       style={{ fontSize, lineHeight: "1.5" }}
                     />
                     </div>
@@ -2506,18 +2539,20 @@ const MessageRow = memo(function MessageRow({
     return (
       <div className="my-2 flex items-center gap-3 select-none">
         <div className="h-px flex-1" style={{ borderTop: "1px dashed rgba(148,163,184,0.32)", background: "transparent" }} />
-        <span className="flex shrink-0 items-center gap-1.5 text-[10px] text-[var(--mx-faint)]">
+        {/* 容器可收缩(min-w-0 shrink)+suffix anywhere 断行:后台任务 summary 是 claude 原文
+            (常含无空格长命令串),不可断会撑高整行 min-content,顶出消息流横向滚动条。 */}
+        <span className="flex min-w-0 shrink items-center gap-1.5 text-[10px] text-[var(--mx-faint)]">
           {stopped ? (
-            <svg width="10" height="10" viewBox="0 0 24 24" fill={tone} aria-hidden>
+            <svg width="10" height="10" viewBox="0 0 24 24" fill={tone} className="shrink-0" aria-hidden>
               <rect x="6" y="6" width="12" height="12" rx="2" />
             </svg>
           ) : (
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke={tone} strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke={tone} strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" className="shrink-0" aria-hidden>
               {ok ? <path d="M20 6L9 17l-5-5" /> : <path d="M18 6L6 18M6 6l12 12" />}
             </svg>
           )}
-          <span style={{ color: tone }}>{label}</span>
-          {suffix}
+          <span className="shrink-0" style={{ color: tone }}>{label}</span>
+          {suffix && <span className="min-w-0 [overflow-wrap:anywhere]">{suffix}</span>}
         </span>
         <div className="h-px flex-1" style={{ borderTop: "1px dashed rgba(148,163,184,0.32)", background: "transparent" }} />
       </div>
@@ -2617,14 +2652,25 @@ const MessageRow = memo(function MessageRow({
  * 展开行为:思考中(streaming)默认展开实时显示思考过程,本轮结束(streaming→false)自动收起
  * 保持对话紧凑。用户手动点过 summary 后,以用户操作为准不再自动收/展(避免和用户抢控制权)。
  * 每轮 assistant 是新挂载的消息,内部状态随消息生命周期,不跨轮残留。
+ *
+ * 展开态限高(长思考内部滚动,防几 k 字思考霸屏挤走消息流);流式中自动贴底——
+ * 实时跟随最新思考,上文收进滚动区,用户上翻回看即暂停贴底,滚回底部附近才恢复。
  */
 function ThinkingBlock({ text, streaming, t }: { text: string; streaming: boolean; t: (k: string) => string }) {
   // 内部 open 状态:仅在「用户尚未手动操作」时跟随 streaming(思考中开、结束关)。
   const [userToggled, setUserToggled] = useState(false);
   const [open, setOpen] = useState(streaming);
+  const bodyRef = useRef<HTMLDivElement>(null);
+  // 贴底标记:仅当滚动位置在底部附近(距底 <24px)时为 true,用户上翻后暂停自动贴底。
+  const stickToBottom = useRef(true);
   useEffect(() => {
     if (!userToggled) setOpen(streaming);
   }, [streaming, userToggled]);
+  // streaming 且展开时 text 增长 → 贴底(依赖含 open:details 展开后内容 div 才挂载)。
+  useEffect(() => {
+    const el = bodyRef.current;
+    if (streaming && el && stickToBottom.current) el.scrollTop = el.scrollHeight;
+  }, [text, streaming, open]);
   return (
     <details
       className="group"
@@ -2648,7 +2694,14 @@ function ThinkingBlock({ text, streaming, t }: { text: string; streaming: boolea
         {text && <span className="text-[var(--mx-faint)]">· {text.length} chars</span>}
       </summary>
       <div className="mt-1.5 pl-[18px]">
-        <div className="whitespace-pre-wrap break-words text-xs italic leading-relaxed text-[var(--mx-muted)]">
+        <div
+          ref={bodyRef}
+          onScroll={() => {
+            const el = bodyRef.current;
+            if (el) stickToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
+          }}
+          className="mx-scroll-pretty max-h-[min(40vh,320px)] overflow-y-auto whitespace-pre-wrap break-words text-xs italic leading-relaxed text-[var(--mx-muted)]"
+        >
           {text || "…"}
         </div>
       </div>
@@ -3436,7 +3489,7 @@ function DiffToolView({
   const badge = config.getBadge?.(block.input);
   const [open, setOpen] = useState(config.defaultOpen ?? true);
   const segments = useMemo(() => extractDiffSegments(block), [block]);
-  /** 文件绝对路径(点击 → openPath 系统默认程序打开,类 claude code 的文件超链接)。 */
+  /** 文件绝对路径(点击 → 资源管理器定位该文件,类 claude code 的文件超链接;编辑与否用户自决)。 */
   const filePath = useMemo(() => {
     const fp = (block.input as Record<string, unknown> | null)?.file_path;
     return typeof fp === "string" ? fp : "";
@@ -3465,8 +3518,8 @@ function DiffToolView({
         {value && (
           <span
             className={`min-w-0 flex-1 truncate text-left font-mono text-[var(--mx-text)] ${filePath ? "cursor-pointer hover:underline" : ""}`}
-            title={filePath ? `打开 ${filePath}` : value}
-            onClick={filePath ? (e) => { e.stopPropagation(); void openPath(filePath).catch(() => {}); } : undefined}
+            title={filePath ? `${t("claudepane.revealInFolder")} ${filePath}` : value}
+            onClick={filePath ? (e) => { e.stopPropagation(); void invoke("reveal_in_folder", { path: filePath }).catch(() => {}); } : undefined}
           >
             {value}
           </span>
