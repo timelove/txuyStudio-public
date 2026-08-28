@@ -65,7 +65,14 @@ type TabTerminal = {
   disposeScrollback: { dispose: () => void };
   /** DECSCUSR 拦截器 dispose(锁定光标形状为 bar)。null=注册失败兜底。 */
   disposeCursorLock: { dispose: () => void } | null;
+  /** buffer 切换(normal↔alternate)订阅取消:TUI 进出时按 buffer 类型 refit 切换 margin。 */
+  disposeBufferChange: { dispose: () => void };
 };
+
+/** 底部滚动留白行数:PTY 逻辑屏比视口少这些行,提示符/光标距视口底 N 行(可滚过)。
+ *  **当前置 0 = 停用**:真 PowerShell/Windows Terminal 即贴底,无此功能(用户决策 B,
+ *  见 PROGRESS 83);要启用改回 3 即可,alternate screen(TUI)豁免逻辑保留不受影响。 */
+const SCROLL_MARGIN_ROWS = 0;
 
 /**
  * fit + refresh + resize 三步统一重排,修「resize 后文字/光标错位」。
@@ -74,22 +81,43 @@ type TabTerminal = {
  * fit 后立即重算;若直接 transport.resize() 通知后端,后端(claude TUI)按新尺寸重绘、光标
  * 移到新坐标,而前端 canvas 还用旧度量变换坐标 → 文字渲染到光标显示位置的别处。
  *
- * 修法:① fit 重算 cols/rows → ② refresh(0, rows-1) 强制 xterm 重算渲染度量并整屏重绘,
+ * 修法:① 重算 cols/rows → ② refresh(0, rows-1) 强制 xterm 重算渲染度量并整屏重绘,
  * 让 canvas 坐标系与新 cols/rows 对齐 → ③ 再通知后端 resize。
+ *
+ * 行数不用 fitAddon.fit() 的取满值:proposeDimensions 后 rows 减 SCROLL_MARGIN_ROWS,
+ * terminal.resize 到缩水尺寸(viewport 物理高度不变,少掉的行在 buffer 尾部是空行)。
+ * PTY(ConPTY)按缩水后的逻辑屏重绘:提示符写在逻辑屏末行 = 距视口底 margin 行;其
+ * 重绘/滚动带 DECSTBM region(限逻辑屏范围),底部空行不被卷动,始终留白。TUI 程序
+ * (claude code/fresh 等)占满逻辑屏,底 margin 行空,可接受。
  *
  * 注意:IME 候选框跟随光标是另一个问题(xterm TUI 下 _syncTextArea 同步滞后),此处不修,
  * 见 [[ime-diagnostic]] 诊断。
  */
+/** fit 的 margin 版:propose 后 rows 扣 SCROLL_MARGIN_ROWS(见 refit 注释);容器过小/未布局
+ *  退回 fit 默认行为。创建 xterm 后首 fit 与后续 refit 共用,保证 spawn 尺寸即最终缩水尺寸。
+ *  **alternate screen(TUI 全屏程序)豁免**:TUI(claude code/fresh/yazi 等)切进 alternate
+ *  buffer 自绘整屏,逻辑屏缩水会让它们错位,故按满行数;裸 shell(normal buffer)才留 margin。
+ *  进入/退出 TUI 由 onBufferChange 订阅触发 refit,PTY 尺寸随之切换。 */
+function fitWithMargin(terminal: Terminal, fitAddon: FitAddon) {
+  try {
+    const dims = fitAddon.proposeDimensions();
+    if (dims && dims.cols > 0 && dims.rows > SCROLL_MARGIN_ROWS) {
+      const alt = terminal.buffer.active.type === "alternate";
+      terminal.resize(dims.cols, alt ? dims.rows : dims.rows - SCROLL_MARGIN_ROWS);
+    } else {
+      fitAddon.fit();
+    }
+  } catch {
+    /* 容器尺寸为 0 时可能抛,忽略 */
+  }
+}
+
 function refit(
   terminal: Terminal,
   fitAddon: FitAddon,
   resize: (cols: number, rows: number) => void,
 ) {
-  try {
-    fitAddon.fit();
-  } catch {
-    /* fit 在尺寸为 0 时可能抛,忽略 */
-  }
+  fitWithMargin(terminal, fitAddon);
   terminal.refresh(0, terminal.rows - 1);
   resize(terminal.cols, terminal.rows);
 }
@@ -219,7 +247,7 @@ export function TerminalPane({
     } catch {
       /* parser API 兼容兜底 */
     }
-    fitAddon.fit();
+    fitWithMargin(terminal, fitAddon);
 
     // === IME 候选框跟随光标修复(DOM 层硬修) ===
     // 根因(诊断确认):xterm `_syncTextArea` 在 scrollback baseY>0(claude TUI 对话滚动后产生历史行,
@@ -292,6 +320,33 @@ export function TerminalPane({
       container.classList.toggle("mx-no-scrollback", terminal.buffer.active.length <= terminal.rows);
     });
 
+    // TUI 进出(alternate screen 切换)时按 buffer 类型 refit:进 TUI 满行数、退回裸 shell
+    // 恢复 margin。resize 通知 PTY,ConPTY 按新逻辑屏重绘(与 WT 中途 resize 同路径)。
+    // 该 xterm 版本无 onBufferChange,用 CSI handler 拦 DEC private mode set/reset(?1049/
+    // ?1047/?47);返回 false 不吞,xterm 照常切 buffer,handler 里 defer 一拍等它切完再量类型。
+    const refitForAltScreen = () => {
+      window.setTimeout(() => {
+        if (container.offsetParent === null) return;
+        refit(terminal, fitAddon, (cols, rows) => void transport.resize(tabId, cols, rows));
+      }, 0);
+    };
+    const isAltMode = (params: (number | number[])[]) =>
+      params.some((p) => typeof p === "number" && (p === 47 || p === 1047 || p === 1049));
+    const disposeAltSet = terminal.parser.registerCsiHandler({ prefix: "?", final: "h" }, (params) => {
+      if (isAltMode(params)) refitForAltScreen();
+      return false;
+    });
+    const disposeAltReset = terminal.parser.registerCsiHandler({ prefix: "?", final: "l" }, (params) => {
+      if (isAltMode(params)) refitForAltScreen();
+      return false;
+    });
+    const disposeBufferChange = {
+      dispose: () => {
+        disposeAltSet.dispose();
+        disposeAltReset.dispose();
+      },
+    };
+
     terminalsRef.current.set(tabId, {
       terminal,
       fitAddon,
@@ -303,6 +358,7 @@ export function TerminalPane({
       disposeImeOnRender,
       disposeScrollback,
       disposeCursorLock,
+      disposeBufferChange,
     });
 
     // 启动后端会话(先 listen 后 spawn 由 transport 内部保证)。
@@ -322,6 +378,7 @@ export function TerminalPane({
     t.disposeCursorMove.dispose();
     t.disposeImeOnRender.dispose();
     t.disposeScrollback.dispose();
+    t.disposeBufferChange.dispose();
     t.disposeCursorLock?.dispose();
     t.observer.disconnect();
     t.terminal.dispose();

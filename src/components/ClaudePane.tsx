@@ -1807,13 +1807,14 @@ export function ClaudePane(props: ClaudePaneProps) {
                 retrying 期间 status 被覆写 running 维持 busy,中断按钮可用;idle → 此条消失。 */}
             {(retrying || busy || compactRunning) && !hasPendingPlan && !hasPendingApproval && (
               <div
-                className={`mb-1.5 flex items-center gap-2 px-1 text-[11px] ${
+                className={`mb-1.5 flex items-center gap-2 px-1 ${
                   retrying
                     ? "text-[var(--mx-warning)]"
                     : thinkingNow || compactRunning
                       ? "text-[var(--mx-violet)]"
                       : "text-[var(--mx-accent)]"
                 }`}
+                style={{ fontSize: statusFontPx }}
               >
                 <ThinkingDots />
                 <span>

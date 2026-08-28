@@ -123,7 +123,11 @@ export function TopProjectBar({
       {/* 中部:单项目模式 → 精简栏(项目名 + dock back);否则 → 项目 tabs。 */}
       <div data-tauri-drag-region className="min-w-0">
         {singleProjectMode ? (
-          <div className="flex min-w-0 items-center gap-2">
+          /* 内层 flex 满铺中部(flex stretch),必须自带 drag-region:tauri drag.js 的 bare
+             attr 只认「点击的直接目标」(el === composedPath[0]),这层无 attr 时点击空白
+             target 落在它身上,向上到带 attr 的父级已不满足 path[0] → 独立窗口拖不动。
+             主窗口无此层(ProjectTabs 容器自带 attr),行为对齐。 */
+          <div data-tauri-drag-region className="flex min-w-0 items-center gap-2">
             <span className="mx-chip flex h-[length:var(--mx-tab-h)] min-w-0 items-center gap-[6px] bg-[var(--mx-selected-bg)] px-[10px] text-xs text-white">
               {/* 项目稳定色 dot(与主窗口顶栏 chip/下拉同色源,跨窗口同项目同色)。 */}
               <span

@@ -1225,9 +1225,10 @@ export function CodexPane(props: CodexPaneProps) {
                 busy 全程可见 -- 与 ClaudePane 对等,长命令运行中用户也能察觉会话仍在进行。 */}
             {busy && (
               <div
-                className={`mb-1.5 flex items-center gap-2 px-1 text-[11px] ${
+                className={`mb-1.5 flex items-center gap-2 px-1 ${
                   thinkingNow ? "text-[var(--mx-violet)]" : "text-[var(--mx-accent)]"
                 }`}
+                style={{ fontSize: statusFontPx }}
               >
                 <ThinkingDots />
                 <span>
