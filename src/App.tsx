@@ -310,6 +310,7 @@ export default function App() {
           onDetachProject={mode.isMain ? handleDetach : undefined}
           detachedProjectIds={mode.isMain ? detachedProjectIds : new Set()}
           singleProjectMode={!mode.isMain}
+          windowLabel={mode.label}
           onDockBack={mode.isMain ? undefined : handleDockBack}
           recentProjects={mode.isMain ? recentProjects : []}
           onOpenRecent={mode.isMain ? handleOpenRecent : undefined}

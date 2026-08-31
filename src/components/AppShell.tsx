@@ -32,8 +32,10 @@ import {
   MAX_PINNED_PROJECTS,
   chunkByGroups,
   loadPinnedLayout,
+  loadPinnedProjectIds,
   resolveGroups,
   savePinnedLayout,
+  savePinnedProjectIds,
 } from "../domain/pinnedLayout";
 import { isTuiTool, TUI_TOOLS, toolPromptSpec, YAZI_DEPS, type PromptSpec } from "../domain/toolInstall";
 import type { TerminalTransport } from "../domain/terminalTransport";
@@ -62,6 +64,8 @@ type AppShellProps = {
   detachedProjectIds?: Set<ProjectId>;
   /** 独立项目窗口模式:顶栏降级为精简态(只显项目名 + dock back),不渲染项目切换。 */
   singleProjectMode?: boolean;
+  /** 本窗口 label(main / workspace-N):钉住集合 localStorage 分桶键。缺省 "main"。 */
+  windowLabel?: string;
   /** 独立窗口「回到主窗口」回调(关掉自己,后端 emit 事件让主窗口恢复显示)。 */
   onDockBack?: () => void;
   /** 最近项目历史(+ 菜单「历史项目」数据源;已打开的项前端过滤不显示)。 */
@@ -100,6 +104,7 @@ export function AppShell({
   onDetachProject,
   detachedProjectIds,
   singleProjectMode,
+  windowLabel,
   onDockBack,
   recentProjects,
   onOpenRecent,
@@ -171,8 +176,21 @@ export function AppShell({
     for (const p of projects) init[p.id] = p.workspace.paneTree;
     return init;
   });
-  // 钉住到并排视图的项目(前端 view 态,本轮不持久化)。
-  const [pinnedProjectIds, setPinnedProjectIds] = useState<string[]>([]);
+  // 钉住到并排视图的项目:localStorage 按窗口轻持久化(重启恢复钉住并排;独立项目窗口
+  // singleProjectMode 无钉住 UI,不参与——否则同 origin localStorage 会把主窗口钉住集合
+  // 串进独立窗口,hydrate 单项目过滤后写回空集反向清掉主窗口的钉住)。写回时过滤已
+  // close 的项目 ID(顺带清洗残留),读取截断上限。与 pinnedLayout 同域,见 pinnedLayout.ts。
+  const pinnedStorageKey = singleProjectMode ? null : `mx.pinnedProjects.${windowLabel ?? "main"}`;
+  const [pinnedProjectIds, setPinnedProjectIds] = useState<string[]>(() =>
+    pinnedStorageKey ? loadPinnedProjectIds(pinnedStorageKey) : [],
+  );
+  useEffect(() => {
+    if (!pinnedStorageKey) return;
+    savePinnedProjectIds(
+      pinnedStorageKey,
+      pinnedProjectIds.filter((id) => projects.some((p) => p.id === id)).slice(0, MAX_PINNED_PROJECTS),
+    );
+  }, [pinnedStorageKey, pinnedProjectIds, projects]);
   // 并排布局偏好(流向+分组):localStorage 轻持久化(与 bgSetting 同模式,纯视觉不走后端)。
   // 不进 SettingsProvider:唯一消费者是 AppShell。groups 存用户上次点选形态,渲染期归一。
   const [pinnedLayout, setPinnedLayout] = useState<PinnedLayout>(loadPinnedLayout);

@@ -6,6 +6,7 @@ import { projectAccentColor } from "../domain/projects";
 import type { ClaudeStatusEntry } from "../domain/claudeStatusRegistry";
 import type { CodexStatusEntry } from "../domain/codexStatusRegistry";
 import type { ClaudeSessionKind } from "../domain/claudeStream";
+import { autoCheckUpdate, getUpdaterSnapshot, subscribeUpdater, type UpdaterSnapshot } from "../domain/appUpdater";
 import { SettingsModal } from "./SettingsModal";
 import { Button } from "./ui/Button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/Tooltip";
@@ -54,6 +55,21 @@ export function StatusBar({ focusedProject, gitBranch, claudeStatuses, codexStat
   const [tipHidden, setTipHidden] = useState(false);
   /** 设置面板开关(齿轮点击触发)。 */
   const [settingsOpen, setSettingsOpen] = useState(false);
+  /** 设置面板初始 tab:「新版本可用」chip 点击 → about(更新器在那);齿轮打开不指定。 */
+  const [settingsTab, setSettingsTab] = useState<"general" | "shortcuts" | "about">("general");
+  /** 全局更新快照(启动自动检查驱动;见 domain/appUpdater)。 */
+  const [updaterSnap, setUpdaterSnap] = useState<UpdaterSnapshot>(() => getUpdaterSnapshot());
+
+  // 启动自动检查更新:延迟 8s(避开首屏 hydrate/PTY 启动高峰),24h 节流在 store 内。
+  // 订阅快照供「新版本可用」chip;检查失败静默(error 态不显示任何 UI)。
+  useEffect(() => {
+    const timer = window.setTimeout(() => void autoCheckUpdate().catch(() => {}), 8000);
+    const unsub = subscribeUpdater(setUpdaterSnap);
+    return () => {
+      window.clearTimeout(timer);
+      unsub();
+    };
+  }, []);
 
   // 内存轮询。invoke 失败(非 Tauri 环境)→ 置 null,该区隐藏。
   useEffect(() => {
@@ -152,6 +168,23 @@ export function StatusBar({ focusedProject, gitBranch, claudeStatuses, codexStat
         </TooltipTrigger>
         <TooltipContent>{t("statusbar.settings")}</TooltipContent>
         </Tooltip>
+        {/* 新版本可用 chip:启动自动检查发现更新时出现,点击直达设置→关于(更新器)。
+            绿点呼吸引人注意;安装完成后 store 转 upToDate,chip 自动消失。 */}
+        {updaterSnap.phase === "available" && (
+          <button
+            type="button"
+            onClick={() => {
+              setSettingsTab("about");
+              setSettingsOpen(true);
+            }}
+            className="flex shrink-0 cursor-pointer items-center gap-1.5 rounded-[var(--mx-radius-md)] px-1.5 py-0.5 text-[11px] text-[#86efac] transition-colors hover:bg-[var(--mx-hover-bg)]"
+            title={t("statusbar.updateAvailable")}
+          >
+            <span aria-hidden className="h-1.5 w-1.5 animate-pulse rounded-full bg-[#86efac]" />
+            <span className="tabular-nums">{t("statusbar.updateAvailable")}</span>
+            <span className="font-[600] tabular-nums">v{updaterSnap.update.version}</span>
+          </button>
+        )}
         {focusedProject ? (
           <>
             <Tooltip>
@@ -259,7 +292,7 @@ export function StatusBar({ focusedProject, gitBranch, claudeStatuses, codexStat
         </Tooltip>
       </div>
     </footer>
-    <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
+    <SettingsModal open={settingsOpen} initialTab={settingsTab} onClose={() => setSettingsOpen(false)} />
     </>
   );
 }
