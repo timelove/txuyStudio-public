@@ -21,9 +21,7 @@ $sigFile = "${setup}.sig"
 
 if (-not (Test-Path $setup)) { Write-Error "未找到安装包: $setup"; exit 1 }
 if (-not (Test-Path $sigFile)) {
-  Write-Error @`
-    "未找到签名文件: $sigFile
-    请用签名环境变量重新打包(TAURI_SIGNING_PRIVATE_KEY / TAURI_SIGNING_PRIVATE_KEY_PASSWORD)。"
+  Write-Error "未找到签名文件: $sigFile 请用签名环境变量重新打包(TAURI_SIGNING_PRIVATE_KEY / TAURI_SIGNING_PRIVATE_KEY_PASSWORD)。"
   exit 1
 }
 if (-not (Test-Path $NotesFile)) { Write-Error "未找到更新日志: $NotesFile"; exit 1 }
