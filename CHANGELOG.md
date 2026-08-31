@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.7] - 2026-08-28
+
+In-app auto-update + pinned-project persistence.
+
+### Added
+
+- **In-app auto-update** — checks GitHub Releases on every launch (8s after startup); when a newer version exists, a "Update available vX.Y.Z" chip appears in the bottom status bar and opens Settings → About with one-click download & install (progress bar, signed manifest verification, restart to apply).
+- **Updater in Settings → About** — manual "Check for updates", release notes preview, download progress, and "Restart app" after install; real error messages are shown inline.
+- **Pinned projects persist** — pinned side-by-side projects are restored on the next launch (layout shape included). Storage is bucketed per window so workspace windows don't interfere with the main window.
+
+
 ## [0.1.6] - 2026-08-28
 
 Input / terminal / session polish release.
@@ -52,6 +63,7 @@ First public release (MVP).
 - **AI CLI session browser** — scan and resume `claude` / `codex` sessions.
 - **i18n** — English / 中文.
 
-[Unreleased]: https://github.com/timelove/txuyStudio-public/compare/v0.1.6...HEAD
+[Unreleased]: https://github.com/timelove/txuyStudio-public/compare/v0.1.7...HEAD
+[0.1.7]: https://github.com/timelove/txuyStudio-public/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/timelove/txuyStudio-public/compare/v0.1.0...v0.1.6
 [0.1.0]: https://github.com/timelove/txuyStudio-public/releases/tag/v0.1.0
