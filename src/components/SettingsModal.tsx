@@ -1,5 +1,9 @@
 import { useTranslation } from "react-i18next";
+import { useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { check, type Update } from "@tauri-apps/plugin-updater";
+import { relaunch } from "@tauri-apps/plugin-process";
+import { getUpdaterSnapshot, publishUpdater, type UpdaterSnapshot } from "../domain/appUpdater";
 import { SANDBOX_MODES } from "../domain/codexSandbox";
 import { SHORTCUT_GROUPS } from "../domain/shortcuts";
 import { useI18n } from "../i18n/I18nProvider";
@@ -83,10 +87,141 @@ import { ToggleGroup, ToggleGroupItem } from "./ui/ToggleGroup";
 /** 公开仓库地址(私有 origin 不暴露,此处指向公开 mirror)。 */
 const GITHUB_URL = "https://github.com/timelove/txuyStudio-public";
 
+/**
+ * 应用更新器(设置 → 关于 tab)。基于 tauri-plugin-updater:check() 拉 endpoints 的
+ * latest.json(公开仓 latest Release 固定资产),与本地版本比对;有更新 → 下载 + 验签
+ * (构建时 TAURI_SIGNING_PRIVATE_KEY 签名,pubkey 嵌 tauri.conf.json)→ install →
+ * relaunch。状态机:idle(检查)→ checking → upToDate / available(显示版本+notes+「下载并安装」)
+ * → downloading(进度条,downloadAndInstall 带 contentLength/total)→ installing → ready(「重启生效」)
+ * / error(真实错误信息直接展示,便于定位网络/验签问题)。
+ */
+function AppUpdater({ t }: { t: (k: string, o?: Record<string, unknown>) => string }) {
+  type UpdState =
+    | { phase: "idle" }
+    | { phase: "checking" }
+    | { phase: "upToDate" }
+    | { phase: "available"; update: Update }
+    | { phase: "downloading"; received: number; total: number | null }
+    | { phase: "installing" }
+    | { phase: "ready" }
+    | { phase: "error"; message: string };
+  // 初始态联动全局 store:启动自动检查已发现新版本时,打开面板直接显示 available
+  //(Update 实例可复用——downloadAndInstall 是它的方法),免二次请求。
+  const fromStore = (s: UpdaterSnapshot): UpdState =>
+    s.phase === "available" ? { phase: "available", update: s.update } : { phase: "idle" };
+  const [state, setState] = useState<UpdState>(() => fromStore(getUpdaterSnapshot()));
+
+  const runCheck = async () => {
+    setState({ phase: "checking" });
+    try {
+      const update = await check();
+      console.info("[updater] manual check:", update ? `available v${update.version}` : "up-to-date(null)");
+      // 结果同步全局 store(状态栏 chip 出现/消失)。
+      publishUpdater(update ? { phase: "available", update } : { phase: "upToDate" });
+      setState(update ? { phase: "available", update } : { phase: "upToDate" });
+    } catch (err) {
+      setState({ phase: "error", message: err instanceof Error ? err.message : String(err) });
+    }
+  };
+
+  const runInstall = async (update: Update) => {
+    try {
+      setState({ phase: "downloading", received: 0, total: null });
+      // downloaded/contentLength 单位字节(可能无 content-length → total null,显示不定进度)。
+      await update.downloadAndInstall((event) => {
+        if (event.event === "Started" && event.data.contentLength) {
+          setState({ phase: "downloading", received: 0, total: event.data.contentLength });
+        } else if (event.event === "Progress") {
+          setState((s) =>
+            s.phase === "downloading"
+              ? { phase: "downloading", received: s.received + event.data.chunkLength, total: s.total }
+              : s,
+          );
+        } else if (event.event === "Finished") {
+          setState({ phase: "installing" });
+        }
+      });
+      // 安装完成回写全局:状态栏「新版本可用」chip 消失,等用户重启。
+      publishUpdater({ phase: "upToDate" });
+      setState({ phase: "ready" });
+    } catch (err) {
+      setState({ phase: "error", message: err instanceof Error ? err.message : String(err) });
+    }
+  };
+
+  const fmtBytes = (n: number) =>
+    n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`;
+
+  return (
+    <section className="mx-chip mb-3 bg-[var(--mx-surface-soft)] px-3 py-2.5">
+      <div className="flex items-center gap-2">
+        <span className="text-[11px] font-[600] text-[var(--mx-text)]">{t("settings.updater.title")}</span>
+        {/* 当前阶段轻提示 */}
+        {state.phase === "checking" && <span className="text-[10px] text-[var(--mx-faint)]">{t("settings.updater.checking")}</span>}
+        {state.phase === "upToDate" && <span className="text-[10px] text-[#86efac]">{t("settings.updater.upToDate")}</span>}
+        {state.phase === "ready" && <span className="text-[10px] text-[#86efac]">{t("settings.updater.installed")}</span>}
+        {state.phase === "error" && (
+          <span className="min-w-0 flex-1 truncate text-[10px] text-[var(--mx-danger)]" title={state.message}>
+            {t("settings.updater.error")} · {state.message}
+          </span>
+        )}
+        <span className="ml-auto shrink-0">
+          {(state.phase === "idle" || state.phase === "upToDate" || state.phase === "error") && (
+            <Button size="sm" variant="outline" onClick={() => void runCheck()}>
+              {t("settings.updater.check")}
+            </Button>
+          )}
+          {state.phase === "available" && (
+            <Button size="sm" onClick={() => void runInstall(state.update)}>
+              {t("settings.updater.install")}
+            </Button>
+          )}
+          {state.phase === "downloading" && (
+            <span className="text-[10px] tabular-nums text-[var(--mx-faint)]">
+              {t("settings.updater.downloading")}
+              {state.total ? ` ${fmtBytes(state.received)} / ${fmtBytes(state.total)}` : ` ${fmtBytes(state.received)}`}
+            </span>
+          )}
+          {state.phase === "installing" && <span className="text-[10px] text-[var(--mx-faint)]">{t("settings.updater.installing")}</span>}
+          {state.phase === "ready" && (
+            <Button size="sm" onClick={() => void relaunch().catch(() => {})}>{t("settings.updater.relaunch")}</Button>
+          )}
+        </span>
+      </div>
+
+      {/* 新版本信息:版本号 + 更新日志(notes 是发版时写入 latest.json 的 markdown 原文,按行展示) */}
+      {state.phase === "available" && (
+        <div className="mt-2 border-t border-[var(--mx-border)] pt-2">
+          <div className="text-[11px] font-[600] text-[var(--mx-accent)]">
+            {__APP_VERSION__} → {state.update.version}
+          </div>
+          {state.update.body && (
+            <pre className="mx-scroll-pretty mt-1 max-h-[140px] overflow-y-auto whitespace-pre-wrap break-words text-[10px] leading-relaxed text-[var(--mx-muted)]">
+              {state.update.body}
+            </pre>
+          )}
+        </div>
+      )}
+      {/* 下载进度条:不定进度(total null)时来回动画由 range 宽度 0 隐藏,仅文字计数。 */}
+      {state.phase === "downloading" && state.total && (
+        <div className="mt-2 h-1 overflow-hidden rounded-full bg-[var(--mx-border-strong)]">
+          <div
+            className="h-full rounded-full bg-[var(--mx-accent)] transition-[width] duration-150"
+            style={{ width: `${Math.min(100, (state.received / state.total) * 100)}%` }}
+          />
+        </div>
+      )}
+    </section>
+  );
+}
+
 type SettingsModalProps = {
   /** 是否显示;false 时不渲染。 */
   open: boolean;
   onClose: () => void;
+  /** 打开时定位到的 tab(状态栏「新版本可用」点击 → about);缺省 general。Dialog 关闭即
+   *  卸载内容,defaultValue 每次打开取新值,无需受控切换。 */
+  initialTab?: "general" | "shortcuts" | "about";
 };
 
 /**
@@ -100,7 +235,7 @@ type SettingsModalProps = {
  * - **快捷键**:快捷键分组列表。
  * - **关于**:产品描述 + GitHub 仓库链接 + 版本/协议/技术栈。
  */
-export function SettingsModal({ open, onClose }: SettingsModalProps) {
+export function SettingsModal({ open, onClose, initialTab }: SettingsModalProps) {
   const { t } = useTranslation();
   const { locale, changeLanguage } = useI18n();
   const { fontSize, changeFontSize, codexSandbox, changeCodexSandbox, bgSetting, changeBgSetting } = useSettings();
@@ -126,7 +261,7 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
           </Button>
         </div>
 
-        <Tabs defaultValue="general" className="flex min-h-0 flex-1 flex-col">
+        <Tabs defaultValue={initialTab ?? "general"} className="flex min-h-0 flex-1 flex-col">
           {/* tab 条(固定):通用 / 快捷键 / 关于。active 走 cyan 下划线(Radix data-state=active)。 */}
           <TabsList className="mx-4 flex shrink-0 gap-4 border-b border-[var(--mx-border)]">
             <TabsTrigger
@@ -356,6 +491,9 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
               <p className="mb-3 text-[12px] leading-relaxed text-[var(--mx-text)]">
                 {t("about.description")}
               </p>
+
+              {/* 应用更新:检查/下载/安装/重启 + 新版本更新日志(见 AppUpdater 注释) */}
+              <AppUpdater t={t} />
 
               {/* GitHub 仓库链接:外部地址,target=_blank 由 Tauri 转给系统浏览器(无需 opener 依赖)。 */}
               <a

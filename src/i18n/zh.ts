@@ -172,6 +172,18 @@ const zh = {
       dim: "暗化",
       hint: "开启后前景面板半透明,透出虚化背景图",
     },
+    updater: {
+      title: "应用更新",
+      check: "检查更新",
+      checking: "正在检查…",
+      upToDate: "已是最新版本",
+      install: "下载并安装",
+      downloading: "下载中",
+      installing: "正在安装…",
+      installed: "安装完成",
+      relaunch: "重启应用",
+      error: "检查失败",
+    },
   },
   about: {
     description: "面向 Windows 开发者的 AI CLI 终端工作台。并行管理 claude、codex、常规 shell、测试命令与项目任务。",
@@ -180,6 +192,7 @@ const zh = {
   },
   statusbar: {
     settings: "设置",
+    updateAvailable: "新版本可用",
     focusedProject: "聚焦项目",
     gitBranch: "git 分支:{{branch}}",
     memUsage: "内存占用 {{percent}}%",

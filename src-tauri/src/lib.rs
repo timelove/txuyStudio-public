@@ -184,6 +184,10 @@ pub fn run() {
         // 详见 `build_log_plugin`：目录不可用时降级为 stdout，不阻断启动。
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        // 自动更新:检查 GitHub Releases 的 latest.json(TAURI_SIGNING_* 签名验签);
+        // 前端 SettingsModal 消费(检查/下载/安装/重启),process 插件提供 relaunch。
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         // 全局窗口事件:独立项目窗口(`project-` 前缀)被关闭时
         // (用户叉窗 / dock-back 命令 / app 退出),emit `project-window-closed`,
         // 主窗口据此清除 detached 标记、恢复项目显示。统一在 Builder 挂载,

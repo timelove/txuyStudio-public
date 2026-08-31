@@ -1,8 +1,8 @@
 /**
  * 钉住区并排布局的领域模型:流向(横/纵) + 行分组。
  *
- * 布局偏好 `{ flow, groups }` 走 localStorage 轻持久化(与 bgSetting 同模式,纯视觉不走后端
- * state.json);钉住集合本身(pinnedProjectIds)仍是会话内 view 态,重启即空。
+ * 布局偏好 `{ flow, groups }` 与钉住项目集合都走 localStorage 轻持久化(与 bgSetting 同
+ * 模式,纯视觉不走后端 state.json)——重启恢复「钉住 N 个项目并排打开」。
  *
  * groups 存「用户上次显式点选的形态」而非当前渲染形态:与可见项目数 n 失配时由
  * resolveGroups 在渲染期归一,存储不覆写——n 暂变(取消钉住)再恢复时,原形态自动找回。
@@ -50,6 +50,33 @@ export function loadPinnedLayout(): PinnedLayout {
 export function savePinnedLayout(layout: PinnedLayout): void {
   try {
     localStorage.setItem(PINNED_LAYOUT_KEY, JSON.stringify(layout));
+  } catch {
+    // 忽略:持久化是锦上添花,不值得打断交互。
+  }
+}
+
+/**
+ * 钉住项目集合持久化(按窗口隔离):重启恢复「钉住 N 个项目并排打开」。
+ * key 按窗口 label 分桶(main / workspace-N;独立项目窗口无钉住 UI,不参与)——
+ * localStorage 同 origin 全窗口共享,不隔离会把主窗口的钉住集合串进工作台窗口
+ * (hydrate 过滤后写回空集,反向清掉主窗口的钉住)。
+ * 损坏回退空数组;读取截断 MAX(存入侧已过滤仍存在的项目,残留 close 掉的 ID 无害)。
+ */
+export function loadPinnedProjectIds(storageKey: string): string[] {
+  try {
+    const raw = localStorage.getItem(storageKey);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed) || !parsed.every((id) => typeof id === "string")) return [];
+    return parsed.slice(0, MAX_PINNED_PROJECTS);
+  } catch {
+    return [];
+  }
+}
+
+export function savePinnedProjectIds(storageKey: string, ids: string[]): void {
+  try {
+    localStorage.setItem(storageKey, JSON.stringify(ids));
   } catch {
     // 忽略:持久化是锦上添花,不值得打断交互。
   }

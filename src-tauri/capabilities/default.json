@@ -19,6 +19,8 @@
     "core:window:allow-show",
     "opener:default",
     "dialog:default",
+    "updater:default",
+    "process:allow-restart",
     "core:path:default",
     "core:path:allow-resolve-directory"
   ]

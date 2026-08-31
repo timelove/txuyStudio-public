@@ -172,6 +172,18 @@ const en = {
       dim: "Dim",
       hint: "Panels become translucent glass over the blurred background",
     },
+    updater: {
+      title: "App update",
+      check: "Check for updates",
+      checking: "Checking…",
+      upToDate: "Up to date",
+      install: "Download & install",
+      downloading: "Downloading",
+      installing: "Installing…",
+      installed: "Installed",
+      relaunch: "Restart app",
+      error: "Check failed",
+    },
   },
   about: {
     description: "An AI CLI terminal workspace for Windows developers. Run claude, codex, regular shells, test commands and project tasks in parallel.",
@@ -180,6 +192,7 @@ const en = {
   },
   statusbar: {
     settings: "Settings",
+    updateAvailable: "Update available",
     focusedProject: "Focused project",
     gitBranch: "git branch: {{branch}}",
     memUsage: "Memory {{percent}}%",
