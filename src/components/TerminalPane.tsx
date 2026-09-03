@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { FitAddon } from "@xterm/addon-fit";
+import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal } from "@xterm/xterm";
 import type { ShellKind, SplitDirection } from "../domain/paneTree";
 import type { WorkspaceSession } from "../domain/sessions";
@@ -69,10 +70,15 @@ type TabTerminal = {
   disposeBufferChange: { dispose: () => void };
 };
 
-/** 底部滚动留白行数:PTY 逻辑屏比视口少这些行,提示符/光标距视口底 N 行(可滚过)。
- *  **当前置 0 = 停用**:真 PowerShell/Windows Terminal 即贴底,无此功能(用户决策 B,
- *  见 PROGRESS 83);要启用改回 3 即可,alternate screen(TUI)豁免逻辑保留不受影响。 */
-const SCROLL_MARGIN_ROWS = 0;
+/** 底部滚动留白:PTY 逻辑屏比视口少固定 24px 对应的行数(ceil,至少 1 行)——
+ *  提示符/光标恒距视口底 24px,下方是 scrollback 里可滚过的空行,输入/阅读不贴底。
+ *  (曾按「与真 PowerShell/WT 一致贴底」停用,见 PROGRESS 83;用户决策恢复启用。)
+ *  alternate screen(TUI)豁免逻辑不受影响,见 fitWithMargin。 */
+function scrollMarginRows(fontPx: number): number {
+  // 行高 ≈ fontSize × lineHeight 1.1;ceil 保证 ≥24px,不足一行按 1 行。
+  const pxPerRow = Math.max(1, fontPx * 1.1);
+  return Math.max(1, Math.ceil(24 / pxPerRow));
+}
 
 /**
  * fit + refresh + resize 三步统一重排,修「resize 后文字/光标错位」。
@@ -84,7 +90,7 @@ const SCROLL_MARGIN_ROWS = 0;
  * 修法:① 重算 cols/rows → ② refresh(0, rows-1) 强制 xterm 重算渲染度量并整屏重绘,
  * 让 canvas 坐标系与新 cols/rows 对齐 → ③ 再通知后端 resize。
  *
- * 行数不用 fitAddon.fit() 的取满值:proposeDimensions 后 rows 减 SCROLL_MARGIN_ROWS,
+ * 行数不用 fitAddon.fit() 的取满值:proposeDimensions 后 rows 扣 scrollMarginRows(24px),
  * terminal.resize 到缩水尺寸(viewport 物理高度不变,少掉的行在 buffer 尾部是空行)。
  * PTY(ConPTY)按缩水后的逻辑屏重绘:提示符写在逻辑屏末行 = 距视口底 margin 行;其
  * 重绘/滚动带 DECSTBM region(限逻辑屏范围),底部空行不被卷动,始终留白。TUI 程序
@@ -93,17 +99,19 @@ const SCROLL_MARGIN_ROWS = 0;
  * 注意:IME 候选框跟随光标是另一个问题(xterm TUI 下 _syncTextArea 同步滞后),此处不修,
  * 见 [[ime-diagnostic]] 诊断。
  */
-/** fit 的 margin 版:propose 后 rows 扣 SCROLL_MARGIN_ROWS(见 refit 注释);容器过小/未布局
- *  退回 fit 默认行为。创建 xterm 后首 fit 与后续 refit 共用,保证 spawn 尺寸即最终缩水尺寸。
- *  **alternate screen(TUI 全屏程序)豁免**:TUI(claude code/fresh/yazi 等)切进 alternate
- *  buffer 自绘整屏,逻辑屏缩水会让它们错位,故按满行数;裸 shell(normal buffer)才留 margin。
- *  进入/退出 TUI 由 onBufferChange 订阅触发 refit,PTY 尺寸随之切换。 */
-function fitWithMargin(terminal: Terminal, fitAddon: FitAddon) {
+/** fit 的 margin 版:propose 后 rows 扣 24px 留白(见 scrollMarginRows);容器过小(rows<2,
+ *  扣完可能为 0)退回 fit 默认行为。fontPx 供行高换算(全局字号,调用点传入)。创建 xterm
+ * 后首 fit 与后续 refit 共用,保证 spawn 尺寸即最终缩水尺寸。**alternate screen(TUI 全屏
+ * 程序)豁免**:TUI(claude code/fresh/yazi 等)切进 alternate buffer 自绘整屏,逻辑屏缩水会
+ * 让它们错位,故按满行数;裸 shell(normal buffer)才留 margin。进入/退出 TUI 由 DECSET
+ * 拦截触发 refit,PTY 尺寸随之切换。 */
+function fitWithMargin(terminal: Terminal, fitAddon: FitAddon, fontPx: number) {
   try {
     const dims = fitAddon.proposeDimensions();
-    if (dims && dims.cols > 0 && dims.rows > SCROLL_MARGIN_ROWS) {
+    if (dims && dims.cols > 0 && dims.rows >= 2) {
       const alt = terminal.buffer.active.type === "alternate";
-      terminal.resize(dims.cols, alt ? dims.rows : dims.rows - SCROLL_MARGIN_ROWS);
+      const targetRows = alt ? dims.rows : Math.max(1, dims.rows - scrollMarginRows(fontPx));
+      terminal.resize(dims.cols, targetRows);
     } else {
       fitAddon.fit();
     }
@@ -115,9 +123,10 @@ function fitWithMargin(terminal: Terminal, fitAddon: FitAddon) {
 function refit(
   terminal: Terminal,
   fitAddon: FitAddon,
+  fontPx: number,
   resize: (cols: number, rows: number) => void,
 ) {
-  fitWithMargin(terminal, fitAddon);
+  fitWithMargin(terminal, fitAddon, fontPx);
   terminal.refresh(0, terminal.rows - 1);
   resize(terminal.cols, terminal.rows);
 }
@@ -221,6 +230,18 @@ export function TerminalPane({
     const fitAddon = new FitAddon();
     terminal.loadAddon(fitAddon);
     terminal.open(container);
+    // WebGL 渲染器(GPU 绘制,大量输出时性能显著优于默认 canvas 行渲染):必须在 open 之后
+    // 加载。加载抛错(无 GPU/驱动/WebGL 上下文不可用)静默回退默认 canvas 渲染器;运行中
+    // 上下文丢失(onContextLoss,驱动重置等)dispose 自身回落 canvas,终端继续可用(本 tab
+    // 不再重试 WebGL,重建 tab 才有机会恢复——可接受,罕见事件)。addon 生命周期挂在
+    // terminal 上,terminal.dispose() 连带,无需手动清理。
+    try {
+      const webgl = new WebglAddon();
+      webgl.onContextLoss(() => webgl.dispose());
+      terminal.loadAddon(webgl);
+    } catch {
+      /* WebGL 不可用:保持默认 canvas 渲染 */
+    }
     // 玻璃化下新建 terminal 也要透明 padding 区(theme effect 依赖不变不会重跑,此处补一次)。
     if (bgSetting.path && terminal.element) terminal.element.style.background = "transparent";
     // Ctrl+C 智能复制(Windows Terminal 行为):有非空选区时 Ctrl+C = 复制选中文本到剪贴板 +
@@ -247,7 +268,7 @@ export function TerminalPane({
     } catch {
       /* parser API 兼容兜底 */
     }
-    fitWithMargin(terminal, fitAddon);
+    fitWithMargin(terminal, fitAddon, fontSize);
 
     // === IME 候选框跟随光标修复(DOM 层硬修) ===
     // 根因(诊断确认):xterm `_syncTextArea` 在 scrollback baseY>0(claude TUI 对话滚动后产生历史行,
@@ -303,7 +324,7 @@ export function TerminalPane({
     const observer = new ResizeObserver(() => {
       // 隐藏 tab 的容器尺寸为 0,fit 会算错;仅在 tab 可见时 fit + resize。
       if (container.offsetParent === null) return;
-      refit(terminal, fitAddon, (cols, rows) => void transport.resize(tabId, cols, rows));
+      refit(terminal, fitAddon, fontSize, (cols, rows) => void transport.resize(tabId, cols, rows));
       // 上报 pane 整体尺寸(分屏方向自适应)。各 tab 共用同一 pane 尺寸,任一可见 tab 上报即可。
       const el = paneRef.current;
       const measure = onMeasurePaneRef.current;
@@ -327,7 +348,7 @@ export function TerminalPane({
     const refitForAltScreen = () => {
       window.setTimeout(() => {
         if (container.offsetParent === null) return;
-        refit(terminal, fitAddon, (cols, rows) => void transport.resize(tabId, cols, rows));
+        refit(terminal, fitAddon, fontSize, (cols, rows) => void transport.resize(tabId, cols, rows));
       }, 0);
     };
     const isAltMode = (params: (number | number[])[]) =>
@@ -411,7 +432,7 @@ export function TerminalPane({
       const container = tabContainerRefs.current.get(activeTabId);
       if (!container || container.offsetParent === null) return;
       const transport = getTransportRef.current(activeTabId);
-      refit(t.terminal, t.fitAddon, (cols, rows) => void transport.resize(activeTabId, cols, rows));
+      refit(t.terminal, t.fitAddon, fontSize, (cols, rows) => void transport.resize(activeTabId, cols, rows));
       // 聚焦:切到 tab 时把焦点交给它的 xterm。
       t.terminal.focus();
     });
@@ -452,7 +473,7 @@ export function TerminalPane({
       // 改 fontSize 会改 cell 像素度量,与 resize 同病同治:用 refit 统一 fit→refresh→resize,
       // 避免 canvas 度量未刷新致文字/光标/IME 候选框错位(见 refit 注释)。
       const transport = getTransportRef.current(tabId);
-      refit(tt.terminal, tt.fitAddon, (cols, rows) => void transport.resize(tabId, cols, rows));
+      refit(tt.terminal, tt.fitAddon, fontSize, (cols, rows) => void transport.resize(tabId, cols, rows));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fontSize]);
