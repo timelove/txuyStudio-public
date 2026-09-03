@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.8] - 2026-08-31
+
+Terminal rendering & scroll polish.
+
+### Added
+
+- **WebGL renderer** — terminals now draw on the GPU (`@xterm/addon-webgl`), significantly smoother scrolling with heavy output / long scrollback. Silently falls back to the canvas renderer when WebGL is unavailable; context loss at runtime recovers the same way.
+- **Bottom scroll margin (24px)** — the shell prompt now sits ~24px above the pane bottom with rollable blank lines below (terminal stays readable after the screen fills). Font-size changes keep the margin pixel-constant. Full-screen TUI apps (claude code / yazi / lazygit) are exempted and keep using the full viewport.
+
+
 ## [0.1.7] - 2026-08-28
 
 In-app auto-update + pinned-project persistence.
@@ -63,7 +73,8 @@ First public release (MVP).
 - **AI CLI session browser** — scan and resume `claude` / `codex` sessions.
 - **i18n** — English / 中文.
 
-[Unreleased]: https://github.com/timelove/txuyStudio-public/compare/v0.1.7...HEAD
+[Unreleased]: https://github.com/timelove/txuyStudio-public/compare/v0.1.8...HEAD
+[0.1.8]: https://github.com/timelove/txuyStudio-public/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/timelove/txuyStudio-public/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/timelove/txuyStudio-public/compare/v0.1.0...v0.1.6
 [0.1.0]: https://github.com/timelove/txuyStudio-public/releases/tag/v0.1.0
