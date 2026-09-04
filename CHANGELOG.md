@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.9] - 2026-09-04
+
+### Fixed
+
+- **Terminal scrollbar hugs the right edge again** — a regression from the unified-padding change left a 10px gap between the scrollbar and the pane edge; restored the original 2px inset (slider extends into the terminal's own padding band, never covering text).
+
+
 ## [0.1.8] - 2026-08-31
 
 Terminal rendering & scroll polish.
@@ -73,7 +80,8 @@ First public release (MVP).
 - **AI CLI session browser** — scan and resume `claude` / `codex` sessions.
 - **i18n** — English / 中文.
 
-[Unreleased]: https://github.com/timelove/txuyStudio-public/compare/v0.1.8...HEAD
+[Unreleased]: https://github.com/timelove/txuyStudio-public/compare/v0.1.9...HEAD
+[0.1.9]: https://github.com/timelove/txuyStudio-public/compare/v0.1.8...v0.1.9
 [0.1.8]: https://github.com/timelove/txuyStudio-public/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/timelove/txuyStudio-public/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/timelove/txuyStudio-public/compare/v0.1.0...v0.1.6
