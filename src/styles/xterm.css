@@ -39,12 +39,13 @@
  * ============================================================ */
 
 /* 滚动条容器:恒定 8px 宽作为 hover 命中区(滑块在内部收窄/展宽),透明轨道。
-   .xterm 自身 padding-right 8px(见上),scrollbar 用 right:2px 落在 padding 区内,
-   距 pane 右缘 2px 且不盖文字。改 padding 需同步此值。 */
+   .xterm-scrollable-element 位于 .xterm 的 content 区(padding 8px 内侧),
+   scrollbar 用 right:-6px 向右伸进 padding 区,距 pane 右缘 8-6=2px(贴边,
+   与旧版观感一致)且不盖文字。改 .xterm padding 需同步此偏移。 */
 .xterm .xterm-scrollable-element > .scrollbar {
   width: 8px !important;
   background: transparent !important;
-  right: 2px !important;
+  right: -6px !important;
 }
 
 /* 滑块:平时 4px 贴右,hover 容器时展宽 12px。transition 让粗细变化平滑。 */
