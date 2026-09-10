@@ -80,8 +80,11 @@ export class TauriPtyTransport implements TerminalTransport {
       // 2) 再 spawn 后端会话，拿到对应的 pty sessionId。cwd 传项目根目录 / 继承目录；
       // shellKind 让后端在 PowerShell 内自动启动 claude/codex。launchOverride(如 "codex resume <id>")
       // 优先于 shellKind 的静态启动命令,仅首次 spawn 生效,消费后清空(已有 session 只 resize)。
+      // sessionId 传确定性 tabId:WebView 重载/休眠唤醒后前端重挂时,后端命中存活旧会话
+      // → attach + 回放 transcript(cwd/滚动历史/运行中命令保全,不再"回到根目录");
+      // 旧会话已死 → 后端按 transcript 里最后已知 cwd 重建 shell。
       const launchOverride = this.launchOverride;
-      this.ptySessionId = await invoke<string>("spawn_pty", { projectId: this.projectId, rows, cols, cwd: cwd ?? null, shellKind, launchOverride: launchOverride ?? null });
+      this.ptySessionId = await invoke<string>("spawn_pty", { projectId: this.projectId, rows, cols, cwd: cwd ?? null, shellKind, launchOverride: launchOverride ?? null, sessionId });
       this.launchOverride = null;
     } finally {
       this.startingPromise = null;

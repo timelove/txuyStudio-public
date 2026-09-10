@@ -411,10 +411,18 @@ export function applyEvent(state: CodexStreamState, payload: CodexEventPayload):
         next.lastUsage = payload.usage;
       }
       // 全量扫兜底:轮次结束,孤儿工具卡(item.completed 丢失/中断)不再转圈。
-      for (let i = 0; i < next.messages.length; i++) {
+      // 引用保持:blocks 无变化且非 streaming 的消息保留原对象(避免每轮整树 reconcile);
+      // usage 仅回填最近一条 assistant(同 claude result 语义,行尾 token 显示用)。
+      let usageFilled = false;
+      for (let i = next.messages.length - 1; i >= 0; i--) {
         const m = next.messages[i];
         if (m.role !== "assistant") continue;
-        next.messages[i] = { ...m, blocks: finalizePendingTools(m.blocks), streaming: false, usage: payload.usage ?? m.usage };
+        const blocks = finalizePendingTools(m.blocks);
+        const fillUsage = !usageFilled && !!payload.usage;
+        if (fillUsage) usageFilled = true;
+        if (blocks !== m.blocks || m.streaming || fillUsage) {
+          next.messages[i] = { ...m, blocks, streaming: false, usage: fillUsage ? payload.usage : m.usage };
+        }
       }
       return next;
     }
@@ -430,7 +438,11 @@ export function applyEvent(state: CodexStreamState, payload: CodexEventPayload):
       for (let i = 0; i < next.messages.length; i++) {
         const m = next.messages[i];
         if (m.role !== "assistant") continue;
-        next.messages[i] = { ...m, blocks: finalizePendingTools(m.blocks), streaming: false };
+        // 引用保持:blocks 无变化且本就非 streaming 的消息保留原对象。
+        const blocks = finalizePendingTools(m.blocks);
+        if (blocks !== m.blocks || m.streaming) {
+          next.messages[i] = { ...m, blocks, streaming: false };
+        }
       }
       return next;
     }

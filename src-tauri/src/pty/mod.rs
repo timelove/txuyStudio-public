@@ -15,6 +15,9 @@ pub mod commands;
 /// - `writer`：向 shell 写入用户输入（master.take_writer）。
 /// - `child`：子进程句柄，用于 kill。
 /// - `master`：PTY master 端，resize 在它上面调用。
+/// - `transcript`：输出字节环形缓存（上限 `PTY_TRANSCRIPT_MAX`）。WebView 被系统
+///   回收/休眠唤醒后前端整页重载，前端内存态 transcript 全丢——后端缓存用于重载后
+///   重新 attach 时回放，保住滚动历史、TUI 屏幕状态与最后已知 cwd。Arc 与读循环共享。
 ///
 /// 注意：reader（master.try_clone_reader）是一次性使用，已在 spawn 时取走并
 /// 移交给 spawn_blocking 线程，因此不在这里持有。
@@ -22,7 +25,11 @@ pub struct PtySession {
     pub writer: Box<dyn std::io::Write + Send>,
     pub child: Box<dyn Child + Send + Sync>,
     pub master: Box<dyn MasterPty + Send>,
+    pub transcript: std::sync::Arc<Mutex<Vec<u8>>>,
 }
+
+/// 单会话输出缓存上限（字节）。约等于几千行滚动历史，多会话内存占用可控。
+pub const PTY_TRANSCRIPT_MAX: usize = 256 * 1024;
 
 /// `pty-output` 事件的载荷。emit 要求 `Serialize + Clone`。
 ///
@@ -80,5 +87,25 @@ impl PtyRegistry {
 
         log::info!("kill_project: closed {count} session(s) for {pid}");
         Ok(())
+    }
+
+    /// 应用退出时同步杀掉全部 PTY 会话(不跨 await;ExitRequested 回调中 runtime 即将关闭,
+    /// 不能再 spawn_blocking)。锁内 drain、锁外 kill/wait。
+    pub fn kill_all_blocking(&self) {
+        let drained: HashMap<String, HashMap<String, PtySession>> =
+            self.by_project.lock().map(|mut g| std::mem::take(&mut *g)).unwrap_or_default();
+        let mut count = 0usize;
+        for (_, sessions) in drained {
+            for (sid, mut session) in sessions {
+                count += 1;
+                if let Err(e) = session.child.kill() {
+                    log::warn!("kill_all_blocking(pty): kill {sid}: {e}");
+                }
+                let _ = session.child.wait();
+            }
+        }
+        if count > 0 {
+            log::info!("kill_all_blocking(pty): closed {count} session(s)");
+        }
     }
 }

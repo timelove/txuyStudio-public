@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use tauri::{AppHandle, Emitter, Manager, State};
 
-use super::{PtyOutput, PtyRegistry, PtySession};
+use super::{PtyOutput, PtyRegistry, PtySession, PTY_TRANSCRIPT_MAX};
 
 /// 选取默认 shell：优先 PowerShell 7（`pwsh.exe`），找不到则回退 Windows PowerShell 5.1。
 ///
@@ -277,7 +277,88 @@ pub async fn spawn_pty(
     cwd: Option<String>,
     shell_kind: Option<String>,
     launch_override: Option<String>,
+    // 确定性会话 key(前端传 tabId,跨 WebView 重载稳定)。命中存活旧会话 → attach 回放
+    // transcript(不重 spawn,保住 cwd/滚动历史/运行中命令);进程已死 → 清旧并以 transcript
+    // 里的最后已知 cwd 重建。None → 沿用旧语义(后端 UUID)。
+    session_id: Option<String>,
 ) -> Result<String, String> {
+    let mut cwd = cwd;
+    // —— 幂等 attach(WebView 重载/休眠唤醒后前端重挂,以同 key 重连旧 PTY)——
+    if let Some(sid) = &session_id {
+        // 短锁:探测活性 + resize + transcript Arc 拷贝(全部微秒级,持锁可接受,同 write_pty 先例)。
+        let probe: Option<(bool, std::sync::Arc<std::sync::Mutex<Vec<u8>>>)> = {
+            let mut by_project = state.by_project.lock().map_err(|e| e.to_string())?;
+            by_project
+                .get_mut(project_id.as_str())
+                .and_then(|m| m.get_mut(sid.as_str()))
+                .map(|session| {
+                    // try_wait 非阻塞:Ok(None)=活,Ok(Some)/Err=已退出。
+                    let alive = session.child.try_wait().map(|s| s.is_none()).unwrap_or(false);
+                    if alive {
+                        let _ = session.master.resize(PtySize {
+                            rows,
+                            cols,
+                            pixel_width: 0,
+                            pixel_height: 0,
+                        });
+                    }
+                    (alive, session.transcript.clone())
+                })
+        };
+        if let Some((alive, transcript)) = probe {
+            let snapshot: Vec<u8> = transcript
+                .lock()
+                .map(|g| g.clone())
+                .unwrap_or_default();
+            if alive {
+                let data = String::from_utf8_lossy(&snapshot).into_owned();
+                log::info!(
+                    "spawn_pty: attach live session {sid} ({} bytes replay)",
+                    data.len()
+                );
+                if !data.is_empty() {
+                    let _ = app.emit(
+                        "pty-output",
+                        PtyOutput {
+                            session_id: sid.clone(),
+                            data,
+                        },
+                    );
+                }
+                return Ok(sid.clone());
+            }
+            // 死会话:移除旧条目;transcript 尾部提取最后已知 cwd 作为新 shell 起始目录
+            // (恢复用户 cd 位置,而非 pane 初始 cwd);先回放死前输出再走正常 spawn
+            // (新 shell 横幅接在历史之后,时序由 emit 先于新读循环保证)。
+            {
+                let mut by_project = state.by_project.lock().map_err(|e| e.to_string())?;
+                if let Some(m) = by_project.get_mut(project_id.as_str()) {
+                    m.remove(sid.as_str());
+                }
+            }
+            if let Some(last) = extract_last_osc_cwd(&snapshot) {
+                log::info!("spawn_pty: dead session {sid}, restoring last cwd {last}");
+                cwd = Some(last);
+            } else {
+                log::info!("spawn_pty: dead session {sid}, rebuilding (no cwd marker)");
+            }
+            let data = String::from_utf8_lossy(&snapshot).into_owned();
+            if !data.is_empty() {
+                // 末尾软复位:死前若在 TUI(alternate screen),回放会把 xterm 留在 alt 画面,
+                // 新 shell(normal screen)输出会叠在死前 TUI 上——退 alt + 显光标 + 换行,让
+                // 新 shell 横幅正确衔接在历史之后。
+                let data = format!("{data}\x1b[?1049l\x1b[?25h\r\n");
+                let _ = app.emit(
+                    "pty-output",
+                    PtyOutput {
+                        session_id: sid.clone(),
+                        data,
+                    },
+                );
+            }
+        }
+    }
+
     let pty_system = native_pty_system();
     let pair = pty_system
         .openpty(PtySize {
@@ -364,7 +445,9 @@ pub async fn spawn_pty(
     let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
     let master = pair.master;
 
-    let session_id = uuid::Uuid::new_v4().to_string();
+    // 会话 key:优先前端传入的确定性 id(tabId,attach 语义);缺省沿用 UUID(旧调用方)。
+    let session_id = session_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let transcript: std::sync::Arc<std::sync::Mutex<Vec<u8>>> = std::sync::Arc::default();
 
     // 持锁区间：仅 insert（按项目分桶），绝不跨 await。
     {
@@ -378,6 +461,7 @@ pub async fn spawn_pty(
                     writer,
                     child,
                     master,
+                    transcript: transcript.clone(),
                 },
             );
     }
@@ -395,6 +479,14 @@ pub async fn spawn_pty(
             match reader.read(&mut buf) {
                 Ok(0) => break, // EOF：子进程已退出
                 Ok(n) => {
+                    // 先写 transcript(emit 与缓存顺序一致,attach 回放不缺尾)再 emit。
+                    if let Ok(mut t) = transcript.lock() {
+                        t.extend_from_slice(&buf[..n]);
+                        if t.len() > PTY_TRANSCRIPT_MAX {
+                            let excess = t.len() - PTY_TRANSCRIPT_MAX;
+                            t.drain(0..excess);
+                        }
+                    }
                     let data = String::from_utf8_lossy(&buf[..n]).into_owned();
                     let _ = app_handle.emit(
                         "pty-output",
@@ -413,6 +505,35 @@ pub async fn spawn_pty(
     });
 
     Ok(session_id)
+}
+
+/// 从死会话 transcript 提取最后一次 OSC cwd 标记(prompt hook 注入的
+/// `\x1b]1337;TxuyCwd=<path>\x07`),作重建 shell 的起始 cwd。截断边界天然容错:
+/// 序列被环形截头截断时取到的前一个完整标记或 None。
+fn extract_last_osc_cwd(bytes: &[u8]) -> Option<String> {
+    const MARKER: &[u8] = b"\x1b]1337;TxuyCwd=";
+    let mut last: Option<String> = None;
+    let mut pos = 0;
+    while pos + MARKER.len() <= bytes.len() {
+        let rel = match bytes[pos..].windows(MARKER.len()).position(|w| w == MARKER) {
+            Some(r) => r,
+            None => break,
+        };
+        let start = pos + rel + MARKER.len();
+        match bytes[start..].iter().position(|&b| b == 0x07) {
+            Some(end_off) => {
+                let end = start + end_off;
+                if let Ok(s) = std::str::from_utf8(&bytes[start..end]) {
+                    if !s.is_empty() {
+                        last = Some(s.to_string());
+                    }
+                }
+                pos = end + 1;
+            }
+            None => break, // 无结束符(被截断)——保留上一个完整标记。
+        }
+    }
+    last
 }
 
 /// 向指定会话写入用户输入（键盘按键）。

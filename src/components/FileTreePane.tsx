@@ -459,12 +459,16 @@ export function FileTreePane({
   // 后端已 500ms 防抖聚合,这里按批重拉(targets 通常只有几个已展开目录)。
   useEffect(() => {
     let un: UnlistenFn | null = null;
+    // cancelled 修 async-listen cleanup 竞态:cleanup 先于 listen() 的 promise resolve 时,
+    // un 仍为 null,listener 永不注销(StrictMode 双挂载/rootPath 快切必漏,之后 fs-change 翻倍回调)。
+    let cancelled = false;
     void onFsChange(async (e) => {
-      if (e.projectId !== projectId) return;
+      if (cancelled || e.projectId !== projectId) return;
       const targets = [rootPath, ...collectLoadedDirs(rootsRef.current)];
       for (const t of targets) {
         try {
           const fresh = await listDir(t);
+          if (cancelled) return;
           setRoots((prev) => (t === rootPath ? mergeKept(prev, fresh) : reloadAt(prev, t, fresh)));
         } catch {
           /* 路径暂不可达(被删等),跳过 */
@@ -473,11 +477,12 @@ export function FileTreePane({
       // 已打开文件的 fs-notify 重载:dirty 文件忽略(用户编辑优先,不 clobber);干净文件重载 model。
       const changed = new Set(e.paths);
       for (const f of openFilesRef.current) {
+        if (cancelled) return;
         if (f.kind !== "text" || f.dirty) continue; // dirty 忽略
         if (!changed.has(f.path)) continue;
         try {
           const r = await readFile(f.path);
-          if (r.content == null) continue;
+          if (cancelled || r.content == null) continue;
           const model = modelPoolRef.current.get(f.path) as monaco.editor.ITextModel | undefined;
           if (model) {
             suppressDirtyRef.current.add(f.path);
@@ -493,10 +498,14 @@ export function FileTreePane({
         }
       }
     }).then((u) => {
-      un = u;
+      // resolve 时若 cleanup 已跑(竞态):立即补注销,不留游离 listener。
+      if (cancelled) u?.();
+      else un = u;
     });
     return () => {
+      cancelled = true;
       un?.();
+      un = null;
     };
   }, [projectId, rootPath]);
 

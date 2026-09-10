@@ -198,6 +198,16 @@ button {
 }
 
 /* ============================================================
+ * 消息流离屏渲染跳过(长会话卡顿治理):跳过视口外消息行的 layout/paint,
+ * 滚动条/高度由 contain-intrinsic-size 兜底(auto 记住实际尺寸,回滚不跳)。
+ * 代价:离屏内容不参与浏览器页面内查找(Ctrl+F)。
+ * ============================================================ */
+.mx-chat-row {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 200px;
+}
+
+/* ============================================================
  * 圆角语义 class:把散落在各组件的 rounded-none 按用途收口到 radius token,
  * 一处改全局生效。挂到对应元素上替代手写的 rounded-none 原子类。
  *   .mx-card      — 卡片/浮层容器(modal、popover/dialog content):radius-lg(8px)

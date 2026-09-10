@@ -173,26 +173,39 @@ pub fn archive_workspace_projects(app: &AppHandle, label: &str) {
         log::error!("archive_workspace_projects: persist failed: {e}");
     }
 
-    // kill 被归档项目的所有会话(PTY/claude/codex/shell,失败仅 warn)。
+    // kill 被归档项目的所有会话(PTY/claude/codex/shell + fs watcher,失败仅 warn)。
+    for pid in removed_ids {
+        kill_project_sessions(app, &pid);
+    }
+}
+
+/// kill 单个项目的全部后端会话:PTY / claude / codex `!` shell + 停 fs watcher。
+///
+/// 用于直接关窗的兜底(前端 unmount cleanup 不可达):
+/// - 工作台窗口归档(archive_workspace_projects);
+/// - **独立项目窗口(project-)被叉掉 / dock back**:窗口 JS 来不及发 kill_pty 等命令,
+///   此前 PTY/claude/codex/shell 子进程 + PtySession/读线程全部孤儿,detach/dock 循环累积。
+///
+/// watcher 同步停(短锁 + drop);进程 kill 是慢操作(taskkill /T),spawn 内 await,
+/// 不阻塞关窗。失败仅 warn。
+pub fn kill_project_sessions(app: &AppHandle, project_id: &str) {
+    if app.state::<crate::filetree::FsWatcherRegistry>().stop_project(project_id) {
+        log::info!("kill_project_sessions: fs watcher stopped for {project_id}");
+    }
     let app = app.clone();
+    let pid = project_id.to_string();
     tauri::async_runtime::spawn(async move {
-        for pid in removed_ids {
-            let pty = app.state::<crate::pty::PtyRegistry>();
-            if let Err(e) = pty.kill_project(&pid).await {
-                log::warn!("archive_workspace_projects: pty kill_project failed for {pid}: {e}");
-            }
-            let claude = app.state::<crate::claude::ClaudeRegistry>();
-            if let Err(e) = claude.kill_project(&pid).await {
-                log::warn!("archive_workspace_projects: claude kill_project failed for {pid}: {e}");
-            }
-            let codex = app.state::<crate::codex::CodexRegistry>();
-            if let Err(e) = codex.kill_project(&pid).await {
-                log::warn!("archive_workspace_projects: codex kill_project failed for {pid}: {e}");
-            }
-            let shell = app.state::<crate::shell_run::ShellRunRegistry>();
-            if let Err(e) = shell.kill_project(&pid).await {
-                log::warn!("archive_workspace_projects: shell kill_project failed for {pid}: {e}");
-            }
+        if let Err(e) = app.state::<crate::pty::PtyRegistry>().kill_project(&pid).await {
+            log::warn!("kill_project_sessions: pty kill failed for {pid}: {e}");
+        }
+        if let Err(e) = app.state::<crate::claude::ClaudeRegistry>().kill_project(&pid).await {
+            log::warn!("kill_project_sessions: claude kill failed for {pid}: {e}");
+        }
+        if let Err(e) = app.state::<crate::codex::CodexRegistry>().kill_project(&pid).await {
+            log::warn!("kill_project_sessions: codex kill failed for {pid}: {e}");
+        }
+        if let Err(e) = app.state::<crate::shell_run::ShellRunRegistry>().kill_project(&pid).await {
+            log::warn!("kill_project_sessions: shell kill failed for {pid}: {e}");
         }
     });
 }

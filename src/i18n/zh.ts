@@ -295,6 +295,7 @@ const zh = {
     shellDone: "完成",
     shellError: "失败({{code}})",
     shellInterrupted: "已中断",
+    shellOutputTruncated: "输出过长,仅保留最后 {{n}} 行",
     retrying: "API 错误,正在重试({{n}}/{{max}})…",
     retryFailed: "重试 {{max}} 次仍失败{{error}}",
     modelCurrent: "当前",
