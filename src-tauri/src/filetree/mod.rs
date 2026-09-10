@@ -76,3 +76,26 @@ pub struct WatcherHandle {
 pub struct FsWatcherRegistry {
     pub by_project: Mutex<HashMap<String, WatcherHandle>>,
 }
+
+impl FsWatcherRegistry {
+    /// 移除并 drop 某项目的 watcher(关项目/关独立窗口/关工作台的兜底清理)。
+    /// 返回是否曾存在。handle 在锁释放后 drop(notify drop 可能有内部清理,不持锁)。
+    pub fn stop_project(&self, project_id: &str) -> bool {
+        let removed: Option<WatcherHandle> = match self.by_project.lock() {
+            Ok(mut g) => g.remove(project_id),
+            Err(_) => return false,
+        };
+        let existed = removed.is_some();
+        drop(removed); // 此处 mutex guard 已随 match 语句释放,handle 在锁外 drop。
+        existed
+    }
+
+    /// 停掉全部 watcher(应用退出)。handle 在锁外 drop。
+    pub fn stop_all(&self) {
+        let drained: HashMap<String, WatcherHandle> = match self.by_project.lock() {
+            Ok(mut g) => std::mem::take(&mut *g),
+            Err(_) => return,
+        };
+        drop(drained);
+    }
+}

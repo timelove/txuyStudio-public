@@ -7,9 +7,10 @@ import type { ShellKind, SplitDirection } from "../domain/paneTree";
 import type { WorkspaceSession } from "../domain/sessions";
 import type { CodexTransport } from "../domain/codexTransport";
 import type { ShellRunTransport } from "../domain/shellRunTransport";
-import type { ShellMessage, ShellRunState } from "../domain/shellRun";
+import { SHELL_MAX_OUTPUT_LINES, type ShellMessage, type ShellRunState } from "../domain/shellRun";
 import type { CodexBlock, CodexMessage, CodexSessionKind, CodexStreamState, CodexUsage } from "../domain/codexStream";
 import { summarize } from "../domain/codexStream";
+import { liftContextWindow } from "../domain/contextMeter";
 import {
   getToolConfig,
   getToolCategory,
@@ -25,6 +26,8 @@ import { statusFontSize } from "../settings";
 import { ShellMenu } from "./ShellMenu";
 import { SplitPaneButtons } from "./SplitPaneButtons";
 import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from "./ui/Popover";
+import { BottomToast } from "./ui/BottomToast";
+import { ContextMeter } from "./ui/ContextMeter";
 import { Button } from "./ui/Button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/Tooltip";
 import { Tabs, TabsList, TabsTrigger } from "./ui/Tabs";
@@ -435,13 +438,16 @@ export function CodexPane(props: CodexPaneProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTabId]);
 
-  // 自动贴底(流式/新消息/内容异步撑高)。与 ClaudePane 同实现。
-  const lastMsg = state && state.messages.length > 0 ? state.messages[state.messages.length - 1] : undefined;
+  // 自动贴底(同 ClaudePane):条数/末条/状态变化才 paint 前滚,流式同条文本增长交 ResizeObserver,
+  // 避免每帧在大 DOM 上强制同步布局。
+  const msgCount = state?.messages.length ?? 0;
+  const lastMsgId = msgCount > 0 ? state!.messages[msgCount - 1].id : undefined;
+  const shellCount = shellState?.messages.length ?? 0;
   useLayoutEffect(() => {
     if (!stickRef.current) return;
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [lastMsg, state?.status]);
+  }, [msgCount, lastMsgId, shellCount, state?.status]);
   useLayoutEffect(() => {
     stickRef.current = true;
     const el = scrollRef.current;
@@ -937,41 +943,22 @@ export function CodexPane(props: CodexPaneProps) {
     return () => window.removeEventListener("keydown", handler);
   }, [focused]);
 
-  // -- 会话时长计时(首次出现消息开始) --
+  // -- 会话时长:首次消息记起点;显示走 ElapsedText 本地 tick(不每秒重渲染整个 pane) --
   const [sessionStart, setSessionStart] = useState<number | null>(null);
-  const [elapsed, setElapsed] = useState(0);
   useEffect(() => {
     if (sessionStart === null && state && state.messages.length > 0) {
       setSessionStart(Date.now());
     }
   }, [state, sessionStart]);
-  useEffect(() => {
-    if (sessionStart === null) return;
-    const update = () => setElapsed(Date.now() - sessionStart);
-    update();
-    const id = window.setInterval(update, 1000);
-    return () => window.clearInterval(id);
-  }, [sessionStart]);
 
-  // 本轮耗时:busy false->true 记 turnStart。
+  // 本轮耗时:busy false->true 记 turnStart。ElapsedText 内部每秒自更新。
   const [turnStart, setTurnStart] = useState<number | null>(null);
-  const [turnElapsed, setTurnElapsed] = useState(0);
   const prevBusyRef = useRef(false);
   useEffect(() => {
     if (busy && !prevBusyRef.current) setTurnStart(Date.now());
     else if (!busy) setTurnStart(null);
     prevBusyRef.current = busy;
   }, [busy]);
-  useEffect(() => {
-    if (turnStart === null) {
-      setTurnElapsed(0);
-      return;
-    }
-    const update = () => setTurnElapsed(Date.now() - (turnStart ?? 0));
-    update();
-    const id = window.setInterval(update, 1000);
-    return () => window.clearInterval(id);
-  }, [turnStart]);
 
   // 会话累计 token(遍历 assistant usage 求和;turn_completed 回填,整轮近似)。
   const sessionTokens = useMemo(() => {
@@ -990,14 +977,22 @@ export function CodexPane(props: CodexPaneProps) {
   // 状态栏 model:meta.model(spawn -m 乐观 + hydrate 回填的 config 默认)。
   const model = state?.meta?.model;
 
-  // 当前上下文用量:lastUsage(input+cached)/contextWindow(catalog 回填,无则不显 %)。
+  // 当前上下文用量:lastUsage(input+cached+cache_write)/contextWindow(catalog 回填,无则不显 %)。
+  // ctx 被实测突破 catalog 窗口时动态抬升(liftContextWindow,网关模型 catalog 窗口可能偏小),
+  // 防剩余为负/占比恒 100%。lastUsage 只在轮末 turn.completed 回填,流式中保持上一轮真实值不抖。
   const contextInfo = useMemo(() => {
     const u = state?.lastUsage;
-    const window = contextWindow;
     const ctx = u ? (u.input_tokens ?? 0) + (u.cached_input_tokens ?? 0) + (u.cache_write_input_tokens ?? 0) : 0;
+    const window = contextWindow ? liftContextWindow(contextWindow, ctx) : undefined;
     const pct = ctx > 0 && window ? Math.min(100, (ctx / window) * 100) : 0;
     return { window, ctx, pct };
   }, [state, contextWindow]);
+
+  // 合并消息流(codex + `!` shell)缓存:避免每帧 render 重跑 O(n log n) 归并 + Date.parse。
+  const mergedMessages = useMemo(
+    () => mergeCodexAndShellMessages(state?.messages ?? [], shellState?.messages ?? []),
+    [state?.messages, shellState?.messages],
+  );
 
   // 当前可选 reasoning 档位:catalog 中当前 model 项的 supported_reasoning_levels,兜底预置。
   const reasoningLevels = useMemo(() => {
@@ -1190,11 +1185,15 @@ export function CodexPane(props: CodexPaneProps) {
         <div ref={scrollRef} onScroll={handleScroll} className="mx-scroll-pretty relative min-h-0 overflow-y-auto px-4 py-4" style={{ fontSize }}>
           {state && (state.messages.length > 0 || (shellState?.messages.length ?? 0) > 0) ? (
             <div ref={contentRef} className="mx-auto w-full max-w-[54.25rem] space-y-1">
-              {mergeCodexAndShellMessages(state.messages, shellState?.messages ?? []).map((item) =>
+              {mergedMessages.map((item) =>
                 item.kind === "shell" ? (
-                  <ShellRow key={`shell-${item.msg.id}`} message={item.msg} t={t} onInterrupt={handleShellInterrupt} />
+                  <div key={`shell-${item.msg.id}`} className="mx-chat-row">
+                    <ShellRow message={item.msg} t={t} onInterrupt={handleShellInterrupt} />
+                  </div>
                 ) : (
-                  <MessageRow key={item.msg.id} message={item.msg} t={t} />
+                  <div key={item.msg.id} className="mx-chat-row">
+                    <MessageRow message={item.msg} t={t} />
+                  </div>
                 ),
               )}
             </div>
@@ -1239,7 +1238,7 @@ export function CodexPane(props: CodexPaneProps) {
                       : t("codexpane.toolRunning")}
                 </span>
                 <span className="tabular-nums text-[var(--mx-faint)]">
-                  ⏱ {formatElapsed(turnElapsed)}
+                  <ElapsedText start={turnStart} prefix="⏱ " />
                 </span>
               </div>
             )}
@@ -1617,19 +1616,15 @@ export function CodexPane(props: CodexPaneProps) {
                           </PopoverContent>
                         )}
                       </Popover>
-                      {/* ctx:上下文窗口 + 占用%(lastUsage/contextWindow,catalog 提供)。 */}
+                      {/* ctx 迷你仪表:进度条=占用、分数=已用/窗口,阈值着色提示该 /compact;
+                          hover 看剩余/百分比明细。catalog 未给窗口则不渲染。 */}
                       {contextInfo.window && (
-                        <span
-                          className="shrink-0"
-                          title={contextInfo.ctx > 0 ? `已用 ${contextInfo.ctx.toLocaleString()} / ${contextInfo.window.toLocaleString()} tokens(${contextInfo.pct.toFixed(1)}%)` : `窗口上限 ${contextInfo.window.toLocaleString()} tokens`}
-                        >
-                          ctx {formatTokens(contextInfo.window)}{contextInfo.ctx > 0 ? ` · ${contextInfo.pct.toFixed(1)}%` : ""}
-                        </span>
+                        <ContextMeter used={contextInfo.ctx} window={contextInfo.window} />
                       )}
                       <span className="shrink-0">
                         ↑{formatTokens(sessionTokens.input)} ↓{formatTokens(sessionTokens.output)}
                       </span>
-                      <span className="shrink-0 whitespace-nowrap">⏱ {formatElapsed(elapsed)}</span>
+                      <span className="shrink-0 whitespace-nowrap"><ElapsedText start={sessionStart} prefix="⏱ " /></span>
                     </div>
                   </div>
                 </PopoverAnchor>
@@ -1690,13 +1685,13 @@ export function CodexPane(props: CodexPaneProps) {
                 {contextInfo.window && (
                   <div>ctx 窗口<span className="ml-2 text-[var(--mx-text)]">{formatTokens(contextInfo.window)}</span></div>
                 )}
-                <div>耗时<span className="ml-2 text-[var(--mx-text)]">{formatElapsed(elapsed)}</span></div>
+                <div>耗时<span className="ml-2 text-[var(--mx-text)]"><ElapsedText start={sessionStart} /></span></div>
               </div>
             </DialogLike>
             {unsupportedMsg && (
-              <div className="fixed bottom-4 left-1/2 z-50 -translate-x-1/2 rounded-lg border border-[var(--mx-orange-border)] bg-[var(--mx-surface)] px-3 py-1.5 text-[11px] text-[var(--mx-warning-bright)] shadow-lg">
+              <BottomToast tone="warning" onClose={() => setUnsupportedMsg(null)}>
                 {unsupportedMsg}
-              </div>
+              </BottomToast>
             )}
     </article>
   );
@@ -1915,11 +1910,22 @@ function mergeCodexAndShellMessages(
   return items;
 }
 
+/** 连续同 stream 输出行合并成段(后端 lines() 已剥行尾,补 \n);与 ClaudePane 同实现。 */
+function outputSegments(lines: ShellMessage["output"]): Array<{ stream: "stdout" | "stderr"; text: string }> {
+  const segs: Array<{ stream: "stdout" | "stderr"; text: string }> = [];
+  for (const line of lines) {
+    const last = segs[segs.length - 1];
+    if (last && last.stream === line.stream) last.text += line.text + "\n";
+    else segs.push({ stream: line.stream, text: line.text + "\n" });
+  }
+  return segs;
+}
+
 /**
  * `!` 命令执行消息行。与 ClaudePane 的 ShellRow 同实现(文案 key 共用 claudepane 的
  * shell* 条目,通用文案)。
  */
-function ShellRow({
+const ShellRow = memo(function ShellRow({
   message,
   t,
   onInterrupt,
@@ -1984,10 +1990,15 @@ function ShellRow({
         </div>
         {message.output.length > 0 ? (
           <pre className="mx-scroll mt-0.5 max-h-[40vh] overflow-auto whitespace-pre-wrap break-words rounded bg-[var(--mx-surface-2)] px-2 py-1 font-mono leading-relaxed">
-            {message.output.map((line, i) => (
-              <div key={i} className={line.stream === "stderr" ? "text-[var(--mx-danger-bright)]" : "text-[var(--mx-muted)]"}>
-                {line.text}
+            {message.truncated && (
+              <div className="mb-1 text-[10px] text-[var(--mx-warning)]">
+                {t("claudepane.shellOutputTruncated", { n: SHELL_MAX_OUTPUT_LINES })}
               </div>
+            )}
+            {outputSegments(message.output).map((seg, i) => (
+              <span key={i} className={seg.stream === "stderr" ? "text-[var(--mx-danger-bright)]" : "text-[var(--mx-muted)]"}>
+                {seg.text}
+              </span>
             ))}
           </pre>
         ) : message.status === "running" ? (
@@ -1998,7 +2009,7 @@ function ShellRow({
       </div>
     </div>
   );
-}
+});
 
 /**
  * 工具调用卡片--配置驱动渲染(codexToolConfigs)。
@@ -2257,6 +2268,22 @@ function formatElapsed(ms: number): string {
   if (h > 0) return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
   return `${m}:${String(s).padStart(2, "0")}`;
 }
+
+/** 自更新耗时文本(本地每秒 tick,不每秒惊动消息流父组件)。与 ClaudePane 同实现。 */
+const ElapsedText = memo(function ElapsedText({ start, prefix }: { start: number | null; prefix?: string }) {
+  const [, tick] = useState(0);
+  useEffect(() => {
+    if (start === null) return;
+    const id = window.setInterval(() => tick((n) => n + 1), 1000);
+    return () => window.clearInterval(id);
+  }, [start]);
+  return (
+    <>
+      {prefix}
+      {formatElapsed(start === null ? 0 : Date.now() - start)}
+    </>
+  );
+});
 
 /** 思考状态动画(三个 violet 圆点错峰呼吸)。 */
 function ThinkingDots() {

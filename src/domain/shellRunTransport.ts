@@ -1,11 +1,14 @@
 import { invoke } from "@tauri-apps/api/core";
 import { type UnlistenFn, listen } from "@tauri-apps/api/event";
 
+/** pending 队列超限阈值:后台 rAF 暂停时防无界积压,超了同步 flush。 */
+const PENDING_FLUSH_THRESHOLD = 4000;
+
 import {
   type ShellEvent,
   type ShellEventPayload,
   type ShellRunState,
-  applyShellEvent,
+  applyShellEvents,
   initialShellRunState,
 } from "./shellRun";
 
@@ -13,7 +16,7 @@ import {
  * `!` 命令内联执行的 transport(仿 `ClaudeTransport` 但极简,不实现 TerminalTransport 接口)。
  *
  * 每个实例对应一个 claudepane tab:绑定 (projectId, tabId),listen 全局 `shell-event` 事件按
- * (projectId, tabId) 路由 → `applyShellEvent` 归并成本地 `state` → 经 `onEvents` 回调通知 UI。
+ * (projectId, tabId) 路由 → `applyShellEvents` 归并成本地 `state` → 经 `onEvents` 回调通知 UI。
  *
  * 与 ClaudeTransport 的同构点:
  * - 先 listen 再 invoke(防丢首批事件,见后端 `run_shell_command` emit start 在 spawn 前)。
@@ -34,6 +37,11 @@ export class ShellRunTransport {
    *  若都看到 unlisten=null 会挂两个 listener -> 每个事件 handleEvent 两次(start 重复 push
    *  -> 幽灵消息永久 running;output 翻倍)。串行化(同 ClaudeTransport 的 listeningPromise)。 */
   private listeningPromise: Promise<void> | null = null;
+  /** output 行事件 rAF 合流:后端逐行 emit(大输出每秒数百行),逐行 apply+emit 会
+   *  O(k²) 拷贝 + 每行一次全树渲染。output 攒帧批量 apply;状态翻转事件(start/done/
+   *  interrupted)立即同步处理(先 flush 队列),保证 isRunning()/UI 状态不延迟一帧。 */
+  private pending: ShellEventPayload[] = [];
+  private emitRafId: number | null = null;
 
   constructor(projectId: string, tabId: string) {
     this.projectId = projectId;
@@ -60,7 +68,6 @@ export class ShellRunTransport {
    * 失败(如 busy 拒绝)静默 console.warn,不污染对话流。
    */
   async run(command: string, cwd?: string): Promise<void> {
-    console.log("[ShellRunTransport] run", { tabId: this.tabId, command, hasUnlisten: !!this.unlisten });
     await this.ensureListening();
     try {
       await invoke("run_shell_command", {
@@ -107,23 +114,52 @@ export class ShellRunTransport {
     }
   }
 
-  /** 关闭 transport:取消 listen。不 kill 后端会话(由 AppShell 关 tab/项目时统一 invoke kill)。 */
+  /** 关闭 transport:取消 listen/合流帧。不 kill 后端会话(由 AppShell 关 tab 时统一 invoke kill)。 */
   stop(): void {
     this.unlisten?.();
     this.unlisten = null;
+    if (this.emitRafId !== null) {
+      cancelAnimationFrame(this.emitRafId);
+      this.emitRafId = null;
+    }
+    this.pending = [];
     this.listeners.clear();
   }
 
   private handleEvent(payload: ShellEventPayload) {
-    const runningBefore = this.state.running;
-    this.state = applyShellEvent(this.state, payload);
-    console.log("[ShellRunTransport] event", {
-      tabId: this.tabId,
-      kind: payload.kind,
-      id: "id" in payload ? payload.id : "?",
-      runningBefore,
-      runningAfter: this.state.running,
-    });
+    if (payload.kind === "output") {
+      // 纯输出行进合流队列,下一帧统一批量 apply + emit。
+      this.pending.push(payload);
+      // 后台标签页 rAF 暂停时队列会无限积压(超大输出内存膨胀),超阈值直接同步 flush
+      // 兜底(不可见时多几次 setState 无妨,数据不丢)。
+      if (this.pending.length >= PENDING_FLUSH_THRESHOLD) {
+        if (this.emitRafId !== null) {
+          cancelAnimationFrame(this.emitRafId);
+          this.emitRafId = null;
+        }
+        this.flush();
+        return;
+      }
+      if (this.emitRafId === null) {
+        this.emitRafId = requestAnimationFrame(() => {
+          this.emitRafId = null;
+          this.flush();
+        });
+      }
+      return;
+    }
+    // 状态翻转:先把积压 output 落账(保持 done 看到完整输出),再同步处理并立即通知。
+    this.flush();
+    this.state = applyShellEvents(this.state, [payload]);
+    this.emit();
+  }
+
+  /** 把一帧内积压的 output 事件批量归并并通知一次。 */
+  private flush(): void {
+    if (this.pending.length === 0) return;
+    const batch = this.pending;
+    this.pending = [];
+    this.state = applyShellEvents(this.state, batch);
     this.emit();
   }
 

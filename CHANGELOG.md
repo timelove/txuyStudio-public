@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-10
+
+Performance & stability release: fixes the "gets slower the longer it runs" problem and keeps terminal state across system sleep/wake.
+
+### Added
+
+- **Mini context meter** — the input-card context readout is now a tiny progress bar plus a precise "used / window" token count, color-shifting to orange/red near the auto-compact thresholds (hover for exact numbers).
+
+### Changed
+
+- **Rendering performance (long sessions)** — offscreen chat rows skip layout/paint; markdown rendering is cached (switching back to a long session tab is instant instead of re-parsing history); large `!` command output is frame-batched and tail-capped; streaming output no longer forces synchronous layout every token; idle timers no longer re-render the whole view each second.
+- **Toast dismissal** — API-error / compaction-failure toasts auto-dismiss after 8s and can be closed manually.
+
+### Fixed
+
+- **Terminal state survives sleep/wake** — after the system hibernates and wakes, terminals no longer reset to the project root. PTY sessions now survive webview reloads: the working directory, scrollback and running commands (including TUI screens) are restored automatically; if a PTY process did die, the shell is rebuilt at the last known working directory.
+- **Orphan process leaks** — closing a popped-out project window now reaps all its terminal / AI child processes (previously they accumulated and slowed the machine); file-tree watchers are released when projects/windows close; on app exit every child process tree is now terminated instead of being left behind.
+- **Context readout accuracy** — gateway-proxied models with larger-than-assumed context windows no longer show inflated percentages or negative remaining tokens, and the value no longer flickers back to zero mid-response.
+- Event listeners no longer double-register under rapid tab/path switching.
+
 ## [0.1.9] - 2026-09-04
 
 ### Fixed

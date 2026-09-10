@@ -4,7 +4,7 @@
 //! 每个 command 在锁作用域内完成 HashMap/Vec 变更并克隆出要返回的快照,
 //! 释放锁后再 `persistence::save` 与返回。
 
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 
 use super::persistence;
@@ -221,6 +221,11 @@ pub async fn close_project(
     // 同步 kill 该项目所有 `!` 命令进程(与 PTY/claude 同模式)。失败不阻断。
     if let Err(e) = shell.kill_project(&project_id).await {
         log::warn!("close_project: shell kill_project failed for {project_id}: {e}");
+    }
+    // 停掉该项目的 fs watcher(文件树 pane unmount 通常已 stop,此处兜底,防句柄+防抖线程泄漏)。
+    let watcher_stopped = app.state::<crate::filetree::FsWatcherRegistry>().stop_project(&project_id);
+    if watcher_stopped {
+        log::info!("close_project: fs watcher stopped for {project_id}");
     }
 
     Ok(snapshot)

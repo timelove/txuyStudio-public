@@ -17,6 +17,7 @@
 // `isPermissionDenied` 用于 hasPendingApproval 判定(审批被拒的 tool_use)。claudeToolConfigs 仅
 // `import type` 依赖本文件(类型擦除),故此处值 import 无运行时循环。
 import { isPermissionDenied } from "./claudeToolConfigs";
+import { liftContextWindow } from "./contextMeter";
 
 /** 后端 emit 的 claude-event 事件外壳。 */
 export type ClaudeEvent = {
@@ -600,7 +601,10 @@ export function applyEvent(state: ClaudeStreamState, payload: ClaudeEventPayload
       for (let i = 0; i < next.messages.length; i++) {
         const m = next.messages[i];
         if (m.role !== "assistant") continue;
-        next.messages[i] = { ...m, blocks: finalizePendingTools(m.blocks) };
+        // 引用保持:blocks 无 pending(finalizePendingTools 返回原引用)时不换新对象,
+        // 否则每轮结束所有 MessageRow 的 message prop 引用全变、整树 reconcile(长会话大帧)。
+        const blocks = finalizePendingTools(m.blocks);
+        if (blocks !== m.blocks) next.messages[i] = { ...m, blocks };
       }
       // 最近 assistant 消息置 streaming=false + 回填本轮真实用量:glm 代理把 token 用量放在
       // result.usage(assistant message.usage 流式时恒为 0),回填让 ctx/sessionTokens/行尾 token 取到真实值。
@@ -634,7 +638,11 @@ export function applyEvent(state: ClaudeStreamState, payload: ClaudeEventPayload
         for (let i = 0; i < next.messages.length; i++) {
           const m = next.messages[i];
           if (m.role !== "assistant") continue;
-          next.messages[i] = { ...m, blocks: finalizePendingTools(m.blocks), streaming: false };
+          // 引用保持:blocks 无变化且本就非 streaming 的消息保留原对象(同 result 分支)。
+          const blocks = finalizePendingTools(m.blocks);
+          if (blocks !== m.blocks || m.streaming) {
+            next.messages[i] = { ...m, blocks, streaming: false };
+          }
         }
         return next;
       }
@@ -935,19 +943,24 @@ export function inferContextWindow(model?: string): number {
 }
 
 /**
- * 当前上下文占用%(0-100):取最近一条 assistant message 的 usage
+ * 当前上下文占用%(0-100):取最近一条**有真实用量**的 assistant message 的 usage
  * (input_tokens + cache_creation_input_tokens + cache_read_input_tokens ≈ 当前上下文占用)
- * / contextWindow。无 usage 或全 0 返回 undefined。复用 ClaudePane 的 contextInfo 逻辑(单一真相源)。
+ * / contextWindow。glm 流式中 assistant usage 恒全 0 对象(非 null),须 hasUsage 过滤,
+ * 否则轮次进行中占比跳回 0。窗口被实测 ctx 突破时动态抬升(liftContextWindow)。
  */
 function computeCtxPct(state: ClaudeStreamState): number | undefined {
-  const window = state.meta?.contextWindow ?? inferContextWindow(state.meta?.model);
   let usage: ClaudeUsage | undefined;
+  let peak = 0;
+  const window = state.meta?.contextWindow ?? inferContextWindow(state.meta?.model);
   for (let i = state.messages.length - 1; i >= 0; i--) {
     const m = state.messages[i];
-    if (m.role === "assistant" && m.usage) {
-      usage = m.usage;
-      break;
-    }
+    if (m.role !== "assistant" || !hasUsage(m.usage)) continue;
+    const ctx =
+      (m.usage!.input_tokens ?? 0) +
+      (m.usage!.cache_creation_input_tokens ?? 0) +
+      (m.usage!.cache_read_input_tokens ?? 0);
+    peak = Math.max(peak, ctx);
+    if (!usage) usage = m.usage;
   }
   if (!usage) return undefined;
   const ctx =
@@ -955,7 +968,7 @@ function computeCtxPct(state: ClaudeStreamState): number | undefined {
     (usage.cache_creation_input_tokens ?? 0) +
     (usage.cache_read_input_tokens ?? 0);
   if (ctx <= 0) return undefined;
-  return Math.min(100, (ctx / window) * 100);
+  return Math.min(100, (ctx / liftContextWindow(window, peak)) * 100);
 }
 
 export function summarize(

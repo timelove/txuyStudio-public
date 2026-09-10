@@ -293,12 +293,6 @@ export function TerminalPane({
       const cellH = container.clientHeight / rows;
       const cx = Math.min(Math.max(buf.cursorX, 0), cols - 1);
       const cy = Math.min(Math.max(buf.cursorY, 0), rows - 1);
-      // [IME 诊断] 对比 claude vs codex:buffer.type(normal/alternate)、cursorY、baseY、viewportY、算出的 top。
-      // 目标:确认 claude TUI 偏移根因(cursorY 是否含 baseY?alternate screen 差异?)。
-      const bt = (buf as unknown as { type?: string }).type ?? "?";
-      const baseY = (buf as unknown as { baseY?: number; baseYTop?: number }).baseY ?? -1;
-      const vpY = (buf as unknown as { viewportY?: number; scrollTop?: number }).viewportY ?? -1;
-      console.log(`[IME] type=${bt} cursorX=${buf.cursorX} cursorY=${buf.cursorY} cy(clamped)=${cy} baseY=${baseY} viewportY=${vpY} rows=${rows} cellH=${cellH.toFixed(1)} top=${(cy * cellH).toFixed(0)}`);
       ta.style.left = `${cx * cellW}px`;
       ta.style.top = `${cy * cellH}px`;
     };

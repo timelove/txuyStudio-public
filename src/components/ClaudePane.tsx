@@ -3,14 +3,17 @@ import { invoke } from "@tauri-apps/api/core";
 import { selectEnclosingPre } from "../lib/selectEnclosingPre";
 import { SettingsModal } from "./SettingsModal";
 import { Dialog, DialogContent, DialogTitle } from "./ui/Dialog";
+import { BottomToast } from "./ui/BottomToast";
+import { ContextMeter } from "./ui/ContextMeter";
 import { useTranslation } from "react-i18next";
 import type { ShellKind, SplitDirection } from "../domain/paneTree";
 import type { WorkspaceSession } from "../domain/sessions";
 import type { ClaudeTransport } from "../domain/claudeTransport";
 import type { ShellRunTransport } from "../domain/shellRunTransport";
-import type { ShellMessage, ShellRunState } from "../domain/shellRun";
+import { SHELL_MAX_OUTPUT_LINES, type ShellMessage, type ShellRunState } from "../domain/shellRun";
 import type { BackgroundTaskInfo, ClaudeBlock, ClaudeMessage, ClaudeSessionKind, ClaudeStreamState, ClaudeUsage, CompactMeta } from "../domain/claudeStream";
-import { hasPendingApproval as hasPendingApprovalFn, hasPendingPlan as hasPendingPlanFn, inferContextWindow, summarize } from "../domain/claudeStream";
+import { hasPendingApproval as hasPendingApprovalFn, hasPendingPlan as hasPendingPlanFn, hasUsage, inferContextWindow, summarize } from "../domain/claudeStream";
+import { liftContextWindow } from "../domain/contextMeter";
 import {
   getToolConfig,
   getToolCategory,
@@ -608,6 +611,19 @@ export function ClaudePane(props: ClaudePaneProps) {
     const id = setTimeout(() => setRetryFailedMsg(null), 5000);
     return () => clearTimeout(id);
   }, [retryFailedMsg]);
+
+  // compact 失败 toast:transport state 的 compactError 常驻(直至下次 compact 覆盖),
+  // UI 层 dismissed 镜像——compactError 变化(新错误)时重置重新弹,8s 自动消失 + ✕ 手动关。
+  const compactError = state?.compactError ?? null;
+  const [compactErrorDismissed, setCompactErrorDismissed] = useState(false);
+  useEffect(() => {
+    setCompactErrorDismissed(false);
+  }, [compactError]);
+  useEffect(() => {
+    if (!compactError || compactErrorDismissed) return;
+    const id = window.setTimeout(() => setCompactErrorDismissed(true), 8000);
+    return () => window.clearTimeout(id);
+  }, [compactError, compactErrorDismissed]);
   const [rewindOpen, setRewindOpen] = useState(false);
   /** 模型选择器:每次打开时从后端 list_claude_models 实时拉取的可用 model id 列表(读 claude
    *  settings.json env,cc-switch 切供应商后下次打开即见新模型,无需改前端预置)。 */
@@ -731,15 +747,17 @@ export function ClaudePane(props: ClaudePaneProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTabId]);
 
-  // 自动贴底:流式 token / 新消息 / 状态变化时,若用户未上滚(stickRef)则滚到底。
-  // useLayoutEffect(paint 前同步跑)而非 useEffect,避免「先 paint 未滚、再滚」的 1 帧闪烁。
-  // lastMsg 捕获流式 token 增长(applyEvent 每次给流式消息建新对象 -> ref 变 -> effect 触发)。
-  const lastMsg = state && state.messages.length > 0 ? state.messages[state.messages.length - 1] : undefined;
+  // 自动贴底:**条数变化/新末条/状态翻转**时 paint 前同步滚(无 1 帧闪烁);流式 token 同条
+  // 文本增长不触发本 effect——每 token 读 scrollHeight 在十万节点容器上是强制同步布局(卡顿源),
+  // 换行撑高/异步 md 高亮撑高由下方 ResizeObserver 兜底贴底。
+  const msgCount = state?.messages.length ?? 0;
+  const lastMsgId = msgCount > 0 ? state!.messages[msgCount - 1].id : undefined;
+  const shellCount = shellState?.messages.length ?? 0;
   useLayoutEffect(() => {
     if (!stickRef.current) return;
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [lastMsg, state?.status]);
+  }, [msgCount, lastMsgId, shellCount, state?.status]);
   // 切 tab:重置贴底 + 立即滚到底(切到的 tab 应显示最新)。
   useLayoutEffect(() => {
     stickRef.current = true;
@@ -1373,42 +1391,23 @@ export function ClaudePane(props: ClaudePaneProps) {
     return () => window.removeEventListener("keydown", handler);
   }, [focused]);
 
-  // —— 会话时长计时(首次出现消息开始,setInterval 每秒更新)——
+  // —— 会话时长:首次出现消息记起点;显示走 ElapsedText 本地 tick(不每秒重渲染整个 pane)——
   const [sessionStart, setSessionStart] = useState<number | null>(null);
-  const [elapsed, setElapsed] = useState(0);
   useEffect(() => {
     if (sessionStart === null && state && state.messages.length > 0) {
       setSessionStart(Date.now());
     }
   }, [state, sessionStart]);
-  useEffect(() => {
-    if (sessionStart === null) return;
-    const update = () => setElapsed(Date.now() - sessionStart);
-    update();
-    const id = window.setInterval(update, 1000);
-    return () => window.clearInterval(id);
-  }, [sessionStart]);
 
-  // 本轮(thinking/running)已耗时:busy 从 false→true 时记 turnStart(=本轮开始),
-  // 每秒 tick 显示「本轮思考时长」(区别于 elapsed 会话总时长)。busy 结束清零。
+  // 本轮(thinking/running)已耗时:busy 从 false→true 时记 turnStart(=本轮开始)。
+  // busy 结束清零。显示走 ElapsedText 本地每秒 tick,不触发消息流父组件重渲染。
   const [turnStart, setTurnStart] = useState<number | null>(null);
-  const [turnElapsed, setTurnElapsed] = useState(0);
   const prevBusyRef = useRef(false);
   useEffect(() => {
     if (busy && !prevBusyRef.current) setTurnStart(Date.now());
     else if (!busy) setTurnStart(null);
     prevBusyRef.current = busy;
   }, [busy]);
-  useEffect(() => {
-    if (turnStart === null) {
-      setTurnElapsed(0);
-      return;
-    }
-    const update = () => setTurnElapsed(Date.now() - (turnStart ?? 0));
-    update();
-    const id = window.setInterval(update, 1000);
-    return () => window.clearInterval(id);
-  }, [turnStart]);
 
   // 本次会话累计 token(遍历所有 assistant message 的 usage 求和;input 每轮含历史,反映实际计费)。
   const sessionTokens = useMemo(() => {
@@ -1437,27 +1436,42 @@ export function ClaudePane(props: ClaudePaneProps) {
     return undefined;
   })();
 
-  // 当前上下文用量:取最近一条 assistant message 的 usage(input_tokens 含全部历史 ≈ 当前上下文占用)。
-  // window = 上下文窗口上限(从 result.modelUsage.contextWindow 动态取,200k 或 1m;未到 result 前用 200k 兜底)。
-  // ctx 显示「ctx <window> · <pct>%」:<window> 是会话上限,pct 是当前占用。无 usage 时也返回 window(显上限)。
+  // 当前上下文用量:取最近一条**有真实用量**的 assistant message 的 usage
+  // (input + cache_creation + cache_read ≈ 当前上下文占用,三字段互斥——本机 jsonl 实测)。
+  // glm 流式中 assistant usage 恒全 0 对象(非 null),须 hasUsage 过滤,否则每轮流式中
+  // ctx 跳回 0 显示「剩 200k · 0.0%」抖动。
+  // window = meta.contextWindow(result.modelUsage 回填)?? inferContextWindow 兜底;
+  // 网关模型(glm-5.3 实测输入到过 376k)真实窗口远超 200k 兜底时按会话峰值动态抬升
+  // (liftContextWindow),否则剩余为负、占比虚高失真。无 usage 时也返回 window(显上限)。
   const contextInfo = useMemo(() => {
     if (!state) return null;
-    const window = state.meta?.contextWindow ?? inferContextWindow(model);
+    const fallback = state.meta?.contextWindow ?? inferContextWindow(model);
     let usage: ClaudeUsage | undefined;
+    let peak = 0;
     for (let i = state.messages.length - 1; i >= 0; i--) {
-      if (state.messages[i].role === "assistant" && state.messages[i].usage) {
-        usage = state.messages[i].usage;
-        break;
-      }
+      const m = state.messages[i];
+      if (m.role !== "assistant" || !hasUsage(m.usage)) continue;
+      const u = m.usage!;
+      const c = (u.input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0);
+      peak = Math.max(peak, c);
+      if (!usage) usage = u;
     }
     const ctx = usage
       ? (usage.input_tokens ?? 0) +
         (usage.cache_creation_input_tokens ?? 0) +
         (usage.cache_read_input_tokens ?? 0)
       : 0;
+    const window = liftContextWindow(fallback, peak);
     const pct = ctx > 0 ? Math.min(100, (ctx / window) * 100) : 0;
     return { window, ctx, pct };
-  }, [state]);
+  }, [state, model]);
+
+  // 合并后的消息流(claude + `!` shell),useMemo 缓存:否则每次按键/每帧 render 都重跑
+  // O(n) 归并 + Date.parse,跑过 `!` 命令后是每帧 O(n log n)。
+  const mergedMessages = useMemo(
+    () => mergeClaudeAndShellMessages(state?.messages ?? [], shellState?.messages ?? []),
+    [state?.messages, shellState?.messages],
+  );
 
   // 是否有待决策的计划:最后一条 assistant 消息的末块是 exit_plan_mode。
   // 批准/拒绝后会追加 user 消息 → 末消息变 user → false,自然反映「已处理」(暂停解除)。
@@ -1758,21 +1772,24 @@ export function ClaudePane(props: ClaudePaneProps) {
         <div ref={scrollRef} onScroll={handleScroll} className="mx-scroll-pretty relative min-h-0 overflow-y-auto px-4 py-4" style={{ fontSize }}>
           {state && (state.messages.length > 0 || (shellState?.messages.length ?? 0) > 0) ? (
             <div ref={contentRef} className="mx-auto w-full max-w-[54.25rem] space-y-1">
-              {mergeClaudeAndShellMessages(state.messages, shellState?.messages ?? []).map((item) =>
+              {mergedMessages.map((item) =>
                 item.kind === "shell" ? (
-                  <ShellRow key={`shell-${item.msg.id}`} message={item.msg} t={t} onInterrupt={handleShellInterrupt} />
+                  <div key={`shell-${item.msg.id}`} className="mx-chat-row">
+                    <ShellRow message={item.msg} t={t} onInterrupt={handleShellInterrupt} />
+                  </div>
                 ) : (
-                  <MessageRow
-                    key={item.msg.id}
-                    message={item.msg}
-                    t={t}
-                    onApprovePlan={handleApprovePlan}
-                    onReject={handleReject}
-                    resolvedApprovals={resolvedApprovals}
-                    onApproveTool={handleApproveTool}
-                    onRejectTool={handleRejectTool}
-                    onFeedback={handleFeedback}
-                  />
+                  <div key={item.msg.id} className="mx-chat-row">
+                    <MessageRow
+                      message={item.msg}
+                      t={t}
+                      onApprovePlan={handleApprovePlan}
+                      onReject={handleReject}
+                      resolvedApprovals={resolvedApprovals}
+                      onApproveTool={handleApproveTool}
+                      onRejectTool={handleRejectTool}
+                      onFeedback={handleFeedback}
+                    />
+                  </div>
                 ),
               )}
             </div>
@@ -1827,7 +1844,7 @@ export function ClaudePane(props: ClaudePaneProps) {
                         : t("claudepane.toolRunning")}
                 </span>
                 <span className="tabular-nums text-[var(--mx-faint)]">
-                  ⏱ {formatElapsed(turnElapsed)}　↑{formatTokens(sessionTokens.input)} ↓{formatTokens(sessionTokens.output)}
+                  <ElapsedText start={turnStart} prefix="⏱ " />　↑{formatTokens(sessionTokens.input)} ↓{formatTokens(sessionTokens.output)}
                 </span>
                 {/* busy 期间的后台任务入口:琥珀徽标点开任务面板(主任务正显示在左侧,bgCount>0 才显)。
                     与非 busy 琥珀行共用 menuMode==="tasks" 与 TaskListContent(busy 与非 busy 互斥渲染,不冲突)。 */}
@@ -2277,18 +2294,13 @@ export function ClaudePane(props: ClaudePaneProps) {
                           </PopoverContent>
                         )}
                       </Popover>
-                      {/* ctx:上下文窗口 + 占用%(取最近 assistant usage / contextWindow)。
-                          全局 StatusBar 已移除 ctx(避免重复),此为每 tab 唯一 ctx 显示。 */}
-                      <span
-                        className="shrink-0"
-                        title={contextInfo && contextInfo.ctx > 0 ? `已用 ${contextInfo.ctx.toLocaleString()} / ${contextInfo.window.toLocaleString()} tokens(${contextInfo.pct.toFixed(1)}%)` : `窗口上限 ${(contextInfo?.window ?? inferContextWindow(model)).toLocaleString()} tokens`}
-                      >
-                        ctx {formatTokens(contextInfo?.window ?? inferContextWindow(model))}{contextInfo && contextInfo.ctx > 0 ? ` · ${contextInfo.pct.toFixed(1)}%` : ""}
-                      </span>
+                      {/* ctx 迷你仪表:进度条=占用、分数=已用/窗口,阈值着色提示该 /compact;
+                          hover 看剩余/百分比明细。全局 StatusBar 已移除 ctx,此为每 tab 唯一显示。 */}
+                      {contextInfo && <ContextMeter used={contextInfo.ctx} window={contextInfo.window} />}
                       <span className="shrink-0">
                         ↑{formatTokens(sessionTokens.input)} ↓{formatTokens(sessionTokens.output)}
                       </span>
-                      <span className="shrink-0 whitespace-nowrap">⏱ {formatElapsed(elapsed)}</span>
+                      <span className="shrink-0 whitespace-nowrap"><ElapsedText start={sessionStart} prefix="⏱ " /></span>
                       <span className="shrink-0 tabular-nums" title="本会话累计成本(估算)">{formatCost(state?.lastResult?.totalCostUsd)}</span>
                     </div>
                   </div>
@@ -2392,24 +2404,24 @@ export function ClaudePane(props: ClaudePaneProps) {
                   <div>↓ 输出<span className="ml-2 text-[var(--mx-text)]">{formatTokens(sessionTokens.output)}</span></div>
                   <div>ctx 窗口<span className="ml-2 text-[var(--mx-text)]">{formatTokens(contextInfo?.window ?? inferContextWindow(model))}</span></div>
                   <div>累计成本<span className="ml-2 text-[var(--mx-text)]">{formatCost(state?.lastResult?.totalCostUsd)}</span></div>
-                  <div>耗时<span className="ml-2 text-[var(--mx-text)]">{formatElapsed(elapsed)}</span></div>
+                  <div>耗时<span className="ml-2 text-[var(--mx-text)]"><ElapsedText start={sessionStart} /></span></div>
                 </div>
               </DialogContent>
             </Dialog>
             {unsupportedMsg && (
-              <div className="fixed bottom-4 left-1/2 z-50 -translate-x-1/2 rounded-lg border border-[var(--mx-orange-border)] bg-[var(--mx-surface)] px-3 py-1.5 text-[11px] text-[var(--mx-warning-bright)] shadow-lg">
+              <BottomToast tone="warning" onClose={() => setUnsupportedMsg(null)}>
                 {unsupportedMsg}
-              </div>
+              </BottomToast>
             )}
-            {state?.compactError && (
-              <div className="fixed bottom-4 left-1/2 z-50 -translate-x-1/2 rounded-lg border border-[var(--mx-danger-border)] bg-[var(--mx-surface)] px-3 py-1.5 text-[11px] text-[var(--mx-danger-bright)] shadow-lg">
-                {t("claudepane.compactFailed", { error: state.compactError })}
-              </div>
+            {compactError && !compactErrorDismissed && (
+              <BottomToast onClose={() => setCompactErrorDismissed(true)}>
+                {t("claudepane.compactFailed", { error: compactError })}
+              </BottomToast>
             )}
             {retryFailedMsg && (
-              <div className="fixed bottom-4 left-1/2 z-50 -translate-x-1/2 max-w-[80vw] rounded-lg border border-[var(--mx-danger-border)] bg-[var(--mx-surface)] px-3 py-1.5 text-[11px] text-[var(--mx-danger-bright)] shadow-lg">
+              <BottomToast onClose={() => setRetryFailedMsg(null)}>
                 {retryFailedMsg}
-              </div>
+              </BottomToast>
             )}
     </article>
   );
@@ -2835,7 +2847,21 @@ function mergeClaudeAndShellMessages(
  * 与 MessageRow 平级(不经 MessageRow,因 ShellMessage 不是 ClaudeMessage)。仿 BashToolView
  * 的 chevron + `$` + 命令范式,但默认展开输出(stderr 红色),running 时显示中断按钮。
  */
-function ShellRow({
+/**
+ * 把连续同 stream 的输出行合并成段:20k 行也只渲染数个 span(逐行 div 会撑出海量节点)。
+ * 后端 BufReader::lines() 剥掉了行尾,合并时补回 \n。
+ */
+function outputSegments(lines: ShellMessage["output"]): Array<{ stream: "stdout" | "stderr"; text: string }> {
+  const segs: Array<{ stream: "stdout" | "stderr"; text: string }> = [];
+  for (const line of lines) {
+    const last = segs[segs.length - 1];
+    if (last && last.stream === line.stream) last.text += line.text + "\n";
+    else segs.push({ stream: line.stream, text: line.text + "\n" });
+  }
+  return segs;
+}
+
+const ShellRow = memo(function ShellRow({
   message,
   t,
   onInterrupt,
@@ -2900,13 +2926,19 @@ function ShellRow({
             </button>
           )}
         </div>
-        {/* 输出区:逐行渲染,stdout 默认色 / stderr 红色。默认展开(便于看实时流)。无输出时 running 显占位。 */}
+        {/* 输出区:连续同 stream 合并成段(节点数=颜色切换次数),stdout muted / stderr 红。
+            默认展开便于看实时流;超 SHELL_MAX_OUTPUT_LINES 截尾时有提示。 */}
         {message.output.length > 0 ? (
           <pre className="mx-scroll mt-0.5 max-h-[40vh] overflow-auto whitespace-pre-wrap break-words rounded bg-[var(--mx-surface-2)] px-2 py-1 font-mono leading-relaxed">
-            {message.output.map((line, i) => (
-              <div key={i} className={line.stream === "stderr" ? "text-[var(--mx-danger-bright)]" : "text-[var(--mx-muted)]"}>
-                {line.text}
+            {message.truncated && (
+              <div className="mb-1 text-[10px] text-[var(--mx-warning)]">
+                {t("claudepane.shellOutputTruncated", { n: SHELL_MAX_OUTPUT_LINES })}
               </div>
+            )}
+            {outputSegments(message.output).map((seg, i) => (
+              <span key={i} className={seg.stream === "stderr" ? "text-[var(--mx-danger-bright)]" : "text-[var(--mx-muted)]"}>
+                {seg.text}
+              </span>
             ))}
           </pre>
         ) : message.status === "running" ? (
@@ -2917,7 +2949,7 @@ function ShellRow({
       </div>
     </div>
   );
-}
+});
 
 /** 时间戳格式化(message.timestamp 可能是 ISO 串或 null)。 */
 function formatTime(ts: string | null): string | null {
@@ -2946,6 +2978,25 @@ function formatElapsed(ms: number): string {
   if (h > 0) return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
   return `${m}:${String(s).padStart(2, "0")}`;
 }
+
+/**
+ * 自更新的耗时文本:内部 setInterval 每秒只重渲染自己,避免在父级(ClaudePane)放
+ * setState 每秒惊动整棵消息流树(长会话下每秒一次全树 reconcile)。start=null 显 0:00。
+ */
+const ElapsedText = memo(function ElapsedText({ start, prefix }: { start: number | null; prefix?: string }) {
+  const [, tick] = useState(0);
+  useEffect(() => {
+    if (start === null) return;
+    const id = window.setInterval(() => tick((n) => n + 1), 1000);
+    return () => window.clearInterval(id);
+  }, [start]);
+  return (
+    <>
+      {prefix}
+      {formatElapsed(start === null ? 0 : Date.now() - start)}
+    </>
+  );
+});
 
 /**
  * 思考状态动画(claude code CLI 风格:三个 violet 圆点错峰呼吸)。

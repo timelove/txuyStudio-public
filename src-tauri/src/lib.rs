@@ -177,9 +177,24 @@ fn show_window(app: tauri::AppHandle, window: tauri::Window) {
     }
 }
 
+/// 应用退出前同步回收全部子进程/句柄(PTY/claude/codex/`!` shell/fs watcher)。
+///
+/// portable-pty child drop 不 kill,`.cmd` 包装下 node 更是孙子进程——不主动回收,
+/// PowerShell/claude/codex/node 会在应用退出后继续存活,随使用天数累积拖慢整机。
+/// 必须同步执行(ExitRequested 时 async runtime 即将关闭,spawn_blocking 不保证跑完):
+/// 先 prevent_exit → 本函数 taskkill /F /T 杀整棵树 → app.exit(0)。
+fn shutdown_all(app: &tauri::AppHandle) {
+    log::info!("shutdown_all: killing all child sessions and stopping fs watchers");
+    app.state::<PtyRegistry>().kill_all_blocking();
+    app.state::<ClaudeRegistry>().kill_all_blocking();
+    app.state::<CodexRegistry>().kill_all_blocking();
+    app.state::<ShellRunRegistry>().kill_all_blocking();
+    app.state::<FsWatcherRegistry>().stop_all();
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         // 日志插件在 setup 内注册（需要 AppHandle 解析日志目录）。
         // 详见 `build_log_plugin`：目录不可用时降级为 stdout，不阻断启动。
         .plugin(tauri_plugin_opener::init())
@@ -195,9 +210,12 @@ pub fn run() {
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { .. } = event {
                 let label = window.label();
-                if label.starts_with(windows::PROJECT_WINDOW_PREFIX) {
+                if let Some(project_id) = label.strip_prefix(windows::PROJECT_WINDOW_PREFIX) {
                     log::info!("project window close requested: {label}, emitting project-window-closed");
                     let _ = window.app_handle().emit("project-window-closed", label);
+                    // 叉窗/dock back 时前端 JS cleanup 不可达(kill_pty 等发不出来),
+                    // 后端兜底回收该项目全部子进程 + fs watcher,否则 detach/dock 循环累积孤儿。
+                    windows::kill_project_sessions(window.app_handle(), project_id);
                 }
                 // 工作台窗口关闭:其项目归档进最近历史 + kill 会话(main 不走此路径)。
                 if windows::is_workspace_window(label) {
@@ -367,6 +385,18 @@ pub fn run() {
             // 笔记 pane:首次建笔记时创建 notes/ 目录(write_file 不建父目录)。
             ensure_dir
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+
+    // 退出回收:最后一个窗口关闭触发 ExitRequested{code:None} → 阻止默认退出 →
+    // 同步杀全部子进程树/停 watcher → 主动 exit(0)。防跨重启孤儿进程累积。
+    // **必须匹配 code:None**(只拦「窗口全关」):exit(0) 自身会再触发 ExitRequested
+    // {code:Some(0)},若对其也 prevent_exit 会 prevent→exit→prevent 死循环退不出去。
+    app.run(|app_handle, event| {
+        if let tauri::RunEvent::ExitRequested { code: None, api, .. } = event {
+            api.prevent_exit();
+            shutdown_all(app_handle);
+            app_handle.exit(0);
+        }
+    });
 }

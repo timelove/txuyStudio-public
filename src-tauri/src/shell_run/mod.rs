@@ -135,4 +135,28 @@ impl ShellRunRegistry {
         log::info!("shell_run kill_project: closed {count} session(s) for {pid}");
         Ok(())
     }
+
+    /// 应用退出时同步杀掉全部 `!` 命令进程(ExitRequested 回调,不能再 spawn_blocking)。
+    pub fn kill_all_blocking(&self) {
+        let drained: HashMap<String, HashMap<String, ShellRunSession>> =
+            self.by_project.lock().map(|mut g| std::mem::take(&mut *g)).unwrap_or_default();
+        let mut count = 0usize;
+        for (_, sessions) in drained {
+            for (tid, session) in sessions {
+                if let Ok(mut k) = session.killed.lock() {
+                    *k = true;
+                }
+                if let Some(mut child) = session.child.lock().ok().and_then(|mut g| g.take()) {
+                    if let Err(e) = child.kill() {
+                        log::warn!("kill_all_blocking(shell_run): kill {tid}: {e}");
+                    }
+                    let _ = child.wait();
+                    count += 1;
+                }
+            }
+        }
+        if count > 0 {
+            log::info!("kill_all_blocking(shell_run): closed {count} session(s)");
+        }
+    }
 }

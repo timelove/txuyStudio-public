@@ -130,7 +130,10 @@ export default function App() {
   useEffect(() => {
     if (!mode.isMain) return;
     let unlisten: (() => void) | undefined;
+    // cancelled:cleanup 先于 listen() resolve 时补注销,防 StrictMode/快切游离 listener。
+    let cancelled = false;
     listen<string>("project-window-closed", (e) => {
+      if (cancelled) return;
       const label = e.payload;
       if (typeof label !== "string") return;
       if (label.startsWith(PROJECT_WINDOW_PREFIX)) {
@@ -144,11 +147,13 @@ export default function App() {
       }
     })
       .then((u) => {
-        unlisten = u;
+        if (cancelled) u();
+        else unlisten = u;
         return null;
       })
       .catch((err) => console.warn("[App] listen project-window-closed failed:", err));
     return () => {
+      cancelled = true;
       unlisten?.();
     };
   }, [mode.isMain]);

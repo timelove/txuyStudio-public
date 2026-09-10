@@ -265,4 +265,26 @@ impl ClaudeRegistry {
         log::info!("claude kill_project: closed {count} session(s) for {pid}");
         Ok(())
     }
+
+    /// 应用退出时同步杀掉全部 claude 长进程(ExitRequested 回调,不能再 spawn_blocking)。
+    /// 锁内 drain、锁外 taskkill /T 杀整棵进程树。
+    pub fn kill_all_blocking(&self) {
+        let drained: HashMap<String, HashMap<String, ClaudeSession>> =
+            self.by_project.lock().map(|mut g| std::mem::take(&mut *g)).unwrap_or_default();
+        let mut count = 0usize;
+        for (_, sessions) in drained {
+            for (_tab, session) in sessions {
+                if let Ok(mut k) = session.killed.lock() {
+                    *k = true;
+                }
+                if let Some(mut child) = session.child.lock().ok().and_then(|mut g| g.take()) {
+                    commands::kill_child_tree(&mut child);
+                    count += 1;
+                }
+            }
+        }
+        if count > 0 {
+            log::info!("kill_all_blocking(claude): killed {count} process tree(s)");
+        }
+    }
 }

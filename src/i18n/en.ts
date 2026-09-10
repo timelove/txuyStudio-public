@@ -294,6 +294,7 @@ const en = {
     shellDone: "Done",
     shellError: "Failed ({{code}})",
     shellInterrupted: "Interrupted",
+    shellOutputTruncated: "Output too long, showing only the last {{n}} lines",
     retrying: "API error, retrying ({{n}}/{{max}})…",
     retryFailed: "Failed after {{max}} retries{{error}}",
     modelCurrent: "Current",

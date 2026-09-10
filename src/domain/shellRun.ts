@@ -52,7 +52,12 @@ export type ShellMessage = {
   exitCode?: number | null;
   /** 发起时刻(ms epoch),用于消息排序。 */
   timestamp: number;
+  /** 输出超过 SHELL_MAX_OUTPUT_LINES 被截掉头部时为 true(UI 提示)。 */
+  truncated?: boolean;
 };
+
+/** 单条命令输出保留的最大行数;超出保留尾部(最新)。防超大输出拖垮渲染/内存。 */
+export const SHELL_MAX_OUTPUT_LINES = 20_000;
 
 /** applyShellEvent 的累积状态(类比 `ClaudeStreamState`,但极简)。 */
 export type ShellRunState = {
@@ -82,82 +87,125 @@ function stripAnsi(s: string): string {
 
 /**
  * 纯函数:把一个事件 payload 归并进 state,返回新 state(不可变更新)。
+ * 单事件包装,语义见 {@link applyShellEvents}。
+ */
+export function applyShellEvent(state: ShellRunState, payload: ShellEventPayload): ShellRunState {
+  return applyShellEvents(state, [payload]);
+}
+
+/**
+ * 纯函数(批量):把一批事件 payload 归并进 state,返回新 state。
+ *
+ * transport 用 rAF 合流:后端逐行 emit 的 output 一帧内可达数十上百条,逐事件 apply 会
+ * O(k²) 拷贝 output 数组 + 每事件一次全树渲染。这里整批只复制一次 messages、同 id 的
+ * output 行攒到批末一次性 append,并按 SHELL_MAX_OUTPUT_LINES 截尾。
  *
  * 归并规则:
  * - start:push 一条 running 消息(空 output),running=true。
- * - output:找到 id 对应消息,output 追加一行(stream 区分 stdout/stderr)。
+ * - output:找到 id 对应消息,批末合并追加(stream 区分 stdout/stderr)。
  * - done:找到 id 对应消息,置 status(done 若 exitCode=0 / error 若非 0)+ exitCode;running 复位
  *   (仅当该 id 是当前 running 的那条)。
  * - interrupted:找到 id 对应消息置 interrupted;running 复位。id 为空(后端兜底)→ 复位当前 running 的。
  */
-export function applyShellEvent(state: ShellRunState, payload: ShellEventPayload): ShellRunState {
+export function applyShellEvents(state: ShellRunState, payloads: ShellEventPayload[]): ShellRunState {
+  if (payloads.length === 0) return state;
   const messages = [...state.messages];
+  let running = state.running;
+  let changed = false;
+  // 批内同 id output 行累积(idx → 新行),批末统一 append(每消息至多一次数组拷贝)。
+  const pendingOutput = new Map<number, ShellOutputLine[]>();
 
-  switch (payload.kind) {
-    case "start": {
-      // 去重:同 id 已有消息(双 listener 等异常路径重复投递)不重复 push,否则幽灵消息
-      // 永久 running(其 done 只会配对到首条)。幂等返回原 state。
-      if (messages.some((m) => m.id === payload.id)) return state;
-      // 陈旧兜底:后端同 tab 单命令语义,新 start 出现说明旧命令已结束(其 done/interrupted
-      // 事件丢失,如 app 重载)。仍 running 的旧消息标记 interrupted,防永久「运行中」假状态。
-      for (let i = 0; i < messages.length; i++) {
-        if (messages[i].status === "running") {
-          messages[i] = { ...messages[i], status: "interrupted" };
+  for (const payload of payloads) {
+    switch (payload.kind) {
+      case "start": {
+        // 去重:同 id 已有消息(双 listener 等异常路径重复投递)不重复 push,否则幽灵消息
+        // 永久 running(其 done 只会配对到首条)。
+        if (messages.some((m) => m.id === payload.id)) break;
+        // 陈旧兜底:后端同 tab 单命令语义,新 start 出现说明旧命令已结束(其 done/interrupted
+        // 事件丢失,如 app 重载)。仍 running 的旧消息标记 interrupted,防永久「运行中」假状态。
+        for (let i = 0; i < messages.length; i++) {
+          if (messages[i].status === "running") {
+            messages[i] = { ...messages[i], status: "interrupted" };
+          }
         }
+        messages.push({
+          id: payload.id,
+          role: "shell",
+          command: payload.command,
+          output: [],
+          status: "running",
+          timestamp: Date.now(),
+        });
+        running = true;
+        changed = true;
+        break;
       }
-      messages.push({
-        id: payload.id,
-        role: "shell",
-        command: payload.command,
-        output: [],
-        status: "running",
-        timestamp: Date.now(),
-      });
-      return { messages, running: true };
-    }
-    case "output": {
-      const idx = messages.findIndex((m) => m.id === payload.id);
-      if (idx === -1) return { messages, running: state.running };
-      const prev = messages[idx];
-      messages[idx] = {
-        ...prev,
-        output: [...prev.output, { stream: payload.stream, text: stripAnsi(payload.chunk) }],
-      };
-      return { messages, running: state.running };
-    }
-    case "done": {
-      const idx = messages.findIndex((m) => m.id === payload.id);
-      const isCurrentRunning = idx !== -1 && messages[idx].status === "running";
-      if (idx !== -1) {
-        const prev = messages[idx];
-        // exitCode===0 → done;非 0 → error;null(无法获取)→ done(中性,不误报失败)。
-        messages[idx] = {
-          ...prev,
-          status: payload.exitCode == null ? "done" : payload.exitCode === 0 ? "done" : "error",
-          exitCode: payload.exitCode,
-        };
+      case "output": {
+        const idx = messages.findIndex((m) => m.id === payload.id);
+        if (idx !== -1) {
+          const buf = pendingOutput.get(idx);
+          const line = { stream: payload.stream, text: stripAnsi(payload.chunk) };
+          if (buf) buf.push(line);
+          else pendingOutput.set(idx, [line]);
+        }
+        break;
       }
-      // running 复位:仅当本条是当前 running 的(避免旧命令的 done 误复位新命令的 running)。
-      return { messages, running: isCurrentRunning ? false : state.running };
-    }
-    case "interrupted": {
-      if (payload.id) {
+      case "done": {
         const idx = messages.findIndex((m) => m.id === payload.id);
         const isCurrentRunning = idx !== -1 && messages[idx].status === "running";
         if (idx !== -1) {
-          messages[idx] = { ...messages[idx], status: "interrupted" };
+          const prev = messages[idx];
+          // exitCode===0 → done;非 0 → error;null(无法获取)→ done(中性,不误报失败)。
+          messages[idx] = {
+            ...prev,
+            status: payload.exitCode == null ? "done" : payload.exitCode === 0 ? "done" : "error",
+            exitCode: payload.exitCode,
+          };
+          changed = true;
         }
-        return { messages, running: isCurrentRunning ? false : state.running };
+        // running 复位:仅当本条是当前 running 的(避免旧命令的 done 误复位新命令的 running)。
+        if (isCurrentRunning) running = false;
+        break;
       }
-      // id 为空(后端兜底中断):复位当前 running 的那条。
-      const runningIdx = messages.findIndex((m) => m.status === "running");
-      if (runningIdx !== -1) {
-        messages[runningIdx] = { ...messages[runningIdx], status: "interrupted" };
-        return { messages, running: false };
+      case "interrupted": {
+        if (payload.id) {
+          const idx = messages.findIndex((m) => m.id === payload.id);
+          const isCurrentRunning = idx !== -1 && messages[idx].status === "running";
+          if (idx !== -1) {
+            messages[idx] = { ...messages[idx], status: "interrupted" };
+            changed = true;
+          }
+          if (isCurrentRunning) running = false;
+        } else {
+          // id 为空(后端兜底中断):复位当前 running 的那条。
+          const runningIdx = messages.findIndex((m) => m.status === "running");
+          if (runningIdx !== -1) {
+            messages[runningIdx] = { ...messages[runningIdx], status: "interrupted" };
+            running = false;
+            changed = true;
+          }
+        }
+        break;
       }
-      return { messages, running: state.running };
+      default:
+        break;
     }
-    default:
-      return state;
   }
+
+  if (pendingOutput.size === 0 && !changed) {
+    return running === state.running ? state : { messages, running };
+  }
+
+  // 批末统一 append output(每消息一次不可变更新);超上限保留尾部最新行。
+  for (const [idx, lines] of pendingOutput) {
+    const prev = messages[idx];
+    let output = prev.output.concat(lines);
+    let truncated = prev.truncated ?? false;
+    if (output.length > SHELL_MAX_OUTPUT_LINES) {
+      output = output.slice(output.length - SHELL_MAX_OUTPUT_LINES);
+      truncated = true;
+    }
+    messages[idx] = { ...prev, output, truncated };
+  }
+  return { messages, running };
 }
