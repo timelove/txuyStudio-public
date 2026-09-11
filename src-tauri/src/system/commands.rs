@@ -8,10 +8,86 @@
 use std::io::BufRead;
 use std::path::{Component, Path, PathBuf};
 
-use sysinfo::System;
+/// 开发者环境体检结果(设置 → 通用「环境体检」分区,全部只读)。
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnvCheck {
+    /// 是否为 Windows Defender 环境(非 Windows/查询失败 → false,前端只显 N/A)。
+    pub defender_available: bool,
+    /// Defender 实时防护是否开启。
+    pub real_time_protection: Option<bool>,
+    /// pnpm 全局 store 路径是否已在 Defender 排除列表(杀软拦截 pnpm install 的主缓解)。
+    pub pnpm_store_excluded: Option<bool>,
+    /// 探测到的 pnpm store 路径(未排除时提示用)。
+    pub pnpm_store_path: Option<String>,
+    /// node.exe 是否在进程排除列表。
+    pub node_excluded: Option<bool>,
+    /// txuy-studio.exe 是否在进程排除列表。
+    pub txuy_excluded: Option<bool>,
+}
+
+/// PowerShell 只读查询(单引号包裹命令,取 stdout trim)。失败返回 None,不抛错——
+/// 体检是尽力而为,任何一项查不到都按 N/A 显示。
+fn ps_query(command: &str) -> Option<String> {
+    let out = crate::pty::commands::command_no_window("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", command])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if s.is_empty() { None } else { Some(s) }
+}
+
+/// 开发者环境体检(只读):Defender 实时防护状态 + 关键排除项(pnpm store/node/本应用)。
+/// 终端里 pnpm install 频繁 EPERM/「unknown 权限」在本机几乎都是 Defender 实时扫描锁
+/// 小文件/junction(pnpm 高并发安装是其重点监控形态);把 store 与进程加排除即根治。
+/// 本命令**只读不改**——修复命令由前端拼好让用户复制到管理员终端执行(不提权)。
+#[tauri::command]
+pub async fn check_dev_environment() -> Result<EnvCheck, String> {
+    // 非 Windows 无 Defender 语义,直接返回不可用(前端显 N/A)。
+    if !cfg!(windows) {
+        return Ok(EnvCheck {
+            defender_available: false,
+            real_time_protection: None,
+            pnpm_store_excluded: None,
+            pnpm_store_path: None,
+            node_excluded: None,
+            txuy_excluded: None,
+        });
+    }
+    // 每项独立 catch(None),单项失败不影响其余。
+    let real_time = ps_query("(Get-MpComputerStatus).RealTimeProtectionEnabled").map(|s| s.eq_ignore_ascii_case("true"));
+    let exclusions = ps_query("@((Get-MpPreference).ExclusionPath + (Get-MpPreference).ExclusionProcess) -join \"|\"");
+    let store_path = ps_query("(pnpm store path) 2>$null");
+    let (pnpm_excluded, node_excluded, txuy_excluded) = match (&exclusions, &store_path) {
+        (Some(list), store) => {
+            let lower = list.to_lowercase();
+            let pnpm = store
+                .as_ref()
+                .map(|sp| lower.contains(&sp.to_lowercase()))
+                .unwrap_or(false);
+            (Some(pnpm), Some(lower.contains("node.exe")), Some(lower.contains("txuy-studio.exe")))
+        }
+        _ => (None, None, None),
+    };
+    Ok(EnvCheck {
+        defender_available: true,
+        real_time_protection: real_time,
+        pnpm_store_excluded: pnpm_excluded,
+        pnpm_store_path: store_path,
+        node_excluded: node_excluded,
+        txuy_excluded: txuy_excluded,
+    })
+}
+
+use sysinfo::{ProcessesToUpdate, System};
+use tauri::State;
 
 use super::{
-    AiCliProviderInfo, AiCliSessionListItem, AiCliSessionMessage, MemoryInfo, ToolUseSummary,
+    AiCliProviderInfo, AiCliSessionListItem, AiCliSessionMessage, MemoryInfo, PerfStats,
+    ToolUseSummary,
 };
 
 /// 读取系统内存占用。无状态、无锁:每次 `new()` + `refresh_memory()`。
@@ -33,6 +109,76 @@ pub async fn get_system_memory() -> Result<MemoryInfo, String> {
         used_bytes: used,
         total_bytes: total,
         percent,
+    })
+}
+
+/// 子进程数缓存的刷新间隔(全进程表枚举对轻量级设计偏重,降频到 10s 趋势精度足够)。
+const CHILDREN_COUNT_TTL: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// 应用性能诊断快照(设置 → 性能面板轮询,2s 一次)。
+///
+/// 轻量化(用户对内存占用的明确设计约束):
+/// - 五个 registry 各注入 `State` 短锁取 len(微秒级);
+/// - 自身进程内存用 `ProcessesToUpdate::Some(&[self_pid])` **只刷新本进程**(单点查询);
+/// - 直接子进程数需全进程表枚举(ppid 匹配),**10s 静态缓存降频**——它是孤儿泄漏的
+///   趋势指标(持续增长即泄漏),不需要 2s 精度。全表枚举毫秒级 + 数 MB 临时分配,
+///   2s 一次长期跑会让分配器 RSS 爬升,降频后开销可忽略。
+#[tauri::command]
+pub async fn get_perf_stats(
+    pty: State<'_, crate::pty::PtyRegistry>,
+    claude: State<'_, crate::claude::ClaudeRegistry>,
+    codex: State<'_, crate::codex::CodexRegistry>,
+    shell: State<'_, crate::shell_run::ShellRunRegistry>,
+    watchers: State<'_, crate::filetree::FsWatcherRegistry>,
+) -> Result<PerfStats, String> {
+    let count = |len: usize| len as u32;
+    let pty_sessions = count(pty.by_project.lock().map(|g| g.values().map(|m| m.len()).sum()).unwrap_or(0));
+    let claude_sessions = count(claude.by_project.lock().map(|g| g.values().map(|m| m.len()).sum()).unwrap_or(0));
+    let codex_sessions = count(codex.by_project.lock().map(|g| g.values().map(|m| m.len()).sum()).unwrap_or(0));
+    let shell_sessions = count(shell.by_project.lock().map(|g| g.values().map(|m| m.len()).sum()).unwrap_or(0));
+    let fs_watchers = count(watchers.by_project.lock().map(|g| g.len()).unwrap_or(0));
+
+    // 自身内存:只刷本进程(单点,轻)。
+    let self_pid = std::process::id();
+    let mut sys = System::new();
+    sys.refresh_processes(ProcessesToUpdate::Some(&[sysinfo::Pid::from_u32(self_pid)]), true);
+    let rust_memory_bytes = sys
+        .process(sysinfo::Pid::from_u32(self_pid))
+        .map(|p| p.memory() * 1024) // sysinfo memory() 单位 KB。
+        .unwrap_or(0);
+
+    // 直接子进程数:全表枚举 + 10s 静态缓存(过期才重算)。
+    static CHILDREN_CACHE: std::sync::Mutex<Option<(std::time::Instant, u32)>> = std::sync::Mutex::new(None);
+    let child_processes = {
+        let mut cache = CHILDREN_CACHE.lock().map_err(|e| e.to_string())?;
+        let fresh = match cache.as_ref() {
+            Some((at, n)) if at.elapsed() < CHILDREN_COUNT_TTL => Some(*n),
+            _ => None,
+        };
+        match fresh {
+            Some(n) => n,
+            None => {
+                let mut sys_all = System::new();
+                sys_all.refresh_processes(ProcessesToUpdate::All, true);
+                let n = sys_all
+                    .processes()
+                    .values()
+                    .filter(|p| p.parent() == Some(sysinfo::Pid::from_u32(self_pid)))
+                    .count() as u32;
+                *cache = Some((std::time::Instant::now(), n));
+                n
+            }
+        }
+    };
+
+    Ok(PerfStats {
+        rust_memory_bytes,
+        child_processes,
+        pty_sessions,
+        claude_sessions,
+        codex_sessions,
+        shell_sessions,
+        fs_watchers,
     })
 }
 

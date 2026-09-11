@@ -10,7 +10,7 @@ import type { ShellRunTransport } from "../domain/shellRunTransport";
 import { SHELL_MAX_OUTPUT_LINES, type ShellMessage, type ShellRunState } from "../domain/shellRun";
 import type { CodexBlock, CodexMessage, CodexSessionKind, CodexStreamState, CodexUsage } from "../domain/codexStream";
 import { summarize } from "../domain/codexStream";
-import { liftContextWindow } from "../domain/contextMeter";
+import { liftContextWindow, totalInputTokens } from "../domain/contextMeter";
 import {
   getToolConfig,
   getToolCategory,
@@ -961,13 +961,14 @@ export function CodexPane(props: CodexPaneProps) {
   }, [busy]);
 
   // 会话累计 token(遍历 assistant usage 求和;turn_completed 回填,整轮近似)。
+  // totalInputTokens:input 已含 cached 的语义下直接相加会双倍。
   const sessionTokens = useMemo(() => {
     if (!state) return { input: 0, output: 0 };
     let input = 0;
     let output = 0;
     for (const m of state.messages) {
       if (m.role === "assistant" && m.usage) {
-        input += (m.usage.input_tokens ?? 0) + (m.usage.cached_input_tokens ?? 0) + (m.usage.cache_write_input_tokens ?? 0);
+        input += totalInputTokens(m.usage.input_tokens ?? 0, m.usage.cached_input_tokens ?? 0, m.usage.cache_write_input_tokens ?? 0);
         output += m.usage.output_tokens ?? 0;
       }
     }
@@ -977,12 +978,14 @@ export function CodexPane(props: CodexPaneProps) {
   // 状态栏 model:meta.model(spawn -m 乐观 + hydrate 回填的 config 默认)。
   const model = state?.meta?.model;
 
-  // 当前上下文用量:lastUsage(input+cached+cache_write)/contextWindow(catalog 回填,无则不显 %)。
+  // 当前上下文用量:lastUsage/contextWindow(catalog 回填,无则不显 %)。
+  // totalInputTokens 兼容语义:openai/responses 的 input_tokens 本就含 cached(子集关系),
+  // 直接三项相加会双倍;公式自动判别取真实总量。
   // ctx 被实测突破 catalog 窗口时动态抬升(liftContextWindow,网关模型 catalog 窗口可能偏小),
   // 防剩余为负/占比恒 100%。lastUsage 只在轮末 turn.completed 回填,流式中保持上一轮真实值不抖。
   const contextInfo = useMemo(() => {
     const u = state?.lastUsage;
-    const ctx = u ? (u.input_tokens ?? 0) + (u.cached_input_tokens ?? 0) + (u.cache_write_input_tokens ?? 0) : 0;
+    const ctx = u ? totalInputTokens(u.input_tokens ?? 0, u.cached_input_tokens ?? 0, u.cache_write_input_tokens ?? 0) : 0;
     const window = contextWindow ? liftContextWindow(contextWindow, ctx) : undefined;
     const pct = ctx > 0 && window ? Math.min(100, (ctx / window) * 100) : 0;
     return { window, ctx, pct };
@@ -1793,7 +1796,7 @@ const MessageRow = memo(function MessageRow({
               ((message.usage.input_tokens ?? 0) > 0 ||
                 (message.usage.output_tokens ?? 0) > 0) && (
                 <span>
-                  ↑{formatTokens((message.usage.input_tokens ?? 0) + (message.usage.cached_input_tokens ?? 0))} ↓
+                  ↑{formatTokens(totalInputTokens(message.usage.input_tokens ?? 0, message.usage.cached_input_tokens ?? 0))} ↓
                   {formatTokens(message.usage.output_tokens ?? 0)}
                 </span>
               )}

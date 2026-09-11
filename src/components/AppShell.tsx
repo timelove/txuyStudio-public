@@ -908,6 +908,38 @@ export function AppShell({
     setFocused(null);
   }, [focused, visibleProjectIds, treesByProject]);
 
+  // B 计划后台回收:「非钉住 + 非可见」的项目 → 杀其全部 PTY + 停 fs watcher(pane tree
+  // 与 claude/codex 长进程保留)。可见 = 钉住并排 ∪ active;切走即回收,切回时 TerminalPane
+  // 重新挂载 spawn(pane tree 里的 cwd 即起点,历史由后端 transcript 回放兜底);claude 长进程
+  // 不杀(切回 --resume 续接,杀掉反而丢运行中轮次)。`!` 命令同理保留(短命,自然结束)。
+  // 比较前一组可见集,只回收「刚刚离开」的,避免初次挂载/每次渲染重复 kill。
+  const prevVisibleRef = useRef<Set<ProjectId> | null>(null);
+  useEffect(() => {
+    const prev = prevVisibleRef.current;
+    prevVisibleRef.current = new Set(visibleProjectIds);
+    if (prev === null) return; // 首帧:不回收(等第一次真实的可见性变化)。
+    const pinned = new Set(pinnedProjectIds);
+    for (const pid of prev) {
+      if (visibleProjectIds.includes(pid)) continue; // 仍可见。
+      if (pinned.has(pid)) continue; // 钉住的项目即使被 active 切走也保留(detach 流程独立管理)。
+      // 离开可见区 → 回收该项目的 PTY transport 池(前端 stop+kill,后端树杀收尾)。
+      const pool = transportsRef.current;
+      const prefix = `${pid}::`;
+      for (const key of Array.from(pool.keys())) {
+        if (!key.startsWith(prefix)) continue;
+        const parts = key.split("::");
+        const tabId = parts[2] ?? "";
+        const t = pool.get(key);
+        if (t) void t.stop(tabId).catch(() => {});
+        pool.delete(key);
+      }
+      // fs watcher:pane unmount 走不到(项目整列不渲染时 FileTreePane 卸载会 stop,此处兜底
+      // 「tree 保留但 pane 已不渲染」窗口期;后端引用计数幂等)。
+      void invoke("stop_fs_watch", { projectId: pid }).catch(() => {});
+      console.debug("[AppShell] bg-reclaim: project left visible set, PTY recycled:", pid);
+    }
+  }, [visibleProjectIds, pinnedProjectIds]);
+
   // 卸载时停掉所有 transport。
   useEffect(() => {
     return () => {

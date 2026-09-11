@@ -64,20 +64,25 @@ const SIZE: Record<ButtonSize, string> = {
   "icon-lg": "grid h-full w-[44px] place-items-center",
 };
 
-/** 各变体的颜色表达,全部基于 --mx-* token。 */
+/** 各变体的颜色表达,全部基于 --mx-* token。
+ *
+ * **文字色必须用 `text-(color:--mx-*)` 显式类型**:Tailwind v4 对含 var() 的
+ * `text-[var(--x)]` 有 color/font-size 歧义(同元素再有 `text-[11px]` 等字号类时,
+ * var 版会被编译路径吞掉/竞争,实测 default 变体的深色字在青底上完全不显示——
+ * 「性能面板复制按钮空壳」根因;`text-(color:--x)` 是 v4 的 CSS 变量颜色简写,无歧义)。 */
 const VARIANT: Record<ButtonVariant, string> = {
   default:
-    "bg-[var(--mx-accent)] text-[var(--mx-editor-bg)] font-semibold hover:brightness-110",
+    "bg-[var(--mx-accent)] text-(color:--mx-editor-bg) font-semibold hover:brightness-110",
   outline:
-    "border border-[var(--mx-border-strong)] text-[var(--mx-text)] hover:bg-[var(--mx-hover-bg)]",
+    "border border-[var(--mx-border-strong)] text-(color:--mx-text) hover:bg-[var(--mx-hover-bg)]",
   ghost:
-    "text-[var(--mx-muted)] hover:text-[var(--mx-text)] hover:bg-[var(--mx-hover-bg)]",
+    "text-(color:--mx-muted) hover:text-(color:--mx-text) hover:bg-[var(--mx-hover-bg)]",
   selected:
-    "border border-[var(--mx-accent)] bg-[var(--mx-accent-soft)] text-[var(--mx-text)]",
+    "border border-[var(--mx-accent)] bg-[var(--mx-accent-soft)] text-(color:--mx-text)",
   danger:
-    "border border-[var(--mx-danger-border)] text-[var(--mx-danger)] hover:bg-[var(--mx-danger-bg)]",
+    "border border-[var(--mx-danger-border)] text-(color:--mx-danger) hover:bg-[var(--mx-danger-bg)]",
   accent:
-    "bg-[var(--mx-accent-soft)] text-[var(--mx-accent-bright)] hover:bg-[var(--mx-accent-soft)]",
+    "bg-[var(--mx-accent-soft)] text-(color:--mx-accent-bright) hover:bg-[var(--mx-accent-soft)]",
 };
 
 export function Button({

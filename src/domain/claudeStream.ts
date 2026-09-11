@@ -17,7 +17,7 @@
 // `isPermissionDenied` 用于 hasPendingApproval 判定(审批被拒的 tool_use)。claudeToolConfigs 仅
 // `import type` 依赖本文件(类型擦除),故此处值 import 无运行时循环。
 import { isPermissionDenied } from "./claudeToolConfigs";
-import { liftContextWindow } from "./contextMeter";
+import { liftContextWindow, totalInputTokens } from "./contextMeter";
 
 /** 后端 emit 的 claude-event 事件外壳。 */
 export type ClaudeEvent = {
@@ -606,17 +606,18 @@ export function applyEvent(state: ClaudeStreamState, payload: ClaudeEventPayload
         const blocks = finalizePendingTools(m.blocks);
         if (blocks !== m.blocks) next.messages[i] = { ...m, blocks };
       }
-      // 最近 assistant 消息置 streaming=false + 回填本轮真实用量:glm 代理把 token 用量放在
-      // result.usage(assistant message.usage 流式时恒为 0),回填让 ctx/sessionTokens/行尾 token 取到真实值。
-      // 不限 streaming:result 是轮末事件,最近 assistant 即本轮;resume 重发已在 assistant 分支用
-      // hasUsage 保护,不会被这里的 0 值覆盖。
+      // 最近 assistant 消息置 streaming=false + 回填本轮耗时。**usage 优先保留流式快照**:
+      // claude code 的 result.usage 官方语义是**会话累计**(多轮之和),而流式 assistant 事件
+      // 的 usage 是本轮快照(jsonl 实测 98% 带真实值,互斥语义)——用累计值覆盖会让 ctx/行尾
+      // token 显示成「会话累计」(长会话轻松超 1m,模型真实窗口不可能超限,显示必错)。
+      // 仅当流式恒全 0(旧版 glm)时才退回 result 值兜底(hasUsage 判定)。
       for (let i = next.messages.length - 1; i >= 0; i--) {
         if (next.messages[i].role === "assistant") {
           const prev = next.messages[i];
           next.messages[i] = {
             ...prev,
             streaming: false,
-            usage: payload.usage ?? prev.usage,
+            usage: hasUsage(prev.usage) ? prev.usage : (payload.usage ?? prev.usage),
             // 回填本轮耗时(assistant 末行显示 ⏱)。durationMs 仅 result 有,流式中不显示。
             durationMs: payload.durationMs ?? prev.durationMs,
           };
@@ -943,10 +944,11 @@ export function inferContextWindow(model?: string): number {
 }
 
 /**
- * 当前上下文占用%(0-100):取最近一条**有真实用量**的 assistant message 的 usage
- * (input_tokens + cache_creation_input_tokens + cache_read_input_tokens ≈ 当前上下文占用)
+ * 当前上下文占用%(0-100):取最近一次 compact boundary 后、最近一条**有真实用量**的
+ * assistant message 的 usage(totalInputTokens 兼容互斥/重叠网关语义)
  * / contextWindow。glm 流式中 assistant usage 恒全 0 对象(非 null),须 hasUsage 过滤,
- * 否则轮次进行中占比跳回 0。窗口被实测 ctx 突破时动态抬升(liftContextWindow)。
+ * 否则轮次进行中占比跳回 0。窗口被实测 ctx 突破时动态抬升(liftContextWindow;
+ * 峰值只在当前压缩段内统计,跨 compact 不累计——否则窗口单调爬升)。
  */
 function computeCtxPct(state: ClaudeStreamState): number | undefined {
   let usage: ClaudeUsage | undefined;
@@ -954,19 +956,22 @@ function computeCtxPct(state: ClaudeStreamState): number | undefined {
   const window = state.meta?.contextWindow ?? inferContextWindow(state.meta?.model);
   for (let i = state.messages.length - 1; i >= 0; i--) {
     const m = state.messages[i];
+    if (m.role === "compact" && m.compactKind === "boundary") break;
     if (m.role !== "assistant" || !hasUsage(m.usage)) continue;
-    const ctx =
-      (m.usage!.input_tokens ?? 0) +
-      (m.usage!.cache_creation_input_tokens ?? 0) +
-      (m.usage!.cache_read_input_tokens ?? 0);
+    const ctx = totalInputTokens(
+      m.usage!.input_tokens ?? 0,
+      m.usage!.cache_creation_input_tokens ?? 0,
+      m.usage!.cache_read_input_tokens ?? 0,
+    );
     peak = Math.max(peak, ctx);
     if (!usage) usage = m.usage;
   }
   if (!usage) return undefined;
-  const ctx =
-    (usage.input_tokens ?? 0) +
-    (usage.cache_creation_input_tokens ?? 0) +
-    (usage.cache_read_input_tokens ?? 0);
+  const ctx = totalInputTokens(
+    usage.input_tokens ?? 0,
+    usage.cache_creation_input_tokens ?? 0,
+    usage.cache_read_input_tokens ?? 0,
+  );
   if (ctx <= 0) return undefined;
   return Math.min(100, (ctx / liftContextWindow(window, peak)) * 100);
 }

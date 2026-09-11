@@ -74,12 +74,10 @@ impl PtyRegistry {
         let pid = project_id.to_string();
         tokio::task::spawn_blocking(move || {
             for (sid, mut session) in sessions {
-                if let Err(e) = session.child.kill() {
-                    log::warn!("kill_project: kill session {sid}: {e}");
-                }
-                if let Err(e) = session.child.wait() {
-                    log::warn!("kill_project: wait session {sid}: {e}");
-                }
+                // 杀整棵树(taskkill /F /T):孙进程不死会持有 ConPTY 句柄,
+                // 读循环线程 + transcript 永久泄漏(见 kill_pty_child_tree 注释)。
+                commands::kill_pty_child_tree(&mut session.child);
+                let _ = sid;
             }
         })
         .await
@@ -90,18 +88,15 @@ impl PtyRegistry {
     }
 
     /// 应用退出时同步杀掉全部 PTY 会话(不跨 await;ExitRequested 回调中 runtime 即将关闭,
-    /// 不能再 spawn_blocking)。锁内 drain、锁外 kill/wait。
+    /// 不能再 spawn_blocking)。锁内 drain、锁外杀树收尸。
     pub fn kill_all_blocking(&self) {
         let drained: HashMap<String, HashMap<String, PtySession>> =
             self.by_project.lock().map(|mut g| std::mem::take(&mut *g)).unwrap_or_default();
         let mut count = 0usize;
         for (_, sessions) in drained {
-            for (sid, mut session) in sessions {
+            for (_sid, mut session) in sessions {
                 count += 1;
-                if let Err(e) = session.child.kill() {
-                    log::warn!("kill_all_blocking(pty): kill {sid}: {e}");
-                }
-                let _ = session.child.wait();
+                commands::kill_pty_child_tree(&mut session.child);
             }
         }
         if count > 0 {

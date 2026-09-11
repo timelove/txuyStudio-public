@@ -31,13 +31,14 @@ use state::commands::{
     set_codex_sandbox, set_locale, set_terminal_font_size, set_theme,
 };
 use system::commands::{
-    check_commands_installed, delete_ai_cli_session, get_ai_cli_session_messages, get_git_branch,
-    get_system_memory, list_ai_cli_providers, list_ai_cli_sessions, reveal_in_folder,
+    check_commands_installed, check_dev_environment, delete_ai_cli_session, get_ai_cli_session_messages,
+    get_git_branch, get_perf_stats, get_system_memory, list_ai_cli_providers, list_ai_cli_sessions,
+    reveal_in_folder,
 };
 use std::collections::HashSet;
 use std::sync::Mutex;
 
-use tauri::{Emitter, Manager};
+use tauri::{Emitter, Listener, Manager};
 use tauri_plugin_log::{Builder as LogBuilder, Target, TargetKind};
 use windows::{close_project_window, open_new_workspace_window, open_project_window};
 
@@ -149,6 +150,29 @@ fn build_log_plugin(app: &tauri::AppHandle) -> tauri::plugin::TauriPlugin<tauri:
 #[tauri::command]
 fn get_app_info() -> String {
     "txuyStudio AI CLI Workspace".to_string()
+}
+
+/// 重设全部窗口图标(前端检测到系统休眠唤醒后调用)。
+///
+/// 唤醒后 Windows 任务栏图标偶发退化为默认 exe 图标(WebView2 回收/Explorer 图标缓存
+/// 失效的已知现象);`WM_SETICON` 重发即恢复。幂等、微秒级,全部失败也仅 warn。
+#[tauri::command]
+fn refresh_window_icons(app: tauri::AppHandle) {
+    let icon = match app.default_window_icon() {
+        Some(i) => i.clone(),
+        None => {
+            log::warn!("refresh_window_icons: no default window icon configured");
+            return;
+        }
+    };
+    let windows = app.webview_windows();
+    let count = windows.len();
+    for (label, win) in windows {
+        if let Err(e) = win.set_icon(icon.clone()) {
+            log::warn!("refresh_window_icons: set icon for {label} failed: {e}");
+        }
+    }
+    log::debug!("refresh_window_icons: refreshed {count} window(s)");
 }
 
 /// 显示窗口(由前端首帧 splash 渲染后调用),消除 WebView2 冷启动阶段的原生白屏。
@@ -267,6 +291,12 @@ pub fn run() {
             );
             app.manage(state::AppState::new(snapshot));
 
+            // tauri 2.11.3 内存缓解(H3):Pending::Emit 队列只在「存在 Rust 侧监听且被回调」
+            // 时排水(event/listener.rs 的 maybe_pending),本项目无任何 Rust 监听 -> 并发 emit
+            // 撞锁时该次 payload(String)永久驻留(严格随事件量增长)。注册一个哑监听让排水
+            // 条件成立,零成本(上游修复前的缓解;PTY 输出已另行合批降消息数,见读循环注释)。
+            let _ = app.listen("mx-drain", |_| {});
+
             // 注册「已 show 窗口」记录集(供 show_window 命令 + 兜底定时器去重)。
             app.manage(WindowsShown(Mutex::new(HashSet::new())));
 
@@ -313,6 +343,8 @@ pub fn run() {
         .manage(ShellRunRegistry::default())
         .invoke_handler(tauri::generate_handler![
             get_app_info,
+            // 休眠唤醒后重设窗口图标(任务栏图标退化恢复)。
+            refresh_window_icons,
             // 启动白屏消除:窗口默认 hidden,前端首帧渲染后调 show_window 显示。
             show_window,
             // PTY（阶段 3：已按 projectId 归属分桶，close_project 时 kill 整个项目）
@@ -367,6 +399,7 @@ pub fn run() {
             open_new_workspace_window,
             // 系统环境查询（内存占用 + git 分支 + 命令安装检测 + AI CLI 会话列表/删除/消息流/provider 注册表）
             get_system_memory,
+            get_perf_stats,
             get_git_branch,
             check_commands_installed,
             list_ai_cli_providers,
@@ -375,6 +408,8 @@ pub fn run() {
             get_ai_cli_session_messages,
             // 资源管理器定位文件/目录(/select 选中或打开所在文件夹)
             reveal_in_folder,
+            // 开发者环境体检(Defender 排除项只读检测,防 pnpm 等被杀软拦截)
+            check_dev_environment,
             // 嵌入式文件树(方案 C:list_dir 只读列一层 + notify 实时监听 + read_file 预览 + write_file M2 编辑落盘)
             list_dir,
             list_files,

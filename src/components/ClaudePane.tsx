@@ -13,7 +13,7 @@ import type { ShellRunTransport } from "../domain/shellRunTransport";
 import { SHELL_MAX_OUTPUT_LINES, type ShellMessage, type ShellRunState } from "../domain/shellRun";
 import type { BackgroundTaskInfo, ClaudeBlock, ClaudeMessage, ClaudeSessionKind, ClaudeStreamState, ClaudeUsage, CompactMeta } from "../domain/claudeStream";
 import { hasPendingApproval as hasPendingApprovalFn, hasPendingPlan as hasPendingPlanFn, hasUsage, inferContextWindow, summarize } from "../domain/claudeStream";
-import { liftContextWindow } from "../domain/contextMeter";
+import { liftContextWindow, totalInputTokens } from "../domain/contextMeter";
 import {
   getToolConfig,
   getToolCategory,
@@ -1410,16 +1410,18 @@ export function ClaudePane(props: ClaudePaneProps) {
   }, [busy]);
 
   // 本次会话累计 token(遍历所有 assistant message 的 usage 求和;input 每轮含历史,反映实际计费)。
+  // totalInputTokens 兼容互斥/重叠两种网关语义(重叠语义下直接相加会双倍)。
   const sessionTokens = useMemo(() => {
     if (!state) return { input: 0, output: 0 };
     let input = 0;
     let output = 0;
     for (const m of state.messages) {
       if (m.role === "assistant" && m.usage) {
-        input +=
-          (m.usage.input_tokens ?? 0) +
-          (m.usage.cache_creation_input_tokens ?? 0) +
-          (m.usage.cache_read_input_tokens ?? 0);
+        input += totalInputTokens(
+          m.usage.input_tokens ?? 0,
+          m.usage.cache_creation_input_tokens ?? 0,
+          m.usage.cache_read_input_tokens ?? 0,
+        );
         output += m.usage.output_tokens ?? 0;
       }
     }
@@ -1436,31 +1438,30 @@ export function ClaudePane(props: ClaudePaneProps) {
     return undefined;
   })();
 
-  // 当前上下文用量:取最近一条**有真实用量**的 assistant message 的 usage
-  // (input + cache_creation + cache_read ≈ 当前上下文占用,三字段互斥——本机 jsonl 实测)。
+  // 当前上下文用量:取最近一次 compact boundary 之后、最近一条**有真实用量**的 assistant
+  // message 的 usage(totalInputTokens 兼容官方互斥/网关重叠两种字段语义)。
   // glm 流式中 assistant usage 恒全 0 对象(非 null),须 hasUsage 过滤,否则每轮流式中
   // ctx 跳回 0 显示「剩 200k · 0.0%」抖动。
+  // **boundary 停扫**:compact 已把历史压缩,前段的 usage 峰值不再代表当前上下文——
+  // 继续累计会让 liftContextWindow 的窗口跨压缩单调爬升(多次 compact 循环后显示超 1m)。
   // window = meta.contextWindow(result.modelUsage 回填)?? inferContextWindow 兜底;
-  // 网关模型(glm-5.3 实测输入到过 376k)真实窗口远超 200k 兜底时按会话峰值动态抬升
-  // (liftContextWindow),否则剩余为负、占比虚高失真。无 usage 时也返回 window(显上限)。
+  // 实测 ctx 突破兜底时按**当前压缩段**峰值动态抬升(liftContextWindow)。
   const contextInfo = useMemo(() => {
     if (!state) return null;
     const fallback = state.meta?.contextWindow ?? inferContextWindow(model);
+    const used = (u: ClaudeUsage) =>
+      totalInputTokens(u.input_tokens ?? 0, u.cache_creation_input_tokens ?? 0, u.cache_read_input_tokens ?? 0);
     let usage: ClaudeUsage | undefined;
     let peak = 0;
     for (let i = state.messages.length - 1; i >= 0; i--) {
       const m = state.messages[i];
+      if (m.role === "compact" && m.compactKind === "boundary") break;
       if (m.role !== "assistant" || !hasUsage(m.usage)) continue;
-      const u = m.usage!;
-      const c = (u.input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0);
+      const c = used(m.usage!);
       peak = Math.max(peak, c);
-      if (!usage) usage = u;
+      if (!usage) usage = m.usage!;
     }
-    const ctx = usage
-      ? (usage.input_tokens ?? 0) +
-        (usage.cache_creation_input_tokens ?? 0) +
-        (usage.cache_read_input_tokens ?? 0)
-      : 0;
+    const ctx = usage ? used(usage) : 0;
     const window = liftContextWindow(fallback, peak);
     const pct = ctx > 0 ? Math.min(100, (ctx / window) * 100) : 0;
     return { window, ctx, pct };

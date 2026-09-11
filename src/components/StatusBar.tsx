@@ -72,9 +72,18 @@ export function StatusBar({ focusedProject, gitBranch, claudeStatuses, codexStat
   }, []);
 
   // 内存轮询。invoke 失败(非 Tauri 环境)→ 置 null,该区隐藏。
+  // 顺带做**唤醒检测**:相邻两次 tick 的墙上时钟 gap 远超轮询间隔(>30s)说明系统刚从
+  // 休眠/睡眠恢复(webview 定时器冻结)→ 重设窗口图标(唤醒后任务栏图标偶发退化为默认
+  // exe 图标,WM_SETICON 重发即恢复)。时钟跳变对休眠唤醒 100% 敏感。
   useEffect(() => {
     let alive = true;
+    let lastTick = Date.now();
     const fetchMem = () => {
+      const now = Date.now();
+      if (now - lastTick > 30_000) {
+        invoke("refresh_window_icons").catch(() => {});
+      }
+      lastTick = now;
       invoke<{ usedBytes: number; totalBytes: number }>("get_system_memory")
         .then((m) => {
           if (alive) setMem({ usedBytes: m.usedBytes, totalBytes: m.totalBytes });

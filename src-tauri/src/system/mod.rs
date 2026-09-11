@@ -14,6 +14,22 @@ pub struct MemoryInfo {
     pub percent: f64,
 }
 
+/// 应用性能诊断快照(设置 → 性能面板)。registry 计数 + 自身进程内存 + 直接子进程数。
+/// 子进程数是孤儿泄漏的直接指标:正常 ≈ 会话数 + 数个瞬态,持续增长即有泄漏。
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PerfStats {
+    /// Rust 主进程工作集(字节)。
+    pub rust_memory_bytes: u64,
+    /// 以本进程为父的直接子进程数(PTY shell/claude/codex/`!` 命令 + 瞬态)。
+    pub child_processes: u32,
+    pub pty_sessions: u32,
+    pub claude_sessions: u32,
+    pub codex_sessions: u32,
+    pub shell_sessions: u32,
+    pub fs_watchers: u32,
+}
+
 /// 单个 AI CLI(Claude / Codex)会话的列表项(轻量,不含消息正文)。
 ///
 /// 由 `list_ai_cli_sessions` 按 `kind` 分发到对应 reader 扫描得到:sessionId 取文件名;
