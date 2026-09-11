@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-09-11
+
+Memory footprint fixes and developer environment check.
+
+### Fixed
+
+- **Rust process memory growth (observed up to 4GB) fixed** — three combined fixes: terminal output events are now batched before delivery (8× fewer messages during output bursts, eliminating event-queue backlog); an internal framework event queue now gets drained; **closing a terminal now kills the whole process tree** (previously only the outer shell was terminated — leftover node/dev-server children held terminal handles, leaking reader threads and buffers forever).
+- **Context meter "exceeds 1m" fixed for real** — the display was overwriting the per-turn snapshot with a session-cumulative usage figure (which grows unboundedly past the model's real window on long proxied sessions). Now shows the actual current-context usage; window estimation no longer doubles or goes negative under gateway reporting semantics.
+- Performance panel backend polling made lightweight (single-process memory query; process-table enumeration throttled to 10s).
+
+### Added
+
+- **Background process recycling** — unpinned projects that leave the visible area now have their terminals and file watchers reaped automatically. Layouts and AI sessions are kept: switching back restarts terminals at their last working directory with recent output replayed, and AI sessions resume.
+- **Developer environment check** (Settings → General) — one-click detection of whether Windows Defender is intercepting package-manager installs (the usual root of EPERM / permission errors), with ready-to-paste fix commands for an elevated terminal.
+
+### Other Fixes
+
+- Taskbar icon no longer degrades to the default after system sleep/wake.
+- Button text invisible in some places (Tailwind v4 style ambiguity) — affected all buttons using the primary variant.
+- Long metric text no longer stretches the settings dialog horizontally.
+
 ## [0.2.0] - 2026-09-10
 
 Performance & stability release: fixes the "gets slower the longer it runs" problem and keeps terminal state across system sleep/wake.
