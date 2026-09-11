@@ -475,11 +475,16 @@ pub async fn spawn_pty(
     );
     tokio::task::spawn_blocking(move || {
         let mut buf = [0u8; 8192];
+        // 输出合批(H1 内存治理):app.emit 走 tao EventLoopProxy 无界队列,每条消息带
+        // JSON 转义 + JS 包装 ~10-25KB 驻留——多 PTY 洪峰(构建输出)遇主线程忙(拖拽窗口/
+        // 同步写盘/休眠唤醒窗口期)时积压可达 GB 级。合批规则:阻塞 read 返回不满块
+        // (n < buf.len())= 管道暂空,立即 flush(空闲不卡显示);连续满块(洪峰)攒到
+        // 64KB 一条 emit,消息数降 ~8 倍,总驻留同比例下降。transcript 写入语义不变。
+        let mut acc: Vec<u8> = Vec::with_capacity(64 * 1024);
         loop {
             match reader.read(&mut buf) {
                 Ok(0) => break, // EOF：子进程已退出
                 Ok(n) => {
-                    // 先写 transcript(emit 与缓存顺序一致,attach 回放不缺尾)再 emit。
                     if let Ok(mut t) = transcript.lock() {
                         t.extend_from_slice(&buf[..n]);
                         if t.len() > PTY_TRANSCRIPT_MAX {
@@ -487,20 +492,35 @@ pub async fn spawn_pty(
                             t.drain(0..excess);
                         }
                     }
-                    let data = String::from_utf8_lossy(&buf[..n]).into_owned();
-                    let _ = app_handle.emit(
-                        "pty-output",
-                        PtyOutput {
-                            session_id: sid.clone(),
-                            data,
-                        },
-                    );
+                    acc.extend_from_slice(&buf[..n]);
+                    if acc.len() >= 64 * 1024 || n < buf.len() {
+                        let data = String::from_utf8_lossy(&acc).into_owned();
+                        let _ = app_handle.emit(
+                            "pty-output",
+                            PtyOutput {
+                                session_id: sid.clone(),
+                                data,
+                            },
+                        );
+                        acc.clear();
+                    }
                 }
                 Err(e) => {
                     log::warn!("pty reader error, session {sid}: {e}");
                     break;
                 }
             }
+        }
+        // EOF/错误退出前把尾巴发掉(会话最后一段输出不丢)。
+        if !acc.is_empty() {
+            let data = String::from_utf8_lossy(&acc).into_owned();
+            let _ = app_handle.emit(
+                "pty-output",
+                PtyOutput {
+                    session_id: sid.clone(),
+                    data,
+                },
+            );
         }
     });
 
@@ -534,6 +554,46 @@ fn extract_last_osc_cwd(bytes: &[u8]) -> Option<String> {
         }
     }
     last
+}
+
+/// kill 整个 PTY 子进程树并收尸(kill_pty / kill_project / kill_all_blocking 共用)。
+///
+/// `child.kill()`(TerminateProcess)只杀直子 powershell——pane 里跑着 node/dev server 等
+/// **孙进程**时,它们继承 ConPTY slave 句柄继续持有 → master 读端永不 EOF → 读循环线程 +
+/// transcript Arc(256KB)+ condRV 句柄永久泄漏(每次 ~1-2.5MB,数天累积数十-百 MB,且整棵
+/// 孙进程残留系统)。`taskkill /F /T /PID` 杀整棵树根治;taskkill spawn 失败回退 child.kill
+/// (语义不劣于现状)。portable-pty 的 trait Child 与 std::process::Child 不同型,故独立于
+/// claude 模块的 kill_child_tree 实现同逻辑。
+pub(crate) fn kill_pty_child_tree(child: &mut Box<dyn portable_pty::Child + Send + Sync>) {
+    #[cfg(windows)]
+    {
+        // process_id() 返回 u32(进程已死也返回历史值);taskkill 找不到 pid 时说明已退,
+        // status() 返回 Ok(非 0),不 fallback,由末尾 wait() 收尸。
+        let killed = match child.process_id() {
+            Some(pid) => match command_no_window("taskkill.exe")
+                .args(["/F", "/T", "/PID", &pid.to_string()])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+            {
+                Ok(_) => true,
+                Err(e) => {
+                    log::warn!("kill_pty_child_tree: taskkill failed for pid {pid}, fallback: {e}");
+                    false
+                }
+            },
+            None => false,
+        };
+        if !killed {
+            let _ = child.kill();
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = child.kill();
+    }
+    let _ = child.wait();
 }
 
 /// 向指定会话写入用户输入（键盘按键）。
@@ -610,15 +670,9 @@ pub async fn kill_pty(
             .ok_or_else(|| format!("session not found: {session_id}"))?
     };
 
-    // portable-pty 的 Child Drop 不保证 kill，必须显式调用；放到 spawn_blocking
-    // 避免阻塞 async runtime 与全局 PTY 锁。
+    // 阻塞的杀树+收尸放 spawn_blocking,避免阻塞 async runtime 与全局 PTY 锁。
     tokio::task::spawn_blocking(move || {
-        if let Err(e) = session.child.kill() {
-            log::warn!("kill_pty: child kill failed for {session_id}: {e}");
-        }
-        if let Err(e) = session.child.wait() {
-            log::warn!("kill_pty: child wait failed for {session_id}: {e}");
-        }
+        kill_pty_child_tree(&mut session.child);
         log::info!("kill_pty: session {session_id} closed");
     })
     .await

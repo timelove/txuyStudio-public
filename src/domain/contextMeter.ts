@@ -13,6 +13,25 @@ export function contextTone(pct: number): string {
 const LIFT_STEP_TOKENS = 50_000;
 
 /**
+ * 估算「当前上下文总输入」token,兼容两种 usage 字段语义(不同网关/事件源不一致):
+ * - 官方 Anthropic 互斥语义:总输入 = input + cache_creation + cache_read(三段不重叠);
+ * - 部分网关重叠语义:input_tokens 已含全部缓存(input=总量,cache_* 是其中子集)——
+ *   直接相加会双倍(用户实测「ctx 超 1m」根因之一)。
+ *
+ * 判别:input ≥ 缓存段之和的 95% 视为重叠语义取 max(input, 缓存和)(≈总量);否则互斥
+ * 语义取和。两种语义下均得真实总输入;全未命中(缓存和=0)时两种语义同值,均正确。
+ *
+ * 已知限制(行为用例验证):互斥语义下的冷启动轮(compact 后 cache 大面积失效、命中率
+ * <51%)数值形态与重叠语义相同,会被判为重叠式而低估一轮(input 偏小侧)——下一轮 cache
+ * 升温即恢复正确。对比旧公式在重叠语义下恒定双倍的误差,可接受。
+ */
+export function totalInputTokens(input: number, ...cacheParts: number[]): number {
+  const cacheSum = cacheParts.reduce((a, b) => a + b, 0);
+  if (cacheSum > 0 && input >= cacheSum * 0.95) return Math.max(input, cacheSum);
+  return input + cacheSum;
+}
+
+/**
  * 动态抬升 ctx 窗口兜底:网关代理模型(如 glm-5.3)真实上下文窗口可能远超 200k 兜底
  * (实测本机会话输入到过 376k 仍正常跑),此时占比虚高一倍、剩余算出负数、占比恒 100%。
  * 实测 ctx 突破兜底窗口 → 抬到 ≥ ctx×1.02 的最小 50k 档(留 2% 余量防边界恒 100%);

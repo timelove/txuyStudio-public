@@ -1,4 +1,6 @@
 import { useTranslation } from "react-i18next";
+import { PerfPanel } from "./PerfPanel";
+import { EnvCheckSection } from "./EnvCheck";
 import { useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { check, type Update } from "@tauri-apps/plugin-updater";
@@ -221,7 +223,7 @@ type SettingsModalProps = {
   onClose: () => void;
   /** 打开时定位到的 tab(状态栏「新版本可用」点击 → about);缺省 general。Dialog 关闭即
    *  卸载内容,defaultValue 每次打开取新值,无需受控切换。 */
-  initialTab?: "general" | "shortcuts" | "about";
+  initialTab?: "general" | "shortcuts" | "performance" | "about";
 };
 
 /**
@@ -277,6 +279,12 @@ export function SettingsModal({ open, onClose, initialTab }: SettingsModalProps)
               {t("settings.tab.shortcuts")}
             </TabsTrigger>
             <TabsTrigger
+              value="performance"
+              className="border-b-2 border-transparent px-1 pb-1.5 text-[12px] text-[var(--mx-muted)] transition-colors hover:text-[var(--mx-text)] data-[state=active]:border-[var(--mx-accent)] data-[state=active]:text-[var(--mx-text)]"
+            >
+              {t("settings.tab.performance")}
+            </TabsTrigger>
+            <TabsTrigger
               value="about"
               className="border-b-2 border-transparent px-1 pb-1.5 text-[12px] text-[var(--mx-muted)] transition-colors hover:text-[var(--mx-text)] data-[state=active]:border-[var(--mx-accent)] data-[state=active]:text-[var(--mx-text)]"
             >
@@ -288,6 +296,8 @@ export function SettingsModal({ open, onClose, initialTab }: SettingsModalProps)
           <div className="mx-scroll min-h-0 flex-1 overflow-y-auto px-4 py-3">
             {/* 通用 tab:语言 + 字体大小 */}
             <TabsContent value="general" className="focus-visible:outline-none">
+              {/* 环境体检分区:Defender 排除项只读检测(防 pnpm 等被杀软拦截)。 */}
+              <EnvCheckSection />
               {/* 主题分区:单选分段控件(ToggleGroup)。数据驱动 THEMES,切换即时生效(CSS data-theme + 终端热切)。 */}
               <section className="mb-4">
                 <div className="mb-1 text-[10px] uppercase tracking-wide text-[var(--mx-faint)]">{t("settings.theme.title")}</div>
@@ -472,6 +482,11 @@ export function SettingsModal({ open, onClose, initialTab }: SettingsModalProps)
                   </div>
                 ))}
               </div>
+            </TabsContent>
+
+            {/* 性能 tab:应用内性能检测(挂载即采样/卸载即停,非常驻)。 */}
+            <TabsContent value="performance" className="focus-visible:outline-none">
+              <PerfPanel />
             </TabsContent>
 
             {/* 关于 tab:产品描述 + GitHub 仓库链接 + 版本/协议/技术栈 */}

@@ -18,6 +18,8 @@
 
 // -- 后端事件 payload(与 `CodexEventPayload` 的 snake_case kind 标签对齐) --
 
+import { totalInputTokens } from "./contextMeter";
+
 /** 后端 emit 的 codex-event 事件外壳。 */
 export type CodexEvent = {
   projectId: string;
@@ -494,7 +496,8 @@ export type CodexSessionSummary = {
  */
 export function summarize(state: CodexStreamState, shellRunning?: boolean): CodexSessionSummary {
   const u = state.lastUsage;
-  const ctxBase = u ? (u.input_tokens ?? 0) + (u.cached_input_tokens ?? 0) + (u.cache_write_input_tokens ?? 0) : 0;
+  // totalInputTokens:openai 语义 input 已含 cached,直接相加会双倍(见 contextMeter 注释)。
+  const ctxBase = u ? totalInputTokens(u.input_tokens ?? 0, u.cached_input_tokens ?? 0, u.cache_write_input_tokens ?? 0) : 0;
   const window = state.meta?.contextWindow;
   const ctxPct = ctxBase > 0 && window ? Math.min(100, (ctxBase / window) * 100) : undefined;
   const extra = { ctxPct, model: state.meta.model, reasoningEffort: state.meta.reasoningEffort };
