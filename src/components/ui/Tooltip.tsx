@@ -32,7 +32,9 @@ const TooltipContent = React.forwardRef<
       ref={ref}
       sideOffset={sideOffset}
       className={cn(
-        "mx-tooltip-content z-[300] border border-[var(--mx-border)] bg-[var(--mx-editor-bg)] px-2 py-1 text-[11px] leading-none text-[var(--mx-text)] shadow-md rounded-[var(--mx-radius-sm)]",
+        // max-w + 换行:长内容(后台任务 description 等原文)不换行会撑出屏幕——原生 title 在
+        // Windows 上就是单行超宽气泡,这是换 Radix Tooltip 的动因。leading-relaxed 多行可读。
+        "mx-tooltip-content z-[300] max-w-[320px] break-words whitespace-normal border border-[var(--mx-border)] bg-[var(--mx-editor-bg)] px-2 py-1 text-[11px] leading-relaxed text-[var(--mx-text)] shadow-md rounded-[var(--mx-radius-sm)]",
         className,
       )}
       {...props}

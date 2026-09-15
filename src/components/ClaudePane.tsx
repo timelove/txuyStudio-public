@@ -241,9 +241,12 @@ function TaskListContent({
       <div className="flex items-center gap-2 rounded px-2 py-1.5 text-[11px]">
         <span aria-hidden className={`h-1.5 w-1.5 shrink-0 rounded-full ${main.pulse ? "animate-pulse" : ""}`} style={{ background: main.color }} />
         <span className="shrink-0 font-[600] text-[var(--mx-text)]">{t("claudepane.mainTask")}</span>
-        <span className="min-w-0 flex-1 truncate text-[var(--mx-muted)]" title={main.label}>
-          {main.label}
-        </span>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <span className="min-w-0 flex-1 cursor-default truncate text-[var(--mx-muted)]">{main.label}</span>
+          </TooltipTrigger>
+          <TooltipContent>{main.label}</TooltipContent>
+        </Tooltip>
       </div>
       <div className="mx-1 border-t border-[var(--mx-border)]" />
       {/* 后台任务(运行中) */}
@@ -256,9 +259,13 @@ function TaskListContent({
         bgTasks.map((task) => (
           <div key={task.taskId} className="group/task flex items-center gap-2 rounded px-2 py-1 text-[11px]">
             <span aria-hidden className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-[#fbbf24]" />
-            <span className="min-w-0 flex-1 truncate text-[var(--mx-text)]" title={task.description}>
-              {task.description || task.taskType}
-            </span>
+            {/* 原生 title 在 Windows 是单行超宽气泡,长 description 撑出屏幕——换 Radix Tooltip(限宽换行)。 */}
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <span className="min-w-0 flex-1 cursor-default truncate text-[var(--mx-text)]">{task.description || task.taskType}</span>
+              </TooltipTrigger>
+              <TooltipContent>{task.description || task.taskType}</TooltipContent>
+            </Tooltip>
             <span className="shrink-0 rounded bg-[var(--mx-border)] px-1 py-px font-mono text-[9px] text-[var(--mx-muted)]">{task.taskType}</span>
             {pendingKillIds.has(task.taskId) ? (
               /* busy 期间点停止已入队:等主轮回 idle 自动合并发送(不能 interrupt——会杀进程树连坐全部后台任务)。 */
@@ -1448,7 +1455,6 @@ export function ClaudePane(props: ClaudePaneProps) {
   // 实测 ctx 突破兜底时按**当前压缩段**峰值动态抬升(liftContextWindow)。
   const contextInfo = useMemo(() => {
     if (!state) return null;
-    const fallback = state.meta?.contextWindow ?? inferContextWindow(model);
     const used = (u: ClaudeUsage) =>
       totalInputTokens(u.input_tokens ?? 0, u.cache_creation_input_tokens ?? 0, u.cache_read_input_tokens ?? 0);
     let usage: ClaudeUsage | undefined;
@@ -1462,7 +1468,11 @@ export function ClaudePane(props: ClaudePaneProps) {
       if (!usage) usage = m.usage!;
     }
     const ctx = usage ? used(usage) : 0;
-    const window = liftContextWindow(fallback, peak);
+    // **权威窗口不抬升**:meta.contextWindow 来自 result.modelUsage.<model>.contextWindow
+    // (网关权威值,实测 glm-5.3[1m] 报 1000000),peak 逼近真实窗口时 liftContextWindow
+    // 会 +2% 抬到 1.05m,显示「窗口超 1m」违和。抬升只留给拿不到权威值的兜底场景
+    // (inferContextWindow 的 200k 猜测可能偏小)。
+    const window = state.meta?.contextWindow ?? liftContextWindow(inferContextWindow(model), peak);
     const pct = ctx > 0 ? Math.min(100, (ctx / window) * 100) : 0;
     return { window, ctx, pct };
   }, [state, model]);
@@ -1818,7 +1828,7 @@ export function ClaudePane(props: ClaudePaneProps) {
 
         {/* 底部浮动输入区:状态行 + textarea + 发送/中断按钮。 */}
         <div className="shrink-0 px-4 pb-3 pt-1">
-          <div className="mx-auto max-w-[54.25rem]">
+          <div className="mx-auto w-full max-w-[54.25rem]">
             {/* 会话状态指示行:retrying(API error 自动重试,最高优先,橙色)> compactRunning(紫)>
                 thinkingNow 思考中(紫)> busy 执行中(蓝,不显示具体工具名,只显「执行中…」)。悬浮在输入框上方,
                 busy 全程可见 -- 此前仅思考阶段显示,长工具运行中用户无从察觉会话仍在进行。
@@ -1867,7 +1877,7 @@ export function ClaudePane(props: ClaudePaneProps) {
                         align="end"
                         sideOffset={4}
                         onOpenAutoFocus={(e) => e.preventDefault()}
-                        className="mx-menu w-[340px] border border-[var(--mx-border)] bg-[var(--mx-surface)] p-1 shadow-xl"
+                        className="mx-menu w-[340px] max-w-[calc(100vw-2rem)] border border-[var(--mx-border)] bg-[var(--mx-surface)] p-1 shadow-xl"
                       >
                         <TaskListContent t={t} main={mainTask} bgTasks={state?.backgroundTasks ?? []} doneNotices={bgDoneNotices} onKillTask={handleKillBgTask} pendingKillIds={pendingKillIds} />
                       </PopoverContent>
@@ -1900,7 +1910,7 @@ export function ClaudePane(props: ClaudePaneProps) {
                     align="start"
                     sideOffset={4}
                     onOpenAutoFocus={(e) => e.preventDefault()}
-                    className="mx-menu w-[340px] border border-[var(--mx-border)] bg-[var(--mx-surface)] p-1 shadow-xl"
+                    className="mx-menu w-[340px] max-w-[calc(100vw-2rem)] border border-[var(--mx-border)] bg-[var(--mx-surface)] p-1 shadow-xl"
                   >
                     <TaskListContent t={t} main={mainTask} bgTasks={state?.backgroundTasks ?? []} doneNotices={bgDoneNotices} onKillTask={handleKillBgTask} pendingKillIds={pendingKillIds} />
                   </PopoverContent>
@@ -2151,7 +2161,7 @@ export function ClaudePane(props: ClaudePaneProps) {
                             align="start"
                             sideOffset={4}
                             onOpenAutoFocus={(e) => e.preventDefault()}
-                            className="mx-menu w-[230px] border border-[var(--mx-border)] bg-[var(--mx-surface)] p-1 shadow-xl"
+                            className="mx-menu w-[230px] max-w-[calc(100vw-2rem)] border border-[var(--mx-border)] bg-[var(--mx-surface)] p-1 shadow-xl"
                           >
                             {PERMISSION_MODES.map((m) => (
                               <button
@@ -2201,7 +2211,7 @@ export function ClaudePane(props: ClaudePaneProps) {
                             align="start"
                             sideOffset={4}
                             onOpenAutoFocus={(e) => e.preventDefault()}
-                            className="mx-menu w-[260px] border border-[var(--mx-border)] bg-[var(--mx-surface)] p-1 shadow-xl"
+                            className="mx-menu w-[260px] max-w-[calc(100vw-2rem)] border border-[var(--mx-border)] bg-[var(--mx-surface)] p-1 shadow-xl"
                           >
                             {/* 当前模型(仿 claude /model:先展示当前实际跑的 model 完整 id;代理把别名
                                 全映射到 GLM 时,预置项均不高亮,此行是「当前」的权威展示)。 */}
@@ -2266,7 +2276,7 @@ export function ClaudePane(props: ClaudePaneProps) {
                             align="start"
                             sideOffset={4}
                             onOpenAutoFocus={(e) => e.preventDefault()}
-                            className="mx-menu w-[150px] border border-[var(--mx-border)] bg-[var(--mx-surface)] p-1 shadow-xl"
+                            className="mx-menu w-[150px] max-w-[calc(100vw-2rem)] border border-[var(--mx-border)] bg-[var(--mx-surface)] p-1 shadow-xl"
                           >
                             {EFFORT_LEVELS.map((l) => {
                               const cur = state?.meta?.effort ?? "auto";
