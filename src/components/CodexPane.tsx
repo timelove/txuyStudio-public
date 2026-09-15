@@ -10,7 +10,7 @@ import type { ShellRunTransport } from "../domain/shellRunTransport";
 import { SHELL_MAX_OUTPUT_LINES, type ShellMessage, type ShellRunState } from "../domain/shellRun";
 import type { CodexBlock, CodexMessage, CodexSessionKind, CodexStreamState, CodexUsage } from "../domain/codexStream";
 import { summarize } from "../domain/codexStream";
-import { liftContextWindow, totalInputTokens } from "../domain/contextMeter";
+import { totalInputTokens } from "../domain/contextMeter";
 import {
   getToolConfig,
   getToolCategory,
@@ -981,12 +981,12 @@ export function CodexPane(props: CodexPaneProps) {
   // 当前上下文用量:lastUsage/contextWindow(catalog 回填,无则不显 %)。
   // totalInputTokens 兼容语义:openai/responses 的 input_tokens 本就含 cached(子集关系),
   // 直接三项相加会双倍;公式自动判别取真实总量。
-  // ctx 被实测突破 catalog 窗口时动态抬升(liftContextWindow,网关模型 catalog 窗口可能偏小),
-  // 防剩余为负/占比恒 100%。lastUsage 只在轮末 turn.completed 回填,流式中保持上一轮真实值不抖。
+  // catalog 窗口是用户可编辑的权威值,不做实测抬升(与 ClaudePane 的 meta.contextWindow 同策略)。
+  // lastUsage 只在轮末 turn.completed 回填,流式中保持上一轮真实值不抖。
   const contextInfo = useMemo(() => {
     const u = state?.lastUsage;
     const ctx = u ? totalInputTokens(u.input_tokens ?? 0, u.cached_input_tokens ?? 0, u.cache_write_input_tokens ?? 0) : 0;
-    const window = contextWindow ? liftContextWindow(contextWindow, ctx) : undefined;
+    const window = contextWindow;
     const pct = ctx > 0 && window ? Math.min(100, (ctx / window) * 100) : 0;
     return { window, ctx, pct };
   }, [state, contextWindow]);
@@ -1222,7 +1222,7 @@ export function CodexPane(props: CodexPaneProps) {
 
         {/* 底部浮动输入区:状态行 + textarea + 发送/中断按钮。 */}
         <div className="shrink-0 px-4 pb-3 pt-1">
-          <div className="mx-auto max-w-[54.25rem]">
+          <div className="mx-auto w-full max-w-[54.25rem]">
             {/* 会话状态指示行:思考中(紫)> 执行中(蓝,带当前 running 工具名)。
                 busy 全程可见 -- 与 ClaudePane 对等,长命令运行中用户也能察觉会话仍在进行。 */}
             {busy && (
@@ -1460,7 +1460,7 @@ export function CodexPane(props: CodexPaneProps) {
                             align="start"
                             sideOffset={4}
                             onOpenAutoFocus={(e) => e.preventDefault()}
-                            className="mx-menu w-[230px] border border-[var(--mx-border)] bg-[var(--mx-surface)] p-1 shadow-xl"
+                            className="mx-menu w-[230px] max-w-[calc(100vw-2rem)] border border-[var(--mx-border)] bg-[var(--mx-surface)] p-1 shadow-xl"
                           >
                             {SANDBOX_MODES.map((m) => (
                               <button
@@ -1514,7 +1514,7 @@ export function CodexPane(props: CodexPaneProps) {
                             align="start"
                             sideOffset={4}
                             onOpenAutoFocus={(e) => e.preventDefault()}
-                            className="mx-menu w-[260px] border border-[var(--mx-border)] bg-[var(--mx-surface)] p-1 shadow-xl"
+                            className="mx-menu w-[260px] max-w-[calc(100vw-2rem)] border border-[var(--mx-border)] bg-[var(--mx-surface)] p-1 shadow-xl"
                           >
                             {/* 当前模型行(仿 claude /model)。 */}
                             <div className="flex items-center gap-2 rounded px-2 py-1.5 text-[var(--mx-text)]">
@@ -1590,7 +1590,7 @@ export function CodexPane(props: CodexPaneProps) {
                             align="start"
                             sideOffset={4}
                             onOpenAutoFocus={(e) => e.preventDefault()}
-                            className="mx-menu w-[150px] border border-[var(--mx-border)] bg-[var(--mx-surface)] p-1 shadow-xl"
+                            className="mx-menu w-[150px] max-w-[calc(100vw-2rem)] border border-[var(--mx-border)] bg-[var(--mx-surface)] p-1 shadow-xl"
                           >
                             {[{ level: "auto" }, ...reasoningLevels.map((l) => ({ level: l }))].map(({ level }) => {
                               const cur = state?.meta?.reasoningEffort ?? "auto";

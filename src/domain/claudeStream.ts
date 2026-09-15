@@ -953,7 +953,6 @@ export function inferContextWindow(model?: string): number {
 function computeCtxPct(state: ClaudeStreamState): number | undefined {
   let usage: ClaudeUsage | undefined;
   let peak = 0;
-  const window = state.meta?.contextWindow ?? inferContextWindow(state.meta?.model);
   for (let i = state.messages.length - 1; i >= 0; i--) {
     const m = state.messages[i];
     if (m.role === "compact" && m.compactKind === "boundary") break;
@@ -973,7 +972,9 @@ function computeCtxPct(state: ClaudeStreamState): number | undefined {
     usage.cache_read_input_tokens ?? 0,
   );
   if (ctx <= 0) return undefined;
-  return Math.min(100, (ctx / liftContextWindow(window, peak)) * 100);
+  // 权威窗口(meta.contextWindow,result.modelUsage 回填)不抬升;仅兜底猜测时按峰值抬升。
+  const window = state.meta?.contextWindow ?? liftContextWindow(inferContextWindow(state.meta?.model), peak);
+  return Math.min(100, (ctx / window) * 100);
 }
 
 export function summarize(
