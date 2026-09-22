@@ -320,6 +320,7 @@ pub async fn spawn_pty(
                     let _ = app.emit(
                         "pty-output",
                         PtyOutput {
+                            project_id: project_id.clone(),
                             session_id: sid.clone(),
                             data,
                         },
@@ -351,6 +352,7 @@ pub async fn spawn_pty(
                 let _ = app.emit(
                     "pty-output",
                     PtyOutput {
+                        project_id: project_id.clone(),
                         session_id: sid.clone(),
                         data,
                     },
@@ -469,6 +471,8 @@ pub async fn spawn_pty(
     // spawn_blocking：portable-pty 的 reader 是阻塞 Read，不能占用 async runtime。
     let app_handle = app.clone();
     let sid = session_id.clone();
+    // 读循环 emit 需带 project_id(前端按 projectId+sessionId 双键路由,见 PtyOutput 注释)。
+    let pid = project_id.clone();
     log::info!(
         "spawn_pty: session {sid} on {shell} ({cols}x{rows}) kind={kind} cwd={cwd_display}{}",
         launch.map(|l| format!(" launch={l}")).unwrap_or_default()
@@ -498,6 +502,7 @@ pub async fn spawn_pty(
                         let _ = app_handle.emit(
                             "pty-output",
                             PtyOutput {
+                                project_id: pid.clone(),
                                 session_id: sid.clone(),
                                 data,
                             },
@@ -517,6 +522,7 @@ pub async fn spawn_pty(
             let _ = app_handle.emit(
                 "pty-output",
                 PtyOutput {
+                    project_id: pid.clone(),
                     session_id: sid.clone(),
                     data,
                 },

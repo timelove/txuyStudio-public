@@ -33,6 +33,8 @@ type ProjectColumnProps = {
   onSetSplitRatio?: (splitId: string, ratio: number, commit: boolean) => void;
   /** 重命名某 tab(笔记随 md 标题更新用,透传给 PaneSurface)。 */
   onRenameTab?: (paneId: string, tabId: string, title: string) => void;
+  /** AI pane ◱ 展开/还原(透传给 PaneSurface → ClaudePane/CodexPane;AppShell 按 split 调比例)。 */
+  onToggleExpandPane?: (paneId: string) => void;
 };
 
 /**
@@ -59,6 +61,7 @@ export function ProjectColumn({
   onMeasurePane,
   onSetSplitRatio,
   onRenameTab,
+  onToggleExpandPane,
 }: ProjectColumnProps) {
   // deriveSessions 已遍历 pane 的 tabs,每个 tab 派生一个 session(id=tabId, paneId=pane.id)。
   const sessions = useMemo(() => deriveSessions(paneTree, project.rootPath), [paneTree, project.rootPath]);
@@ -87,6 +90,7 @@ export function ProjectColumn({
           rootPath={project.rootPath}
           onSetSplitRatio={onSetSplitRatio}
           onRenameTab={onRenameTab}
+          onToggleExpandPane={onToggleExpandPane}
         />
       </div>
     </section>

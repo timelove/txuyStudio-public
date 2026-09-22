@@ -28,6 +28,7 @@ const zh = {
       splitVertical: "纵向",
       close: "关闭 pane",
       noActiveTab: "无活动 tab",
+      expand: "放大 / 还原(主体 pane 占大头)",
     },
   },
   project: {
@@ -256,6 +257,7 @@ const zh = {
   // claudepane(自渲染 claude 对话面板):输入框 / 状态 / 工具卡片 / 错误提示文案。
   claudepane: {
     inputPlaceholder: "发送消息…(Enter 发送,Shift+Enter 换行)",
+    resend: "重新发送",
     slashHint: "输入消息,/ 调命令",
     busy: "Claude 正在响应…",
     thinking: "思考中…",
@@ -336,6 +338,7 @@ const zh = {
   // (无审批/压缩/重试文案;含 sandbox 拦截提示)。`!` 命令文案复用 claudepane.shell*。
   codexpane: {
     slashHint: "发送消息,/ 调命令",
+    resend: "重新发送",
     busy: "Codex 正在响应…",
     thinking: "思考中…",
     runningTool: "正在执行 {{tool}}…",

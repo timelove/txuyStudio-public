@@ -161,17 +161,38 @@ impl AppState {
     }
 }
 
-/// 默认 pane tree:单根 pane + 单 PowerShell tab。新项目 / 旧数据迁移用。
+/// 默认 pane tree:**AI 主体**——横向分屏 Claude(claudepane)占 60% + PowerShell 占 40%。
+///
+/// 2026-09-22 依用户定位「用这个工具就是要用 AI」:新项目打开即 AI 为主角、终端为第二表面,
+/// 不再一进来是个空 shell。ratio 可拖拽分隔线或 AI header 的 ◱ 按钮调整。前端运行时树全部
+/// 来自本快照(前端 `defaultPaneTree` 仅作 mock/缺失兜底,保持单 pane 形态,见 paneTree.ts)。
 pub fn default_pane_tree() -> PaneNode {
-    PaneNode::Pane {
-        id: "ps-1".to_string(),
-        tabs: vec![PaneTab {
-            id: "ps-1".to_string(),
-            shell_kind: "shell".to_string(),
-            title: "PowerShell".to_string(),
-            cwd: None,
-        }],
-        active_tab_id: "ps-1".to_string(),
+    PaneNode::Split {
+        id: "root".to_string(),
+        direction: SplitDirection::Horizontal,
+        ratio: 0.6,
+        children: vec![
+            PaneNode::Pane {
+                id: "ai-1".to_string(),
+                tabs: vec![PaneTab {
+                    id: "ai-1".to_string(),
+                    shell_kind: "claudepane".to_string(),
+                    title: "Claude".to_string(),
+                    cwd: None,
+                }],
+                active_tab_id: "ai-1".to_string(),
+            },
+            PaneNode::Pane {
+                id: "ps-1".to_string(),
+                tabs: vec![PaneTab {
+                    id: "ps-1".to_string(),
+                    shell_kind: "shell".to_string(),
+                    title: "PowerShell".to_string(),
+                    cwd: None,
+                }],
+                active_tab_id: "ps-1".to_string(),
+            },
+        ],
     }
 }
 

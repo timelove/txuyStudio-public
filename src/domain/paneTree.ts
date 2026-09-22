@@ -213,6 +213,34 @@ export function findPane(root: PaneNode, paneId: string): PaneLeaf | null {
   return findPane(root.children[0], paneId) ?? findPane(root.children[1], paneId);
 }
 
+/**
+ * 找包含某 pane 的**最近** split(沿叶子向上第一个 split)。供 AI pane 的 ◱ 展开/还原用:
+ * 主体 pane(默认 Claude)通过它定位自己所在分屏,再调 setSplitRatio 改大/还原比例。
+ *
+ * 返回 `paneIsFirst`——pane 是否是该 split 的**第一个 child(左/上)**。split.ratio 是「第一个
+ * child」的占比,所以判断/设置 AI pane 的占比必须带上这一侧:pane 在第二侧时其占比 = 1 - ratio。
+ *
+ * pane 不在任何 split 中(单 pane 项目)返回 null,调用方 no-op。
+ */
+export function findSplitContaining(
+  root: PaneNode,
+  paneId: string,
+): { splitId: string; ratio: number; paneIsFirst: boolean } | null {
+  if (root.type === "pane") return null;
+  const [left, right] = root.children;
+  const inLeft = findPane(left, paneId) !== null;
+  if (inLeft) {
+    const deeper = findSplitContaining(left, paneId);
+    return deeper ?? { splitId: root.id, ratio: root.ratio, paneIsFirst: true };
+  }
+  const inRight = findPane(right, paneId) !== null;
+  if (inRight) {
+    const deeper = findSplitContaining(right, paneId);
+    return deeper ?? { splitId: root.id, ratio: root.ratio, paneIsFirst: false };
+  }
+  return null;
+}
+
 /** 按 tabId 反查所属 pane(供 StatusBar onFocusClaudeTab 从 tabId 定位 paneId)。无则 null。 */
 export function findPaneByTabId(root: PaneNode, tabId: string): PaneLeaf | null {
   if (root.type === "pane") {

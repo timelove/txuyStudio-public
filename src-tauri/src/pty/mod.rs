@@ -33,10 +33,15 @@ pub const PTY_TRANSCRIPT_MAX: usize = 256 * 1024;
 
 /// `pty-output` 事件的载荷。emit 要求 `Serialize + Clone`。
 ///
-/// `rename_all = "camelCase"` 让前端拿到 `{ sessionId, data }`。
+/// `rename_all = "camelCase"` 让前端拿到 `{ projectId, sessionId, data }`。
+/// **必须带 `project_id`**:事件是全局广播,前端按 (projectId, sessionId) 双键路由。
+/// 各项目默认 pane 的 sessionId 恒为 `ps-1`(default_pane_tree 固定),若只按 sessionId
+/// 过滤,项目 A/B 的 `ps-1` transport 会同时命中彼此的 shell 输出——跨项目输出互串
+/// (另一个项目的提示符/OSC cwd 标记渲染进本面板)。projectId 让隔离真正成立。
 #[derive(Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PtyOutput {
+    pub project_id: String,
     pub session_id: String,
     /// PTY 原始字节经 `String::from_utf8_lossy` 解码后的字符串（MVP 保真够用）。
     pub data: String,
@@ -51,6 +56,26 @@ pub struct PtyOutput {
 #[derive(Default)]
 pub struct PtyRegistry {
     pub by_project: Mutex<HashMap<String, HashMap<String, PtySession>>>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// pty-output 载荷契约:必须带 projectId(前端按 projectId+sessionId 双键路由)。
+    /// 锁定 camelCase 映射——若字段名/序列化漏配,前端拿不到 projectId,跨项目 ps-1
+    /// 互串会复现(默认 pane 的 sessionId 全项目恒为 "ps-1",单靠 sessionId 无法隔离)。
+    #[test]
+    fn pty_output_payload_has_project_id() {
+        let out = PtyOutput {
+            project_id: "p-a".into(),
+            session_id: "ps-1".into(),
+            data: "hello".into(),
+        };
+        let json = serde_json::to_string(&out).expect("serialize");
+        assert!(json.contains("\"projectId\":\"p-a\""), "payload missing projectId: {json}");
+        assert!(json.contains("\"sessionId\":\"ps-1\""));
+    }
 }
 
 impl PtyRegistry {
