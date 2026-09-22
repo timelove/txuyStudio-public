@@ -23,6 +23,11 @@ export class TauriPtyTransport implements TerminalTransport {
   private readonly maxTranscriptLength = 1_000_000;
   /** 进行中的 spawn（去重用）：React StrictMode 双 mount 或并发 start 只会真正 spawn 一次。 */
   private startingPromise: Promise<void> | null = null;
+  /** 请求中的确定性 sessionId(spawn 前端已知,即传入的 tabId)。后端 attach/死会话重建路径会在
+   *  spawn_pty 返回**之前**就 emit transcript 回放,此时 ptySessionId 仍为 null——事件与 invoke
+   *  响应是两条通道无顺序保证,只按 ptySessionId 过滤会把先到的回放丢掉(重挂 pane 空白)。
+   *  spawn 在途期间按它兜底路由。 */
+  private requestedSessionId: string | null = null;
   /** 首次 spawn 的启动命令覆盖(AppShell 从 pendingResumeRef 注入,如 "codex resume <id>")。
    *  优先于 launch_command_for(kind);仅首次 spawn 生效,doStart 消费后清空(已有 session 只 resize)。 */
   private launchOverride: string | null = null;
@@ -66,6 +71,8 @@ export class TauriPtyTransport implements TerminalTransport {
     const rows = opts?.size?.rows ?? 24;
     const cwd = opts?.cwd;
     const shellKind = opts?.shellKind ?? "shell";
+    // spawn 在途期间按请求 id 兜底路由(见字段注释:回放事件可能先于 invoke 响应到达)。
+    this.requestedSessionId = sessionId;
 
     try {
       // 1) 先订阅全局事件，避免丢首批输出。
@@ -74,7 +81,8 @@ export class TauriPtyTransport implements TerminalTransport {
       // 另一项目的提示符/OSC cwd 标记渲染进本面板,即「根目录变成第一个项目的」)。
       if (!this.unlisten) {
         this.unlisten = await listen<PtyOutputPayload>("pty-output", (event) => {
-          if (event.payload.projectId === this.projectId && event.payload.sessionId === this.ptySessionId) {
+          const routeId = this.ptySessionId ?? this.requestedSessionId;
+          if (event.payload.projectId === this.projectId && event.payload.sessionId === routeId) {
             this.handlePtyChunk(sessionId, event.payload.data);
           }
         });
@@ -89,6 +97,7 @@ export class TauriPtyTransport implements TerminalTransport {
       const launchOverride = this.launchOverride;
       this.ptySessionId = await invoke<string>("spawn_pty", { projectId: this.projectId, rows, cols, cwd: cwd ?? null, shellKind, launchOverride: launchOverride ?? null, sessionId });
       this.launchOverride = null;
+      this.requestedSessionId = null;
     } finally {
       this.startingPromise = null;
     }
@@ -115,6 +124,7 @@ export class TauriPtyTransport implements TerminalTransport {
       });
       this.ptySessionId = null;
     }
+    this.requestedSessionId = null;
     this.unlisten?.();
     this.unlisten = null;
   }

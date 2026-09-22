@@ -20,12 +20,16 @@ import {
   focusPane,
   getActiveTab,
   listPanes,
+  paneShareToRatio,
+  ratioToPaneShare,
   renameTab,
   setActiveTab,
   setSplitRatio,
   splitPaneWithPane,
   surfaceKey,
   transportKey,
+  EXPAND_PANE_SHARE,
+  MAIN_PANE_DEFAULT_SHARE,
 } from "../domain/paneTree";
 import { SHELL_KIND_META } from "../domain/shellKinds";
 import type { PinnedLayout } from "../domain/pinnedLayout";
@@ -50,6 +54,7 @@ import { ProjectColumn } from "./ProjectColumn";
 import { ShellSidebar } from "./ShellSidebar";
 import { StatusBar } from "./StatusBar";
 import { TopProjectBar } from "./TopProjectBar";
+import { SettingsModal, type SettingsTab } from "./SettingsModal";
 import { InstallPromptModal } from "./InstallPromptModal";
 
 type AppShellProps = {
@@ -204,6 +209,13 @@ export function AppShell({
   }, []);
   // 焦点:复合身份(哪个项目的哪个 pane)。tab 级 active 存在树里(activeTabId)。
   const [focused, setFocused] = useState<PaneRef | null>(null);
+  // ◱ 展开态记忆:splitKey(projectId::splitId)→ { 触发展开的 paneId, 展开前该 pane 的占比 }。
+  // 有记忆项 = 该 split 的主体 pane 展开中;还原时回填记忆值——用户拖拽的手感比例不再被吞
+  // (旧实现还原一律吸附 0.6)。手动拖拽分隔线落盘会清掉对应记忆(用户接管比例);跨重启不持久化
+  // (会话内记忆足够,持久化需扩后端 PaneNode 结构,暂不做)。
+  const [expandPrevMap, setExpandPrevMap] = useState<Map<string, { paneId: string; prevShare: number }>>(
+    () => new Map(),
+  );
 
   // 安装提示模态内容(TUI 工具未安装 / yazi 缺依赖)。null=不显示。
   const [installPrompt, setInstallPrompt] = useState<PromptSpec | null>(null);
@@ -404,13 +416,24 @@ export function AppShell({
    * 拖拽分屏分隔线调比例。commit=false(拖拽中):只更新内存态 treesByProject,不刷后端
    * (高频 pointermove 落盘会刷屏);commit=true(松手):走 commitTree 落盘 save_pane_tree。
    * splitId 带 keyPrefix(projectId::split-...),而树里 split.id 不带前缀,定位前剥掉。
+   * source="expand" 表示来自 ◱ 展开/还原(自带记忆管理);默认(拖拽松手)清掉该 split 的
+   * 展开记忆——用户手动接管比例后,◱ 回到「展开」语义,不再原地「还原」。
    */
   const handleSetSplitRatio = useCallback(
-    (projectId: ProjectId, splitId: string, ratio: number, commit: boolean) => {
+    (projectId: ProjectId, splitId: string, ratio: number, commit: boolean, source?: "expand") => {
       // 用函数式更新读最新树:拖拽中 onMove 闭包可能持有旧 handleSetSplitRatio,
       // 经 setState updater 总是拿到 prev 最新值,避免基于过期树计算。
       const prefix = `${projectId}::`;
       const bareId = splitId.startsWith(prefix) ? splitId.slice(prefix.length) : splitId;
+      if (commit && source !== "expand") {
+        setExpandPrevMap((m) => {
+          const key = surfaceKey(projectId, bareId);
+          if (!m.has(key)) return m;
+          const next = new Map(m);
+          next.delete(key);
+          return next;
+        });
+      }
       setTreesByProject((prev) => {
         const cur = prev[projectId];
         if (!cur) return prev;
@@ -429,9 +452,10 @@ export function AppShell({
   );
 
   /**
-   * AI pane ◱ 展开/还原:定位包含该 pane 的最近 split,把它**自身**的占比列出 (>0.7=已展开,
-   * 还原到默认主体占比 0.6;否则展开到 0.78)。关键:split.ratio 是第一个 child 的占比,若该 AI
-   * pane 在第二侧,展开=调小 ratio(否则 0.78 会把第二侧 AI 缩到 22%)。单 pane 项目 no-op。
+   * AI pane ◱ 展开/还原:定位包含该 pane 的最近 split,调它**自身**的占比。展开 = 记住当前
+   * 占比后提到 EXPAND_PANE_SHARE;已展开(该 split 的记忆项就是本 pane)再点 = 还原到记忆值。
+   * 占比↔ratio 换算(split.ratio 是第一子占比,pane 在第二侧要取反)收在 paneTree 的
+   * ratioToPaneShare/paneShareToRatio。单 pane 项目(不在任何 split 中)no-op。
    */
   const handleToggleExpandPane = useCallback(
     (projectId: ProjectId, paneId: string) => {
@@ -439,15 +463,47 @@ export function AppShell({
       if (!cur) return;
       const split = findSplitContaining(cur, paneId);
       if (!split) return;
-      // 该 pane 的实际占比:第一侧=ratio,第二侧=1-ratio。据此判断当前是否已展开 + 设目标。
-      const paneShare = split.paneIsFirst ? split.ratio : 1 - split.ratio;
-      const targetShare = paneShare > 0.7 ? 0.6 : 0.78;
-      // 换算回 split.ratio(第一侧占比):第二侧的目标要取反。
-      const targetRatio = split.paneIsFirst ? targetShare : 1 - targetShare;
-      handleSetSplitRatio(projectId, `${projectId}::${split.splitId}`, targetRatio, true);
+      const key = surfaceKey(projectId, split.splitId);
+      const entry = expandPrevMap.get(key);
+      if (entry && entry.paneId === paneId) {
+        // 还原:回展开前的手感比例,清记忆。
+        handleSetSplitRatio(projectId, key, paneShareToRatio(entry.prevShare, split.paneIsFirst), true, "expand");
+        setExpandPrevMap((m) => {
+          if (!m.has(key)) return m;
+          const next = new Map(m);
+          next.delete(key);
+          return next;
+        });
+        return;
+      }
+      // 展开:记忆当前占比(同 split 其他 pane 已展开时,还原目标取主体默认占比,不吞语义)。
+      const prevShare = entry ? MAIN_PANE_DEFAULT_SHARE : ratioToPaneShare(split.ratio, split.paneIsFirst);
+      handleSetSplitRatio(projectId, key, paneShareToRatio(EXPAND_PANE_SHARE, split.paneIsFirst), true, "expand");
+      setExpandPrevMap((m) => new Map(m).set(key, { paneId, prevShare }));
     },
-    [treesByProject, handleSetSplitRatio],
+    [treesByProject, handleSetSplitRatio, expandPrevMap],
   );
+
+  /**
+   * 各项目处于「◱ 展开」态的 pane 集合(由 expandPrevMap 反查:记忆项的 paneId 即展开中的
+   * 主体 pane)。供 pane 头部 ◱ 按钮切换图标/文案(◱ 展开 / ◫ 还原)。
+   */
+  const expandedPaneIdsByProject = useMemo(() => {
+    const out = new Map<string, Set<string>>();
+    if (expandPrevMap.size === 0) return out;
+    for (const [pid, tree] of Object.entries(treesByProject)) {
+      for (const pane of listPanes(tree)) {
+        const split = findSplitContaining(tree, pane.id);
+        if (!split) continue;
+        if (expandPrevMap.get(surfaceKey(pid, split.splitId))?.paneId === pane.id) {
+          const set = out.get(pid) ?? new Set<string>();
+          set.add(pane.id);
+          out.set(pid, set);
+        }
+      }
+    }
+    return out;
+  }, [treesByProject, expandPrevMap]);
 
   /**
    * 重命名某项目某 pane 的某 tab 标题(笔记 pane 随 md 一级标题更新用)。
@@ -1098,52 +1154,20 @@ export function AppShell({
   // 聚焦项目(选中 shell 所属项目):供底部状态栏显示其绝对路径。
   const focusedProject = focused ? projects.find((p) => p.id === focused.projectId) ?? null : null;
 
+  // 设置弹窗开关(AppShell 统一持有):入口在顶栏品牌区齿轮(原状态栏左下角),
+  // 状态栏「新版本可用」chip 经 onOpenSettings("about") 直达更新页。
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsTab, setSettingsTab] = useState<SettingsTab>("general");
+  const openSettings = useCallback((tab?: SettingsTab) => {
+    if (tab) setSettingsTab(tab);
+    setSettingsOpen(true);
+  }, []);
+
   // 全部 claude tab 的对外状态汇总(供 StatusBar 跨 tab 显示「几个在跑/报错/等待」)。
   // useSyncExternalStore 订阅 claudeStatusRegistry,transport emit 时上报、关 tab 时注销。
   const claudeStatuses = useClaudeStatuses();
   // 全部 codex tab 的对外状态汇总(与 claude 并列,StatusBar 分别显示)。
   const codexStatuses = useCodexStatuses();
-
-  // 顶栏 AI 状态点:跨「可见项目」聚合,取优先级最高的活跃态(running>retrying>waiting>bg>error)。
-  // 克制显示——仅当有 AI 正在工作/需注意时出现一个小圆点胶囊(紫=Claude/青=Codex),空闲不占位;
-  // 这是被否决的「pane 内状态条」的替代:AI 活动状态全局一处可见,不侵入 pane。
-  const aiStatus = useMemo(() => {
-    const visible = new Set(visibleProjectIds);
-    const prioOf = (kind: string) =>
-      kind === "running" ? 5 :
-      kind === "retrying" ? 4 :
-      kind === "waiting" ? 3 :
-      kind === "bg" ? 2 :
-      kind === "error" ? 1 : 0;
-    const labelOf = (provider: "claude" | "codex", kind: string, bgTasks?: number) =>
-      provider === "claude"
-        ? kind === "running" ? "Claude 工作中…"
-          : kind === "retrying" ? "Claude 重试中…"
-          : kind === "waiting" ? "Claude 待确认"
-          : kind === "bg" ? `Claude 后台任务 ×${bgTasks ?? ""}`
-          : "Claude 出错"
-        : kind === "running" ? "Codex 执行中…" : "Codex 出错";
-    // 先收集候选再逐条比较(不用嵌套闭包改外层变量,避免 TS CFA 窄化成 never)。
-    const candidates: Array<{ prio: number; provider: "claude" | "codex"; label: string }> = [];
-    for (const e of claudeStatuses) {
-      if (visible.has(e.projectId) && e.summary.active) {
-        candidates.push({ prio: prioOf(e.summary.kind), provider: "claude", label: labelOf("claude", e.summary.kind, e.summary.bgTasks) });
-      }
-    }
-    for (const e of codexStatuses) {
-      if (visible.has(e.projectId) && e.summary.active) {
-        candidates.push({ prio: prioOf(e.summary.kind), provider: "codex", label: labelOf("codex", e.summary.kind) });
-      }
-    }
-    let bestPrio = 0;
-    let best: { provider: "claude" | "codex"; label: string } | null = null;
-    for (const c of candidates) {
-      if (c.prio <= bestPrio) continue;
-      bestPrio = c.prio;
-      best = { provider: c.provider, label: c.label };
-    }
-    return best;
-  }, [claudeStatuses, codexStatuses, visibleProjectIds]);
 
   // StatusBar 点击某个 AI 状态药丸 -> 跳到该状态第一个 claude tab:切项目 + 聚焦 pane + 切活动 tab。
   const handleFocusClaudeTab = useCallback(
@@ -1199,7 +1223,7 @@ export function AppShell({
         visibleProjectCount={visibleProjects.length}
         pinnedLayout={pinnedLayout}
         onPinnedLayoutChange={changePinnedLayout}
-        aiStatus={aiStatus}
+        onOpenSettings={openSettings}
       />
       {/* 左栏 shell 列表(ShellSidebar):长期使用基本用不到,2026-09-22 注释禁用——
           中央区整宽铺开直连顶栏/状态栏。恢复:外层 grid 改回
@@ -1275,6 +1299,7 @@ export function AppShell({
                       }
                       onRenameTab={(paneId, tabId, title) => handleRenameTab(p.id, paneId, tabId, title)}
                       onToggleExpandPane={(paneId) => handleToggleExpandPane(p.id, paneId)}
+                      expandedPaneIds={expandedPaneIdsByProject.get(p.id)}
                     />
                   ))}
                 </div>
@@ -1293,8 +1318,10 @@ export function AppShell({
         claudeStatuses={claudeStatuses}
         codexStatuses={codexStatuses}
         onFocusClaudeTab={handleFocusClaudeTab}
+        onOpenSettings={openSettings}
       />
       <InstallPromptModal prompt={installPrompt} onClose={() => setInstallPrompt(null)} />
+      <SettingsModal open={settingsOpen} initialTab={settingsTab} onClose={() => setSettingsOpen(false)} />
     </main>
   );
 }

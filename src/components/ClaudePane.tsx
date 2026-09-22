@@ -1,4 +1,4 @@
-import { lazy, memo, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Fragment, lazy, memo, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { selectEnclosingPre } from "../lib/selectEnclosingPre";
 import { SettingsModal } from "./SettingsModal";
@@ -31,7 +31,12 @@ import { ShellMenu } from "./ShellMenu";
 import { SplitPaneButtons } from "./SplitPaneButtons";
 import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from "./ui/Popover";
 import { Button } from "./ui/Button";
+import { CopyButton } from "./ui/CopyButton";
+import { PaneExpandButton } from "./ui/PaneExpandButton";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/Tooltip";
+import { SessionHeader } from "./chat/SessionHeader";
+import { ChatUserBubble } from "./chat/ChatUserBubble";
+import { MESSAGE_GAP_MS, TimeGapDivider, messageTimeMs } from "./chat/TimeGapDivider";
 import { Tabs, TabsList, TabsTrigger } from "./ui/Tabs";
 
 
@@ -163,6 +168,8 @@ type ClaudePaneProps = {
   onSetActiveTab?: (paneId: string, tabId: string) => void;
   /** ◱ 展开/还原所在分屏比例(主体 pane 占大头,方便操控)。无分屏(单 pane)时 AppShell no-op。 */
   onToggleExpand?: () => void;
+  /** 当前是否处于 ◱ 展开态(AppShell 展开记忆派生;按钮图标/文案随它切换)。 */
+  expanded?: boolean;
   className?: string;
 };
 
@@ -468,6 +475,7 @@ export function ClaudePane(props: ClaudePaneProps) {
     onCloseTab,
     onSetActiveTab,
     onToggleExpand,
+    expanded,
     className,
   } = props;
   const { t, i18n } = useTranslation();
@@ -703,17 +711,19 @@ export function ClaudePane(props: ClaudePaneProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTabId, focused]);
 
-  // 打开 tab 即启动 claude 进程(拿 init 回填 model/cwd/slashCommands,状态栏打开即显示 model)。
-  // 既有 lazy 启动(发消息才 spawn)改为打开即启动。start() 幂等(进程已在跑直接 return),切 tab 回来不重复 spawn;
+  // 首次聚焦本 pane 才启动 claude 进程(拿 init 回填 model/cwd/slashCommands,状态栏打开即显示 model)。
+  // 默认 pane tree 每项目自带 Claude pane 后,「挂载即启动」会让并排的所有项目冷启动无差别各拉
+  // 一个 claude 长进程(启动延迟/常驻内存随项目数线性涨)——改为聚焦触发:只有用户正在操作的
+  // pane 有 AI 进程。start() 幂等(进程已在跑直接 return),失焦不 stop、切回不重复 spawn;
   // 失败统一 handleEvent(terminated)(如 claude 未装,由 claudeMissing UI 覆盖显示)。probeDone 后才启动,
   // 避免探测未完成时 claudeMissing 恒 false 误触发 spawn。
   useEffect(() => {
-    if (!activeTabId || !probeDone || claudeMissing) return;
+    if (!activeTabId || !probeDone || claudeMissing || !focused) return;
     const transport = getClaudeTransportRef.current(activeTabId);
-    console.log("[ClaudePane] start effect -> transport.start()", { activeTabId, probeDone, claudeMissing });
+    console.log("[ClaudePane] start effect (on focus) -> transport.start()", { activeTabId, probeDone, claudeMissing });
     void transport.start();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeTabId, probeDone, claudeMissing]);
+  }, [activeTabId, probeDone, claudeMissing, focused]);
 
   // 自动恢复到最近会话:tab 首次出现 terminated(spawn/resume 失败,或进程 eof)时,主动拉项目
   // 最近一条历史会话调 transport.resumeSession 重拉起 -- 给用户「打开即接着上次聊」的体验,而非
@@ -1211,16 +1221,19 @@ export function ClaudePane(props: ClaudePaneProps) {
     void transport.send(text);
   }, [activeTabId, input, busy, shellRunning, scrollToBottom]);
 
-  // C6 重新发送:user 消息 hover ↻ 重跑同一轮。busy 时先 interrupt(同 handleSend 语义),
+  // C6 重新发送:user 消息 ↻ 重跑同一轮。busy 时**先 await interrupt 再 send**(与 handleSend
+  // 同语义:后端 busy 会拒新轮,不 await 会竞速丢消息);经 busyRef 读 busy(不进 deps——
+  // resendText 作为 onResend 传 memo MessageRow,busy 每轮翻转两次身份会击穿全部消息行 memo)。
   // 不记输入历史(重发不是新输入),发送前贴底。
   const resendText = useCallback(
-    (text: string) => {
+    async (text: string) => {
       if (!text.trim()) return;
-      if (busy) void getClaudeTransportRef.current(activeTabId).interrupt();
+      const transport = getClaudeTransportRef.current(activeTabId);
+      if (busyRef.current) await transport.interrupt();
       scrollToBottom();
-      void getClaudeTransportRef.current(activeTabId).send(text);
+      void transport.send(text);
     },
-    [activeTabId, busy, scrollToBottom],
+    [activeTabId, scrollToBottom],
   );
 
   const handleInterrupt = useCallback(() => {
@@ -1665,23 +1678,9 @@ export function ClaudePane(props: ClaudePaneProps) {
           </TabsList>
         </Tabs>
         <div className="flex shrink-0 items-center gap-1 text-[var(--mx-muted)]">
-          {/* ◱ 展开/还原所在分屏比例(主体 pane 占大头;单 pane 项目 AppShell no-op)。 */}
-          {onToggleExpand && (
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  variant="ghost"
-                  size="icon-sm"
-                  className="text-[13px] text-[var(--mx-muted)] hover:bg-[var(--mx-border)] hover:text-[var(--mx-text)]"
-                  onMouseDown={(e) => e.stopPropagation()}
-                  onClick={() => onToggleExpand()}
-                >
-                  ◱
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent>{t("shell.pane.expand")}</TooltipContent>
-            </Tooltip>
-          )}
+          {/* ◱ 展开/还原所在分屏比例(主体 pane 占大头;单 pane 项目 AppShell no-op)。
+              展开态图标/文案切换(◱ 展开 / ◫ 还原),状态真身在 AppShell 展开记忆。 */}
+          {onToggleExpand && <PaneExpandButton expanded={expanded} onToggle={onToggleExpand} t={t} />}
           {/* 重置当前会话:清屏 + kill 进程 + 用 registry live id --resume 重启(session 续接)。 */}
           <Tooltip>
             <TooltipTrigger asChild>
@@ -1816,42 +1815,69 @@ export function ClaudePane(props: ClaudePaneProps) {
           {state && (state.messages.length > 0 || (shellState?.messages.length ?? 0) > 0) ? (
             <div ref={contentRef} className="mx-auto w-full max-w-[54.25rem] space-y-1">
               {/* C5 会话头:会话开端信息(品牌块 + 模型 + session 尾部 + 窗口),让会话有"开端感"。
-                  有 meta 数据(模型/会话 id 至少其一)且有消息时才显示,随消息流一起滚动。 */}
-              {state?.meta && (state.meta.model || state.meta.claudeSessionId) && mergedMessages.length > 0 && (
-                <div className="flex items-center gap-2 px-1.5 py-1 text-[10px] text-[var(--mx-faint)]">
-                  <span aria-hidden className="grid h-4 w-4 shrink-0 place-items-center rounded bg-[var(--mx-violet)] text-[8px] font-extrabold text-white">C</span>
-                  <span className="shrink-0 text-[var(--mx-muted)]">Claude</span>
-                  {state.meta.model && <span className="shrink-0 font-mono">{state.meta.model}</span>}
-                  {state.meta.claudeSessionId && <span className="shrink-0 font-mono">#{state.meta.claudeSessionId.slice(-8)}</span>}
-                  {state.meta.contextWindow ? <span className="shrink-0 font-mono">{Math.round(state.meta.contextWindow / 1000)}k ctx</span> : null}
-                  <div className="h-px min-w-0 flex-1" style={{ borderTop: "1px solid rgba(148,163,184,0.14)" }} />
-                </div>
+                  本分支已在 hasMessages 守卫内(mergedMessages 必非空),只需 meta 有模型/会话 id 其一。 */}
+              {state?.meta && (state.meta.model || state.meta.claudeSessionId) && (
+                <SessionHeader
+                  brandLetter="C"
+                  brandClass="bg-[var(--mx-violet)] text-white"
+                  name="Claude"
+                  model={state.meta.model}
+                  sessionId={state.meta.claudeSessionId}
+                  contextWindow={state.meta.contextWindow}
+                />
               )}
-              {mergedMessages.map((item) =>
-                item.kind === "shell" ? (
-                  <div key={`shell-${item.msg.id}`} className="mx-chat-row">
-                    <ShellRow message={item.msg} t={t} onInterrupt={handleShellInterrupt} />
-                  </div>
-                ) : (
-                  <div key={item.msg.id} className="mx-chat-row">
-                    <MessageRow
-                      message={item.msg}
-                      t={t}
-                      onApprovePlan={handleApprovePlan}
-                      onReject={handleReject}
-                      resolvedApprovals={resolvedApprovals}
-                      onApproveTool={handleApproveTool}
-                      onRejectTool={handleRejectTool}
-                      onFeedback={handleFeedback}
-                      onResend={resendText}
-                    />
-                  </div>
-                ),
-              )}
+              {mergedMessages.map((item, i) => {
+                // 相邻消息间隔超阈值(30 分钟)插时间分隔线:长会话的时间断层一眼可辨。
+                // timestamp 可空且串/数字并存(claude ISO 串,`!` shell 消息 epoch ms),空值不参与比较。
+                const ts = item.msg.timestamp;
+                const prevTs = i > 0 ? mergedMessages[i - 1].msg.timestamp : null;
+                const gapTs =
+                  ts != null && prevTs != null && messageTimeMs(ts) - messageTimeMs(prevTs) > MESSAGE_GAP_MS ? ts : null;
+                return (
+                  <Fragment key={item.kind === "shell" ? `shell-${item.msg.id}` : item.msg.id}>
+                    {gapTs != null && <TimeGapDivider timestamp={gapTs} />}
+                    {item.kind === "shell" ? (
+                      <div className="mx-chat-row">
+                        <ShellRow message={item.msg} t={t} onInterrupt={handleShellInterrupt} />
+                      </div>
+                    ) : (
+                      <div className="mx-chat-row">
+                        <MessageRow
+                          message={item.msg}
+                          t={t}
+                          onApprovePlan={handleApprovePlan}
+                          onReject={handleReject}
+                          resolvedApprovals={resolvedApprovals}
+                          onApproveTool={handleApproveTool}
+                          onRejectTool={handleRejectTool}
+                          onFeedback={handleFeedback}
+                          onResend={resendText}
+                        />
+                      </div>
+                    )}
+                  </Fragment>
+                );
+              })}
             </div>
           ) : (
-            <div className="grid h-full place-items-center text-xs text-[var(--mx-faint)]">
-              {state ? t("claudepane.empty") : probeDone ? t("claudepane.loading") : "…"}
+            // 品牌化空状态(会话未开始):大品牌块 + 名称 + (已知时)模型 + 引导文案,
+            // 替代原先一行灰字——AI 主体叙事从空状态开始;probe/加载中保持轻量占位。
+            <div className="grid h-full place-items-center">
+              {state ? (
+                <div className="flex flex-col items-center gap-2.5 py-10">
+                  <span aria-hidden className="grid h-10 w-10 place-items-center rounded-xl bg-[var(--mx-violet)] text-sm font-extrabold text-white shadow-lg">
+                    C
+                  </span>
+                  <span className="text-xs text-[var(--mx-muted)]">
+                    Claude{state.meta?.model ? <span className="font-mono"> · {state.meta.model}</span> : null}
+                  </span>
+                  <span className="text-xs text-[var(--mx-faint)]">{t("claudepane.empty")}</span>
+                </div>
+              ) : probeDone ? (
+                <div className="text-xs text-[var(--mx-faint)]">{t("claudepane.loading")}</div>
+              ) : (
+                <div className="text-xs text-[var(--mx-faint)]">…</div>
+              )}
             </div>
           )}
           {/* 回到底部按钮:仅用户上滚离开底部时显示(showScrollBottom),点击滚到底并恢复贴底。
@@ -2637,40 +2663,8 @@ const MessageRow = memo(function MessageRow({
       .map((b) => b.text)
       .join("\n");
     if (text.trim().length === 0) return null;
-    return (
-      // 左右对话框:user 消息靠右,青底气泡 + 右侧人形徽标。max-w 限宽,气泡右下角收小圆角。
-      <div className="group/message flex items-start justify-end gap-1.5">
-        <div className="min-w-0 max-w-[85%]">
-          <div dir="auto" className="whitespace-pre-wrap break-words rounded-lg rounded-br-[4px] bg-[var(--mx-accent-soft)] px-3 py-1.5 leading-relaxed text-[var(--mx-text)]">
-            {text}
-          </div>
-          {/* 末行:时间 + 重新发送 + 复制按钮(user 不显示消耗时长/tokens),右对齐。 */}
-          <div className="mt-0.5 flex items-center justify-end gap-1.5 text-[10px] tabular-nums text-[var(--mx-faint)]">
-            {time && <span>{time}</span>}
-            {onResend && (
-              <button
-                type="button"
-                title={t("claudepane.resend")}
-                onClick={() => onResend(text)}
-                className="cursor-pointer opacity-0 transition-opacity hover:text-[var(--mx-text)] group-hover:opacity-100"
-              >
-                ↻
-              </button>
-            )}
-            <CopyButton text={text} t={t} className="ml-0 opacity-0 group-hover:opacity-100" />
-          </div>
-        </div>
-        {/* A1 角色徽标:user 人形图标(青底),置于气泡右侧。 */}
-        <span aria-hidden className="flex h-[1.625em] shrink-0 items-center">
-          <span className="grid h-[18px] w-[18px] place-items-center rounded-md bg-[var(--mx-accent-soft)] text-[var(--mx-accent)]">
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-              <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
-              <circle cx="12" cy="7" r="4" />
-            </svg>
-          </span>
-        </span>
-      </div>
-    );
+    // 左右对话框:user 消息靠右(共享 ChatUserBubble:中性色气泡 + 人形徽标 + ↻/⧉ 常显淡 hover 实)。
+    return <ChatUserBubble text={text} time={time ?? undefined} onResend={onResend} t={t} />;
   }
 
   // assistant:行首 violet 圆点(悬挂左侧)+ 正文块流 + 末行时间。
@@ -2725,7 +2719,8 @@ const MessageRow = memo(function MessageRow({
                   {formatTokens(message.usage.output_tokens ?? 0)}
                 </span>
               )}
-            {fullText && <CopyButton text={fullText} t={t} className="ml-auto opacity-0 group-hover:opacity-100" />}
+            {/* 复制常显淡(assistant 气泡内层 div.group 命中裸 group-hover),hover 变实。 */}
+            {fullText && <CopyButton text={fullText} t={t} className="ml-auto opacity-60 group-hover:opacity-100" />}
           </div>
         )}
       </div>
@@ -2736,22 +2731,24 @@ const MessageRow = memo(function MessageRow({
 /**
  * thinking 手风琴块(仿 claudecodeui Reasoning)。
  *
- * 展开行为:思考中(streaming)默认展开实时显示思考过程,本轮结束(streaming→false)自动收起
- * 保持对话紧凑。用户手动点过 summary 后,以用户操作为准不再自动收/展(避免和用户抢控制权)。
+ * 2026-09-22 起思考内容**默认收起**——保持对话紧凑、不霸屏,用户点开 summary 才展开看推理;
+ * open 完全由用户手动控制(展开后本轮结束不自动收起,读一半不被打断)。
+ * summary 区分「进行中/已完成」:streaming 显呼吸点 + 思考中,结束变静态「已思考」。
  * 每轮 assistant 是新挂载的消息,内部状态随消息生命周期,不跨轮残留。
  *
- * 展开态限高(长思考内部滚动,防几 k 字思考霸屏挤走消息流);流式中自动贴底——
- * 实时跟随最新思考,上文收进滚动区,用户上翻回看即暂停贴底,滚回底部附近才恢复。
+ * 展开态限高(长思考内部滚动,防几 k 字思考霸屏挤走消息流);用户展开且流式中自动贴底
+ * (实时跟随最新思考)——但用户上翻(距底 >24px)即暂停贴底,滚回底部附近才恢复,
+ * 与消息流主滚动同策略,展开阅读早期推理不被增量拽回底部。
  */
 function ThinkingBlock({ text, streaming, t }: { text: string; streaming: boolean; t: (k: string) => string }) {
-  // 2026-09-22:思考内容**默认收起**(不再跟随流式自动展开)——保持对话紧凑、不霸屏,
-  // 用户点开 summary 才展开看推理。open 完全由用户手动控制。
   const [open, setOpen] = useState(false);
   const bodyRef = useRef<HTMLDivElement>(null);
-  // 用户展开且流式中 text 增长 → 贴底(仅手动展开时才有意义)。
+  // 贴底守卫:距底 <24px 视为「在底部」续贴;用户上翻即停,滚回底部恢复。
+  const stickRef = useRef(true);
+  // 用户展开且流式中 text 增长 → 贴底(仅手动展开时才有意义;上翻后暂停)。
   useEffect(() => {
     const el = bodyRef.current;
-    if (streaming && open && el) el.scrollTop = el.scrollHeight;
+    if (streaming && open && el && stickRef.current) el.scrollTop = el.scrollHeight;
   }, [text, streaming, open]);
   return (
     <details className="group" open={open} onToggle={(e) => setOpen((e.currentTarget as HTMLDetailsElement).open)}>
@@ -2765,12 +2762,25 @@ function ThinkingBlock({ text, streaming, t }: { text: string; streaming: boolea
         >
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
         </svg>
-        <span className="italic">{t("claudepane.thinking")}</span>
+        {/* 进行中带呼吸点,已完成静态——一眼分辨「正在想」vs「想完了可点开看」。 */}
+        {streaming ? (
+          <span className="inline-flex items-center gap-1.5 italic">
+            <ThinkingDots />
+            {t("claudepane.thinking")}
+          </span>
+        ) : (
+          <span className="italic">{t("claudepane.thought")}</span>
+        )}
         {text && <span className="text-[var(--mx-faint)]">· {text.length} chars</span>}
       </summary>
       <div className="mt-1.5 pl-[18px]">
         <div
           ref={bodyRef}
+          onScroll={() => {
+            const el = bodyRef.current;
+            if (!el) return;
+            stickRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
+          }}
           className="mx-scroll-pretty max-h-[min(40vh,320px)] overflow-y-auto whitespace-pre-wrap break-words text-xs italic leading-relaxed text-[var(--mx-muted)]"
         >
           {text || "…"}
@@ -3094,35 +3104,7 @@ function formatCost(usd?: number): string {
   return `$${usd.toFixed(2)}`;
 }
 
-/** 复制图标(剪贴板)。 */
-function IconCopy() {
-  return (
-    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
-      <rect x="9" y="9" width="11" height="11" rx="2" />
-      <path d="M5 15V5a2 2 0 0 1 2-2h10" />
-    </svg>
-  );
-}
-
-/** 复制按钮:点击写剪贴板,1.2s 显「已复制」;父容器加 `group` + 本按钮 `opacity-0 group-hover:opacity-100` 做 hover 显。 */
-function CopyButton({ text, t, className = "" }: { text: string; t: (k: string) => string; className?: string }) {
-  const [copied, setCopied] = useState(false);
-  return (
-    <button
-      type="button"
-      onClick={(e) => {
-        e.stopPropagation();
-        navigator.clipboard?.writeText(text).catch(() => {});
-        setCopied(true);
-        window.setTimeout(() => setCopied(false), 1200);
-      }}
-      className={`inline-flex items-center gap-1 rounded text-[var(--mx-faint)] transition-colors hover:text-[var(--mx-text)] ${className}`}
-      title={t("claudepane.copy")}
-    >
-      {copied ? <span className="text-[var(--mx-success)]">{t("claudepane.copied")}</span> : <IconCopy />}
-    </button>
-  );
-}
+// CopyButton 已抽共享(src/components/ui/CopyButton.tsx,ClaudePane/CodexPane 复用)。
 
 /**
  * 工具调用卡片——配置驱动渲染(参考 claudecodeui 的 ToolRenderer + toolConfigs)。

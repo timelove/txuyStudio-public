@@ -103,8 +103,13 @@ function enrichCodeBlocks(root: HTMLElement): void {
     const code = pre.querySelector("code");
     if (!code) return;
     const lang = /\blanguage-([\w-]+)/.exec(code.className)?.[1] ?? "";
-    // 长块阈值:>30 行折叠(默认限高滚动),短块直接全显。
-    const long = (code.textContent ?? "").split("\n").length > 30;
+    // 长块阈值:>30 行折叠(默认限高滚动),短块直接全显。indexOf 数换行且到 30 即止——
+    // 不为「数行数」分配整段 split 数组(千行块在笔记逐字预览路径是每次按键的常客)。
+    const src = code.textContent ?? "";
+    let lines = 1;
+    let nl = -1;
+    while (lines <= 30 && (nl = src.indexOf("\n", nl + 1)) !== -1) lines++;
+    const long = lines > 30;
 
     const wrap = document.createElement("div");
     wrap.className = `mx-codeblock${long ? " long" : ""}`;
@@ -187,7 +192,8 @@ export const MdPreview = memo(function MdPreview({ content, inline = false }: { 
   }
 
   // 代码块复制/折叠委托:缓存 HTML 是静态串,按钮交互经根元素 onClick 委托处理
-  // (复制→取 .mx-codeblock 内 code 文本;折叠→toggle .expanded 并换 ▾/▴)。
+  // (复制→取 .mx-codeblock 内 code 文本,成功后按钮 1.2s 显 ✓ 反馈,与 CopyButton 对齐——
+  // 点击无反馈会让用户怀疑没复制上;折叠→toggle .expanded 并换 ▾/▴)。
   const handleBlockClick = (e: React.MouseEvent<HTMLDivElement>) => {
     const target = e.target as HTMLElement;
     const wrap = target.closest<HTMLElement>(".mx-codeblock");
@@ -195,7 +201,17 @@ export const MdPreview = memo(function MdPreview({ content, inline = false }: { 
     if (target.dataset?.mxCopy !== undefined) {
       const code = wrap.querySelector("pre code");
       const text = code?.textContent ?? "";
-      void navigator.clipboard?.writeText(text).catch(() => {});
+      void navigator.clipboard
+        ?.writeText(text)
+        .then(() => {
+          target.textContent = "✓";
+          target.classList.add("copied");
+          window.setTimeout(() => {
+            target.textContent = "⧉";
+            target.classList.remove("copied");
+          }, 1200);
+        })
+        .catch(() => {});
     } else if (target.dataset?.mxToggle !== undefined) {
       const expanded = wrap.classList.toggle("expanded");
       target.textContent = expanded ? "▴" : "▾";

@@ -4,8 +4,8 @@ import type { SessionKind } from "./sessions";
  * Windows Terminal 式分屏 Pane Tree + 单 pane 内的 tab 栈。
  *
  * 两个正交维度:
- * - **分屏(空间)**:二叉树,叶子是 `Pane`,分支是 `Split`(沿某方向把空间均分给两子树)。
- *   `ratio` 固定 0.5(核心分屏不调比例);`children` 恒为二元。
+ * - **分屏(空间)**:二叉树,叶子是 `Pane`,分支是 `Split`(沿某方向把空间分给两子树)。
+ *   `ratio` 是第一个 child 的占比(可拖拽调整/◱ 展开调整);`children` 恒为二元。
  * - **tab(栈层)**:一个 `Pane` 叶子内叠多个 `PaneTab`,同一格子切 tab 不占额外空间。
  *   `activeTabId` 指向当前可见的 tab;tab 关到 0 个 = 该 pane 被关(树回填)。
  *
@@ -84,9 +84,47 @@ export function defaultPaneTree(paneId = "ps-1", tabId = "ps-1"): PaneNode {
   };
 }
 
+/** AI 主体 pane 的默认占比(与后端 default_pane_tree 的 ratio 对齐;◱ 还原无记忆时兜底)。 */
+export const MAIN_PANE_DEFAULT_SHARE = 0.6;
+/** ◱ 展开目标:主体 pane 占比提升到此值。 */
+export const EXPAND_PANE_SHARE = 0.78;
+
+/** split.ratio → 某 side pane 的实际占比(ratio 是第一子占比,第二侧取反)。 */
+export function ratioToPaneShare(ratio: number, paneIsFirst: boolean): number {
+  return paneIsFirst ? ratio : 1 - ratio;
+}
+
+/** pane 目标占比 → split.ratio(pane 在第二侧时取反,否则改 ratio 会反向缩 pane)。 */
+export function paneShareToRatio(share: number, paneIsFirst: boolean): number {
+  return paneIsFirst ? share : 1 - share;
+}
+
 /** 生成稳定的 split id(父 pane id + 方向,便于调试;非身份)。 */
 function splitId(parentPaneId: string, direction: SplitDirection): string {
   return `${parentPaneId}::split-${direction}`;
+}
+
+/**
+ * 全树唯一的 split id:同父同方向二次分屏时,base id 会重复(两个嵌套的
+ * `ps-1::split-horizontal`),而 setSplitRatio/拖拽/findSplitContaining 都按 id 定位,
+ * 撞车会改错 split。base 被占时追加 `-2`/`-3` 序号去重(对同形状树确定性)。
+ */
+function uniqueSplitId(root: PaneNode, parentPaneId: string, direction: SplitDirection): string {
+  const base = splitId(parentPaneId, direction);
+  const ids = new Set<string>();
+  collectSplitIds(root, ids);
+  if (!ids.has(base)) return base;
+  for (let n = 2; ; n++) {
+    const candidate = `${base}-${n}`;
+    if (!ids.has(candidate)) return candidate;
+  }
+}
+
+function collectSplitIds(node: PaneNode, out: Set<string>): void {
+  if (node.type === "pane") return;
+  out.add(node.id);
+  collectSplitIds(node.children[0], out);
+  collectSplitIds(node.children[1], out);
 }
 
 /**
@@ -95,6 +133,18 @@ function splitId(parentPaneId: string, direction: SplitDirection): string {
  */
 export function splitPane(
   root: PaneNode,
+  targetPaneId: string,
+  direction: SplitDirection,
+  newPaneId: string,
+  newPaneCwd?: string,
+): PaneNode {
+  // split id 在入口按全树去重(同父同方向二次分屏撞 id 会改错 split),递归体不再各自生成。
+  return splitPaneImpl(root, uniqueSplitId(root, targetPaneId, direction), targetPaneId, direction, newPaneId, newPaneCwd);
+}
+
+function splitPaneImpl(
+  root: PaneNode,
+  splitNodeId: string,
   targetPaneId: string,
   direction: SplitDirection,
   newPaneId: string,
@@ -116,7 +166,7 @@ export function splitPane(
     };
     return {
       type: "split",
-      id: splitId(root.id, direction),
+      id: splitNodeId,
       direction,
       ratio: 0.5,
       children: [root, newPane],
@@ -126,8 +176,8 @@ export function splitPane(
   return {
     ...root,
     children: [
-      splitPane(root.children[0], targetPaneId, direction, newPaneId, newPaneCwd),
-      splitPane(root.children[1], targetPaneId, direction, newPaneId, newPaneCwd),
+      splitPaneImpl(root.children[0], splitNodeId, targetPaneId, direction, newPaneId, newPaneCwd),
+      splitPaneImpl(root.children[1], splitNodeId, targetPaneId, direction, newPaneId, newPaneCwd),
     ],
   };
 }
@@ -143,11 +193,22 @@ export function splitPaneWithPane(
   direction: SplitDirection,
   newPane: PaneLeaf,
 ): PaneNode {
+  // 同 splitPane:split id 入口去重后下传(见 uniqueSplitId)。
+  return splitPaneWithPaneImpl(root, uniqueSplitId(root, targetPaneId, direction), targetPaneId, direction, newPane);
+}
+
+function splitPaneWithPaneImpl(
+  root: PaneNode,
+  splitNodeId: string,
+  targetPaneId: string,
+  direction: SplitDirection,
+  newPane: PaneLeaf,
+): PaneNode {
   if (root.type === "pane") {
     if (root.id !== targetPaneId) return root;
     return {
       type: "split",
-      id: splitId(root.id, direction),
+      id: splitNodeId,
       direction,
       ratio: 0.5,
       children: [root, newPane],
@@ -156,8 +217,8 @@ export function splitPaneWithPane(
   return {
     ...root,
     children: [
-      splitPaneWithPane(root.children[0], targetPaneId, direction, newPane),
-      splitPaneWithPane(root.children[1], targetPaneId, direction, newPane),
+      splitPaneWithPaneImpl(root.children[0], splitNodeId, targetPaneId, direction, newPane),
+      splitPaneWithPaneImpl(root.children[1], splitNodeId, targetPaneId, direction, newPane),
     ],
   };
 }

@@ -17,6 +17,12 @@ const zh = {
     confirm: "确认",
     refresh: "刷新",
   },
+  // chat(ClaudePane/CodexPane 共享的会话流组件——ChatUserBubble/CopyButton 等的文案)。
+  chat: {
+    copy: "复制",
+    copied: "已复制",
+    resend: "重新发送",
+  },
   shell: {
     tab: {
       close: "关闭 tab",
@@ -28,7 +34,8 @@ const zh = {
       splitVertical: "纵向",
       close: "关闭 pane",
       noActiveTab: "无活动 tab",
-      expand: "放大 / 还原(主体 pane 占大头)",
+      expand: "放大(主体 pane 占大头)",
+      restore: "还原分屏比例",
     },
   },
   project: {
@@ -219,7 +226,6 @@ const zh = {
     viewOnGithub: "在 GitHub 查看",
   },
   statusbar: {
-    settings: "设置",
     updateAvailable: "新版本可用",
     focusedProject: "聚焦项目",
     gitBranch: "git 分支:{{branch}}",
@@ -245,6 +251,7 @@ const zh = {
   topbar: {
     backToMain: "回到主窗口",
     project: "项目",
+    settings: "设置",
   },
   sidebar: {
     openShellsByProject: "按项目浏览 shell",
@@ -261,6 +268,7 @@ const zh = {
     slashHint: "输入消息,/ 调命令",
     busy: "Claude 正在响应…",
     thinking: "思考中…",
+    thought: "已思考",
     runningTool: "正在执行 {{tool}}…",
     bgTasks: "后台任务 ×{{n}}…(可继续对话)",
     bgTaskDoneLabel: "后台任务完成",

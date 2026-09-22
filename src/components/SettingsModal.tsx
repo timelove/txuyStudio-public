@@ -217,13 +217,16 @@ function AppUpdater({ t }: { t: (k: string, o?: Record<string, unknown>) => stri
   );
 }
 
+/** 设置面板 tab id(打开入口可指定直达页,如更新 chip → about)。 */
+export type SettingsTab = "general" | "shortcuts" | "performance" | "about";
+
 type SettingsModalProps = {
   /** 是否显示;false 时不渲染。 */
   open: boolean;
   onClose: () => void;
-  /** 打开时定位到的 tab(状态栏「新版本可用」点击 → about);缺省 general。Dialog 关闭即
-   *  卸载内容,defaultValue 每次打开取新值,无需受控切换。 */
-  initialTab?: "general" | "shortcuts" | "performance" | "about";
+  /** 打开时定位到的 tab(顶栏齿轮缺省 general;状态栏「新版本可用」点击 → about)。Dialog
+   * 关闭即卸载内容,defaultValue 每次打开取新值,无需受控切换。 */
+  initialTab?: SettingsTab;
 };
 
 /**
