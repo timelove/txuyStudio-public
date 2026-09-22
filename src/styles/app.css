@@ -87,6 +87,10 @@
   --mx-text-dim: #64748b;
   --mx-accent-bright: #cffafe;
   --mx-accent-soft: rgba(34, 211, 238, 0.16);
+  /* user 消息气泡中性色(左右对话框):user 恒中性,AI 侧才是品牌色(Claude 紫/Codex 青)——
+     避免 user 与 Codex 品牌青同色系弱化分边。badge 比气泡底稍强一档做人形徽标底。 */
+  --mx-user-bubble: rgba(148, 163, 184, 0.13);
+  --mx-user-bubble-badge: rgba(148, 163, 184, 0.22);
   --mx-violet: #a78bfa;
   --mx-danger: #f87171;
   --mx-danger-bright: #fca5a5;
@@ -545,6 +549,8 @@ button {
   border-radius: 4px;
 }
 .mx-md-preview .mx-codeblock-copy { margin-left: auto; }
+/* 复制成功反馈(MdPreview 委托点击置 ✓ + .copied,1.2s 后还原),与 CopyButton 对齐。 */
+.mx-md-preview .mx-codeblock-copy.copied { color: var(--mx-success); }
 .mx-md-preview .mx-codeblock-copy:hover,
 .mx-md-preview .mx-codeblock-toggle:hover {
   color: var(--mx-text);
@@ -559,7 +565,8 @@ button {
 .mx-md-preview .mx-codeblock.long pre { max-height: 320px; overflow: auto; }
 .mx-md-preview .mx-codeblock.long.expanded pre { max-height: none; }
 /* 消息流内容淡入(会话流 D7):流式纯文本 → 轮末 markdown 化切换不突兀。 */
-@keyframes mx-fade-in { from { opacity: 0; } to { opacity: 1; } }
+/* D7 流式切换淡入:keyframes 复用上方 424 行的 mx-fade-in(dialog/popover 浮层同源),
+   不在此重定义(重名 keyframes 后者全局覆盖前者,会把两处不相关动画静默耦合)。 */
 .mx-fade-in { animation: mx-fade-in 0.18s ease-out; }
 .mx-md-preview blockquote {
   border-left: 3px solid var(--mx-accent);

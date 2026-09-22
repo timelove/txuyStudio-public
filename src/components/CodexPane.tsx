@@ -1,4 +1,4 @@
-import { lazy, memo, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Fragment, lazy, memo, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { selectEnclosingPre } from "../lib/selectEnclosingPre";
 import { homeDir } from "@tauri-apps/api/path";
@@ -29,7 +29,12 @@ import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from "./ui/Pop
 import { BottomToast } from "./ui/BottomToast";
 import { ContextMeter } from "./ui/ContextMeter";
 import { Button } from "./ui/Button";
+import { CopyButton } from "./ui/CopyButton";
+import { PaneExpandButton } from "./ui/PaneExpandButton";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/Tooltip";
+import { SessionHeader } from "./chat/SessionHeader";
+import { ChatUserBubble } from "./chat/ChatUserBubble";
+import { MESSAGE_GAP_MS, TimeGapDivider, messageTimeMs } from "./chat/TimeGapDivider";
 import { Tabs, TabsList, TabsTrigger } from "./ui/Tabs";
 
 /** MdPreview 懒加载(避免 codexpane 首屏就拉 marked/dompurify,与探针共用 md-render 分包)。 */
@@ -115,6 +120,8 @@ type CodexPaneProps = {
   onSetActiveTab?: (paneId: string, tabId: string) => void;
   /** ◱ 展开/还原所在分屏比例(主体 pane 占大头,方便操控)。无分屏(单 pane)时 AppShell no-op。 */
   onToggleExpand?: () => void;
+  /** 当前是否处于 ◱ 展开态(AppShell 展开记忆派生;按钮图标/文案随它切换)。 */
+  expanded?: boolean;
   className?: string;
 };
 
@@ -271,6 +278,7 @@ export function CodexPane(props: CodexPaneProps) {
     onCloseTab,
     onSetActiveTab,
     onToggleExpand,
+    expanded,
     className,
   } = props;
   const { t, i18n } = useTranslation();
@@ -836,18 +844,25 @@ export function CodexPane(props: CodexPaneProps) {
     }
     setInput("");
     setSlashOpen(false);
+    // 发送前立即贴底(与 ClaudePane 对齐):用户手动发消息后若已上滚看历史,强制滚到底
+    // 看到自己的消息与回复,避免留在原视口(乐观插入 + transport.send 异步的时序抖动)。
+    scrollToBottom();
     void transport.send(text);
-  }, [activeTabId, input, busy, shellRunning, sessions, paneId, onCloseTab]);
+  }, [activeTabId, input, busy, shellRunning, sessions, paneId, onCloseTab, scrollToBottom]);
 
-  // C6 重新发送:user 消息 hover ↻ 重跑同一轮。busy 时先中断(同 handleSend 语义),不记输入历史。
+  // C6 重新发送:user 消息 ↻ 重跑同一轮。busy 时**先 await interrupt 再 send**(与 handleSend
+  // 同语义:后端 busy 会拒新轮,不 await 会竞速丢消息);经 busyRef 读 busy(不进 deps——
+  // resendText 作为 onResend 传 memo MessageRow,busy 每轮翻转两次身份会击穿全部消息行 memo)。
+  // 不记输入历史(重发不是新输入),发送前贴底。
   const resendText = useCallback(
-    (text: string) => {
+    async (text: string) => {
       if (!text.trim()) return;
-      if (busy) void getCodexTransportRef.current(activeTabId).interrupt();
+      const transport = getCodexTransportRef.current(activeTabId);
+      if (busyRef.current) await transport.interrupt();
       scrollToBottom();
-      void getCodexTransportRef.current(activeTabId).send(text);
+      void transport.send(text);
     },
-    [activeTabId, busy, scrollToBottom],
+    [activeTabId, scrollToBottom],
   );
 
   const handleInterrupt = useCallback(() => {
@@ -1070,23 +1085,9 @@ export function CodexPane(props: CodexPaneProps) {
           </TabsList>
         </Tabs>
         <div className="flex shrink-0 items-center gap-1 text-[var(--mx-muted)]">
-          {/* ◱ 展开/还原所在分屏比例(主体 pane 占大头;单 pane 项目 AppShell no-op)。 */}
-          {onToggleExpand && (
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  variant="ghost"
-                  size="icon-sm"
-                  className="text-[13px] text-[var(--mx-muted)] hover:bg-[var(--mx-border)] hover:text-[var(--mx-text)]"
-                  onMouseDown={(e) => e.stopPropagation()}
-                  onClick={() => onToggleExpand()}
-                >
-                  ◱
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent>{t("shell.pane.expand")}</TooltipContent>
-            </Tooltip>
-          )}
+          {/* ◱ 展开/还原所在分屏比例(主体 pane 占大头;单 pane 项目 AppShell no-op)。
+              展开态图标/文案切换(◱ 展开 / ◫ 还原),状态真身在 AppShell 展开记忆。 */}
+          {onToggleExpand && <PaneExpandButton expanded={expanded} onToggle={onToggleExpand} t={t} />}
           {/* 重置当前会话:清屏 + resume 当前 thread id(下次 send 续接同 thread)。 */}
           <Tooltip>
             <TooltipTrigger asChild>
@@ -1219,32 +1220,60 @@ export function CodexPane(props: CodexPaneProps) {
         <div ref={scrollRef} onScroll={handleScroll} className="mx-scroll-pretty relative min-h-0 overflow-y-auto px-4 py-4" style={{ fontSize }}>
           {state && (state.messages.length > 0 || (shellState?.messages.length ?? 0) > 0) ? (
             <div ref={contentRef} className="mx-auto w-full max-w-[54.25rem] space-y-1">
-              {/* C5 会话头:会话开端信息(品牌块 + 模型 + session 尾部 + 窗口),让会话有"开端感"。 */}
-              {state?.meta && (state.meta.model || state.meta.sessionId) && mergedMessages.length > 0 && (
-                <div className="flex items-center gap-2 px-1.5 py-1 text-[10px] text-[var(--mx-faint)]">
-                  <span aria-hidden className="grid h-4 w-4 shrink-0 place-items-center rounded bg-[var(--mx-accent)] text-[8px] font-extrabold text-[#06222b]">X</span>
-                  <span className="shrink-0 text-[var(--mx-muted)]">Codex</span>
-                  {state.meta.model && <span className="shrink-0 font-mono">{state.meta.model}</span>}
-                  {state.meta.sessionId && <span className="shrink-0 font-mono">#{state.meta.sessionId.slice(-8)}</span>}
-                  {state.meta.contextWindow ? <span className="shrink-0 font-mono">{Math.round(state.meta.contextWindow / 1000)}k ctx</span> : null}
-                  <div className="h-px min-w-0 flex-1" style={{ borderTop: "1px solid rgba(148,163,184,0.14)" }} />
-                </div>
+              {/* C5 会话头:会话开端信息(品牌块 + 模型 + session 尾部 + 窗口),让会话有"开端感"。
+                  本分支已在 hasMessages 守卫内(mergedMessages 必非空),只需 meta 有模型/会话 id 其一。 */}
+              {state?.meta && (state.meta.model || state.meta.sessionId) && (
+                <SessionHeader
+                  brandLetter="X"
+                  brandClass="bg-[var(--mx-accent)] text-[#06222b]"
+                  name="Codex"
+                  model={state.meta.model}
+                  sessionId={state.meta.sessionId}
+                  contextWindow={state.meta.contextWindow}
+                />
               )}
-              {mergedMessages.map((item) =>
-                item.kind === "shell" ? (
-                  <div key={`shell-${item.msg.id}`} className="mx-chat-row">
-                    <ShellRow message={item.msg} t={t} onInterrupt={handleShellInterrupt} />
-                  </div>
-                ) : (
-                  <div key={item.msg.id} className="mx-chat-row">
-                    <MessageRow message={item.msg} t={t} onResend={resendText} />
-                  </div>
-                ),
-              )}
+              {mergedMessages.map((item, i) => {
+                // 相邻消息间隔超阈值(30 分钟)插时间分隔线:长会话的时间断层一眼可辨。
+                // timestamp 可空且串/数字并存(claude/codex ISO 串,`!` shell 消息 epoch ms),空值不参与比较。
+                const ts = item.msg.timestamp;
+                const prevTs = i > 0 ? mergedMessages[i - 1].msg.timestamp : null;
+                const gapTs =
+                  ts != null && prevTs != null && messageTimeMs(ts) - messageTimeMs(prevTs) > MESSAGE_GAP_MS ? ts : null;
+                return (
+                  <Fragment key={item.kind === "shell" ? `shell-${item.msg.id}` : item.msg.id}>
+                    {gapTs != null && <TimeGapDivider timestamp={gapTs} />}
+                    {item.kind === "shell" ? (
+                      <div className="mx-chat-row">
+                        <ShellRow message={item.msg} t={t} onInterrupt={handleShellInterrupt} />
+                      </div>
+                    ) : (
+                      <div className="mx-chat-row">
+                        <MessageRow message={item.msg} t={t} onResend={resendText} />
+                      </div>
+                    )}
+                  </Fragment>
+                );
+              })}
             </div>
           ) : (
-            <div className="grid h-full place-items-center text-xs text-[var(--mx-faint)]">
-              {state ? t("codexpane.empty") : probeDone ? t("codexpane.loading") : "…"}
+            // 品牌化空状态(会话未开始):大品牌块 + 名称 + (已知时)模型 + 引导文案,
+            // 替代原先一行灰字——AI 主体叙事从空状态开始;probe/加载中保持轻量占位。
+            <div className="grid h-full place-items-center">
+              {state ? (
+                <div className="flex flex-col items-center gap-2.5 py-10">
+                  <span aria-hidden className="grid h-10 w-10 place-items-center rounded-xl bg-[var(--mx-accent)] text-sm font-extrabold text-[#06222b] shadow-lg">
+                    X
+                  </span>
+                  <span className="text-xs text-[var(--mx-muted)]">
+                    Codex{state.meta?.model ? <span className="font-mono"> · {state.meta.model}</span> : null}
+                  </span>
+                  <span className="text-xs text-[var(--mx-faint)]">{t("codexpane.empty")}</span>
+                </div>
+              ) : probeDone ? (
+                <div className="text-xs text-[var(--mx-faint)]">{t("codexpane.loading")}</div>
+              ) : (
+                <div className="text-xs text-[var(--mx-faint)]">…</div>
+              )}
             </div>
           )}
           {showScrollBottom && (
@@ -1793,39 +1822,8 @@ const MessageRow = memo(function MessageRow({
       .map((b) => b.text)
       .join("\n");
     if (text.trim().length === 0) return null;
-    return (
-      // 左右对话框:user 消息靠右,青底气泡 + 右侧人形徽标。
-      <div className="group/message flex items-start justify-end gap-1.5">
-        <div className="min-w-0 max-w-[85%]">
-          <div dir="auto" className="whitespace-pre-wrap break-words rounded-lg rounded-br-[4px] bg-[var(--mx-accent-soft)] px-3 py-1.5 leading-relaxed text-[var(--mx-text)]">
-            {text}
-          </div>
-          <div className="mt-0.5 flex items-center justify-end gap-1.5 text-[10px] tabular-nums text-[var(--mx-faint)]">
-            {time && <span>{time}</span>}
-            {onResend && (
-              <button
-                type="button"
-                title={t("codexpane.resend")}
-                onClick={() => onResend(text)}
-                className="cursor-pointer opacity-0 transition-opacity hover:text-[var(--mx-text)] group-hover:opacity-100"
-              >
-                ↻
-              </button>
-            )}
-            <CopyButton text={text} t={t} className="ml-0 opacity-0 group-hover:opacity-100" />
-          </div>
-        </div>
-        {/* A1 角色徽标:user 人形图标(青底),置于气泡右侧。 */}
-        <span aria-hidden className="flex h-[1.625em] shrink-0 items-center">
-          <span className="grid h-[18px] w-[18px] place-items-center rounded-md bg-[var(--mx-accent-soft)] text-[var(--mx-accent)]">
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-              <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
-              <circle cx="12" cy="7" r="4" />
-            </svg>
-          </span>
-        </span>
-      </div>
-    );
+    // 左右对话框:user 消息靠右(共享 ChatUserBubble:中性色气泡 + 人形徽标 + ↻/⧉ 常显淡 hover 实)。
+    return <ChatUserBubble text={text} time={time ?? undefined} onResend={onResend} t={t} />;
   }
 
   // assistant:行首品牌徽标(青 X)+ 正文块流 + 末行时间/tokens。
@@ -1863,7 +1861,8 @@ const MessageRow = memo(function MessageRow({
                   {formatTokens(message.usage.output_tokens ?? 0)}
                 </span>
               )}
-            {fullText && <CopyButton text={fullText} t={t} className="ml-auto opacity-0 group-hover:opacity-100" />}
+            {/* 复制常显淡(assistant 气泡内层 div.group 命中裸 group-hover),hover 变实。 */}
+            {fullText && <CopyButton text={fullText} t={t} className="ml-auto opacity-60 group-hover:opacity-100" />}
           </div>
         )}
       </div>
@@ -2374,35 +2373,7 @@ function formatTokens(n: number): string {
   return `${parseFloat((n / 1_000_000).toFixed(1))}m`;
 }
 
-/** 复制图标(剪贴板)。 */
-function IconCopy() {
-  return (
-    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
-      <rect x="9" y="9" width="11" height="11" rx="2" />
-      <path d="M5 15V5a2 2 0 0 1 2-2h10" />
-    </svg>
-  );
-}
-
-/** 复制按钮:点击写剪贴板,1.2s 显「已复制」。 */
-function CopyButton({ text, t, className = "" }: { text: string; t: (k: string) => string; className?: string }) {
-  const [copied, setCopied] = useState(false);
-  return (
-    <button
-      type="button"
-      onClick={(e) => {
-        e.stopPropagation();
-        navigator.clipboard?.writeText(text).catch(() => {});
-        setCopied(true);
-        window.setTimeout(() => setCopied(false), 1200);
-      }}
-      className={`inline-flex items-center gap-1 rounded text-[var(--mx-faint)] transition-colors hover:text-[var(--mx-text)] ${className}`}
-      title={t("codexpane.copy")}
-    >
-      {copied ? <span className="text-[var(--mx-success)]">{t("codexpane.copied")}</span> : <IconCopy />}
-    </button>
-  );
-}
+// CopyButton/IconCopy 已抽共享(src/components/ui/CopyButton.tsx,ClaudePane/CodexPane 复用)。
 
 function IconSend() {
   return (

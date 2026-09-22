@@ -17,6 +17,12 @@ const en = {
     confirm: "Confirm",
     refresh: "Refresh",
   },
+  // chat: shared conversation-stream components (ChatUserBubble/CopyButton etc.).
+  chat: {
+    copy: "Copy",
+    copied: "Copied",
+    resend: "Resend",
+  },
   shell: {
     tab: {
       close: "Close tab",
@@ -28,7 +34,8 @@ const en = {
       splitVertical: "Vertical",
       close: "Close pane",
       noActiveTab: "No active tab",
-      expand: "Expand / restore (main pane gets the big share)",
+      expand: "Expand (main pane gets the big share)",
+      restore: "Restore split ratio",
     },
   },
   project: {
@@ -219,7 +226,6 @@ const en = {
     viewOnGithub: "View on GitHub",
   },
   statusbar: {
-    settings: "Settings",
     updateAvailable: "Update available",
     focusedProject: "Focused project",
     gitBranch: "git branch: {{branch}}",
@@ -245,6 +251,7 @@ const en = {
   topbar: {
     backToMain: "Back to main window",
     project: "Project",
+    settings: "Settings",
   },
   sidebar: {
     openShellsByProject: "Browse shells by project",
@@ -260,6 +267,7 @@ const en = {
     slashHint: "Message… / for commands",
     busy: "Claude is responding…",
     thinking: "Thinking…",
+    thought: "Thought",
     runningTool: "Running {{tool}}…",
     bgTasks: "Background tasks ×{{n}}… (you can keep chatting)",
     bgTaskDoneLabel: "Background task done",

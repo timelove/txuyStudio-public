@@ -64,6 +64,8 @@ type PaneSurfaceProps = {
   onRenameTab?: (paneId: string, tabId: string, title: string) => void;
   /** AI pane ◱ 展开/还原(透传给 ClaudePane/CodexPane;按 paneId 定位 split 调比例)。 */
   onToggleExpandPane?: (paneId: string) => void;
+  /** 处于「◱ 展开」态的 paneId 集合(AppShell 展开记忆派生;按钮图标/文案随它切换)。 */
+  expandedPaneIds?: Set<string>;
   /** React key 前缀(多项目并排时传 projectId):同一 paneId 跨项目不撞 key。 */
   keyPrefix?: string;
   /** 项目 id(FileTreePane 的 fs-watch 生命周期 + fs-change 过滤用;由 ProjectColumn 下传)。 */
@@ -102,6 +104,7 @@ export function PaneSurface({
   onSetSplitRatio,
   onRenameTab,
   onToggleExpandPane,
+  expandedPaneIds,
   keyPrefix,
   projectId,
   rootPath,
@@ -120,7 +123,7 @@ export function PaneSurface({
 
   return (
     <div className="grid h-full min-h-0 min-w-0 border border-[var(--mx-border-strong)]">
-      {renderNode(paneTree, sessionsByPane, focusedPaneId, onFocusPane, getTransport, getClaudeTransport, getCodexTransport, getShellRunTransport, onSplitPane, onClosePane, onAddTab, onResumeSession, onCloseTab, onSetActiveTab, t, onMeasurePane, keyPrefix, projectId, rootPath, onSetSplitRatio, onRenameTab, onToggleExpandPane)}
+      {renderNode(paneTree, sessionsByPane, focusedPaneId, onFocusPane, getTransport, getClaudeTransport, getCodexTransport, getShellRunTransport, onSplitPane, onClosePane, onAddTab, onResumeSession, onCloseTab, onSetActiveTab, t, onMeasurePane, keyPrefix, projectId, rootPath, onSetSplitRatio, onRenameTab, onToggleExpandPane, expandedPaneIds)}
     </div>
   );
 }
@@ -150,6 +153,7 @@ function renderNode(
   onSetSplitRatio?: (splitId: string, ratio: number, commit: boolean) => void,
   onRenameTab?: (paneId: string, tabId: string, title: string) => void,
   onToggleExpandPane?: (paneId: string) => void,
+  expandedPaneIds?: Set<string>,
 ): React.ReactNode {
   const k = (id: string) => (keyPrefix ? `${keyPrefix}::${id}` : id);
   if (node.type === "pane") {
@@ -233,6 +237,7 @@ function renderNode(
             getClaudeTransport={(tabId: string) => getClaudeTransport(node.id, tabId)}
             getShellRunTransport={(tabId: string) => getShellRunTransport(node.id, tabId)}
             onToggleExpand={onToggleExpandPane ? () => onToggleExpandPane!(node.id) : undefined}
+            expanded={expandedPaneIds?.has(node.id)}
             onResumeSession={(sid: string) => {
               // ↻ 在当前已终止的 claudepane tab 上恢复该历史 session(kill+用 resume id 重新 spawn),
               // 不再新建 tab。当前 tab 进程若仍存活也会被 kill 重启到目标 session(切换会话语义)。
@@ -254,6 +259,7 @@ function renderNode(
             getCodexTransport={(tabId: string) => getCodexTransport(node.id, tabId)}
             getShellRunTransport={(tabId: string) => getShellRunTransport(node.id, tabId)}
             onToggleExpand={onToggleExpandPane ? () => onToggleExpandPane!(node.id) : undefined}
+            expanded={expandedPaneIds?.has(node.id)}
             onResumeSession={(sid: string) => {
               // ↻ 在当前 codexpane tab 上恢复该历史 thread(设 resume id,下次 send 带它续接;
               // codex 无长进程,清 terminatedReason 即可,下轮 spawn 用 resume id)。
@@ -289,13 +295,13 @@ function renderNode(
     : { gridTemplateRows: `minmax(0,${r}fr) 1px minmax(0,${1 - r}fr)` };
   return (
     <div key={k(node.id)} className="grid h-full min-h-0 min-w-0" style={trackStyle}>
-      {renderNode(node.children[0], sessionsByPane, focusedPaneId, onFocusPane, getTransport, getClaudeTransport, getCodexTransport, getShellRunTransport, onSplitPane, onClosePane, onAddTab, onResumeSession, onCloseTab, onSetActiveTab, t, onMeasurePane, keyPrefix, projectId, rootPath, onSetSplitRatio, onRenameTab, onToggleExpandPane)}
+      {renderNode(node.children[0], sessionsByPane, focusedPaneId, onFocusPane, getTransport, getClaudeTransport, getCodexTransport, getShellRunTransport, onSplitPane, onClosePane, onAddTab, onResumeSession, onCloseTab, onSetActiveTab, t, onMeasurePane, keyPrefix, projectId, rootPath, onSetSplitRatio, onRenameTab, onToggleExpandPane, expandedPaneIds)}
       <SplitHandle
         horizontal={horizontal}
         splitId={k(node.id)}
         onSetSplitRatio={onSetSplitRatio}
       />
-      {renderNode(node.children[1], sessionsByPane, focusedPaneId, onFocusPane, getTransport, getClaudeTransport, getCodexTransport, getShellRunTransport, onSplitPane, onClosePane, onAddTab, onResumeSession, onCloseTab, onSetActiveTab, t, onMeasurePane, keyPrefix, projectId, rootPath, onSetSplitRatio, onRenameTab, onToggleExpandPane)}
+      {renderNode(node.children[1], sessionsByPane, focusedPaneId, onFocusPane, getTransport, getClaudeTransport, getCodexTransport, getShellRunTransport, onSplitPane, onClosePane, onAddTab, onResumeSession, onCloseTab, onSetActiveTab, t, onMeasurePane, keyPrefix, projectId, rootPath, onSetSplitRatio, onRenameTab, onToggleExpandPane, expandedPaneIds)}
     </div>
   );
 }

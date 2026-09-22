@@ -35,6 +35,8 @@ type ProjectColumnProps = {
   onRenameTab?: (paneId: string, tabId: string, title: string) => void;
   /** AI pane ◱ 展开/还原(透传给 PaneSurface → ClaudePane/CodexPane;AppShell 按 split 调比例)。 */
   onToggleExpandPane?: (paneId: string) => void;
+  /** 本项目处于「◱ 展开」态的 paneId 集合(AppShell 展开记忆派生;按钮图标/文案随它切换)。 */
+  expandedPaneIds?: Set<string>;
 };
 
 /**
@@ -62,6 +64,7 @@ export function ProjectColumn({
   onSetSplitRatio,
   onRenameTab,
   onToggleExpandPane,
+  expandedPaneIds,
 }: ProjectColumnProps) {
   // deriveSessions 已遍历 pane 的 tabs,每个 tab 派生一个 session(id=tabId, paneId=pane.id)。
   const sessions = useMemo(() => deriveSessions(paneTree, project.rootPath), [paneTree, project.rootPath]);
@@ -91,6 +94,7 @@ export function ProjectColumn({
           onSetSplitRatio={onSetSplitRatio}
           onRenameTab={onRenameTab}
           onToggleExpandPane={onToggleExpandPane}
+          expandedPaneIds={expandedPaneIds}
         />
       </div>
     </section>

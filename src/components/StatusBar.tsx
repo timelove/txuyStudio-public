@@ -7,8 +7,7 @@ import type { ClaudeStatusEntry } from "../domain/claudeStatusRegistry";
 import type { CodexStatusEntry } from "../domain/codexStatusRegistry";
 import type { ClaudeSessionKind } from "../domain/claudeStream";
 import { autoCheckUpdate, getUpdaterSnapshot, subscribeUpdater, type UpdaterSnapshot } from "../domain/appUpdater";
-import { SettingsModal } from "./SettingsModal";
-import { Button } from "./ui/Button";
+import type { SettingsTab } from "./SettingsModal";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/Tooltip";
 
 type StatusBarProps = {
@@ -22,6 +21,8 @@ type StatusBarProps = {
   codexStatuses?: CodexStatusEntry[];
   /** 点击某 AI 状态药丸 -> 跳到该状态第一个 claude/codex tab。 */
   onFocusClaudeTab?: (projectId: string, tabId: string) => void;
+  /** 打开设置弹窗(「新版本可用」chip → about 页);设置齿轮在顶栏品牌区,弹窗由 AppShell 持有。 */
+  onOpenSettings?: (tab?: SettingsTab) => void;
 };
 
 /** 健康提醒的自然时间窗口长度(ms)。tip 按此时长对齐到墙上时钟轮换(默认 30min → :00 / :30 边界)。后续设置面板接入后改为从 settings 读取。 */
@@ -46,17 +47,13 @@ const HEALTH_TIPS: { tip: string; done: string }[] = [
  *
  * 生命周期:所有 interval 在卸载时清除,避免后台空转 invoke。
  */
-export function StatusBar({ focusedProject, gitBranch, claudeStatuses, codexStatuses, onFocusClaudeTab }: StatusBarProps) {
+export function StatusBar({ focusedProject, gitBranch, claudeStatuses, codexStatuses, onFocusClaudeTab, onOpenSettings }: StatusBarProps) {
   const { t } = useTranslation();
   const [mem, setMem] = useState<{ usedBytes: number; totalBytes: number } | null>(null);
   const [tipIdx, setTipIdx] = useState(0);
   const [tipHighlight, setTipHighlight] = useState(false);
   /** 当前 tip 已被用户点击「完成」→ 隐藏;下一轮轮换时自动恢复显示新 tip。 */
   const [tipHidden, setTipHidden] = useState(false);
-  /** 设置面板开关(齿轮点击触发)。 */
-  const [settingsOpen, setSettingsOpen] = useState(false);
-  /** 设置面板初始 tab:「新版本可用」chip 点击 → about(更新器在那);齿轮打开不指定。 */
-  const [settingsTab, setSettingsTab] = useState<"general" | "shortcuts" | "about">("general");
   /** 全局更新快照(启动自动检查驱动;见 domain/appUpdater)。 */
   const [updaterSnap, setUpdaterSnap] = useState<UpdaterSnapshot>(() => getUpdaterSnapshot());
 
@@ -156,36 +153,16 @@ export function StatusBar({ focusedProject, gitBranch, claudeStatuses, codexStat
   const aiActive = aiCounts.running + aiCounts.retrying + aiCounts.waiting + aiCounts.error + aiCounts.bg;
 
   return (
-    <>
     <footer className="flex h-[length:var(--mx-statusbar-h)] shrink-0 items-center justify-between gap-3 px-3 text-[length:var(--mx-ui-fs-sm)] text-[var(--mx-muted)] select-none">
-      {/* 左:设置齿轮 + 聚焦项目绝对路径(截断 + title 全路径)+ git 分支。 */}
+      {/* 左:聚焦项目绝对路径(截断 + title 全路径)+ git 分支 + 更新 chip。
+          设置齿轮已迁顶栏品牌区(设置弹窗唯一入口),不再占状态栏。 */}
       <div className="flex min-w-0 items-center gap-2">
-        <Tooltip>
-        <TooltipTrigger asChild>
-        <Button
-          variant="ghost"
-          size="icon-sm"
-          onClick={() => setSettingsOpen(true)}
-          aria-label={t("statusbar.settings")}
-        >
-          {/* 齿轮 SVG(16px,stroke 跟随 currentColor)。 */}
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
-            <circle cx="12" cy="12" r="3" />
-            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
-          </svg>
-        </Button>
-        </TooltipTrigger>
-        <TooltipContent>{t("statusbar.settings")}</TooltipContent>
-        </Tooltip>
         {/* 新版本可用 chip:启动自动检查发现更新时出现,点击直达设置→关于(更新器)。
             绿点呼吸引人注意;安装完成后 store 转 upToDate,chip 自动消失。 */}
         {updaterSnap.phase === "available" && (
           <button
             type="button"
-            onClick={() => {
-              setSettingsTab("about");
-              setSettingsOpen(true);
-            }}
+            onClick={() => onOpenSettings?.("about")}
             className="flex shrink-0 cursor-pointer items-center gap-1.5 rounded-[var(--mx-radius-md)] px-1.5 py-0.5 text-[11px] text-[#86efac] transition-colors hover:bg-[var(--mx-hover-bg)]"
             title={t("statusbar.updateAvailable")}
           >
@@ -301,7 +278,5 @@ export function StatusBar({ focusedProject, gitBranch, claudeStatuses, codexStat
         </Tooltip>
       </div>
     </footer>
-    <SettingsModal open={settingsOpen} initialTab={settingsTab} onClose={() => setSettingsOpen(false)} />
-    </>
   );
 }

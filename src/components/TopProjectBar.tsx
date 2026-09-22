@@ -7,6 +7,7 @@ import { WindowControls } from "./WindowControls";
 import { Button } from "./ui/Button";
 import { useTranslation } from "react-i18next";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/Tooltip";
+import type { SettingsTab } from "./SettingsModal";
 
 type TopProjectBarProps = {
   projects: ProjectSnapshot[];
@@ -40,9 +41,49 @@ type TopProjectBarProps = {
   pinnedLayout?: PinnedLayout;
   /** 修改并排布局偏好(部分字段 patch),透传。 */
   onPinnedLayoutChange?: (patch: Partial<PinnedLayout>) => void;
-  /** 跨项目 AI 活跃状态(顶栏全局一处可见,克制显示):null=无 AI 正在工作,不渲染。 */
-  aiStatus?: { provider: "claude" | "codex"; label: string } | null;
+  /** 打开设置弹窗(品牌区齿轮;tab 可指定直达页)。AppShell 持有弹窗状态。 */
+  onOpenSettings?: (tab?: SettingsTab) => void;
 };
+
+/** 品牌 logo(与 app-icon.svg 同构:深空底 + 镂空 T + 发光 >;小尺寸去 filter 保清晰)。
+ *  className 透传交互态差异(设置入口可点 vs 纯展示 pointer-events-none)。 */
+function BrandLogo({ className }: { className?: string }) {
+  return (
+    <svg
+      width="20"
+      height="20"
+      viewBox="0 0 1024 1024"
+      aria-hidden
+      className={`rounded-[5px] shadow-[0_0_0_1px_var(--mx-selected-border),0_1px_3px_rgba(0,0,0,0.4)] ${className ?? ""}`}
+    >
+      <defs>
+        <linearGradient id="mxLogoBg" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0" stopColor="#070a12" />
+          <stop offset="1" stopColor="#0f1428" />
+        </linearGradient>
+        <radialGradient id="mxLogoAmbient" cx="0.5" cy="0.5" r="0.6">
+          <stop offset="0" stopColor="#22d3ee" stopOpacity="0.22" />
+          <stop offset="1" stopColor="#070a12" stopOpacity="0" />
+        </radialGradient>
+      </defs>
+      <rect x="0" y="0" width="1024" height="1024" rx="224" ry="224" fill="url(#mxLogoBg)" />
+      <rect x="0" y="0" width="1024" height="1024" rx="224" ry="224" fill="url(#mxLogoAmbient)" />
+      {/* 青色描边边框:与圆角底重合,凸显 logo 与顶栏背景的边界(全息风格统一)。 */}
+      <rect x="3" y="3" width="1018" height="1018" rx="222" ry="222"
+            fill="none" stroke="#22d3ee" strokeWidth="6" opacity="0.55" />
+      <rect x="450" y="332" width="280" height="64" rx="8" fill="none" stroke="#22d3ee" strokeWidth="18" />
+      <rect x="558" y="332" width="64" height="360" rx="8" fill="none" stroke="#22d3ee" strokeWidth="18" />
+      <path
+        d="M 318 512 L 418 602 L 318 692"
+        fill="none"
+        stroke="#e2e8f0"
+        strokeWidth="40"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
 
 /**
  * 顶栏 = 自绘窗口标题栏(IDEA 新 UI 做法,`decorations:false`)。
@@ -73,7 +114,7 @@ export function TopProjectBar({
   visibleProjectCount,
   pinnedLayout,
   onPinnedLayoutChange,
-  aiStatus,
+  onOpenSettings,
 }: TopProjectBarProps) {
   const { t } = useTranslation();
   const activeProject = projects.find((p) => p.id === activeProjectId) ?? null;
@@ -82,44 +123,32 @@ export function TopProjectBar({
       data-tauri-drag-region
       className="grid h-[length:var(--mx-titlebar-h)] grid-cols-[auto_1fr_auto] items-center gap-3 px-3"
     >
-      {/* 品牌区:纯展示,不 stopPropagation → 冒泡到 header,可作为拖拽把手。
-          子元素 pointer-events-none → mousedown 命中带 attr 的父容器(该 Tauri 版本只看
-          target 自身、不向上找祖先),整块可拖;select-none 防长按误选文字打断拖拽。 */}
+      {/* 品牌区(logo + 名称):整体可作拖拽把手——子元素 pointer-events-none → mousedown
+          命中带 attr 的父容器(该 Tauri 版本只看 target 自身、不向上找祖先),整块可拖;
+          select-none 防长按误选文字打断拖拽。logo 是其中唯一交互元素(点击开设置,
+          pointer-events-auto + stopPropagation),其余纯展示。 */}
       <div data-tauri-drag-region className="flex select-none items-center gap-2">
-        {/* 品牌 logo:与 app-icon.svg 同构(深空底 + 镂空 T + 发光 >),小尺寸去 filter 保清晰。 */}
-        <svg
-          width="20"
-          height="20"
-          viewBox="0 0 1024 1024"
-          aria-hidden
-          className="pointer-events-none rounded-[5px] shadow-[0_0_0_1px_var(--mx-selected-border),0_1px_3px_rgba(0,0,0,0.4)]"
-        >
-          <defs>
-            <linearGradient id="mxLogoBg" x1="0" y1="0" x2="1" y2="1">
-              <stop offset="0" stopColor="#070a12" />
-              <stop offset="1" stopColor="#0f1428" />
-            </linearGradient>
-            <radialGradient id="mxLogoAmbient" cx="0.5" cy="0.5" r="0.6">
-              <stop offset="0" stopColor="#22d3ee" stopOpacity="0.22" />
-              <stop offset="1" stopColor="#070a12" stopOpacity="0" />
-            </radialGradient>
-          </defs>
-          <rect x="0" y="0" width="1024" height="1024" rx="224" ry="224" fill="url(#mxLogoBg)" />
-          <rect x="0" y="0" width="1024" height="1024" rx="224" ry="224" fill="url(#mxLogoAmbient)" />
-          {/* 青色描边边框:与圆角底重合,凸显 logo 与顶栏背景的边界(全息风格统一)。 */}
-          <rect x="3" y="3" width="1018" height="1018" rx="222" ry="222"
-                fill="none" stroke="#22d3ee" strokeWidth="6" opacity="0.55" />
-          <rect x="450" y="332" width="280" height="64" rx="8" fill="none" stroke="#22d3ee" strokeWidth="18" />
-          <rect x="558" y="332" width="64" height="360" rx="8" fill="none" stroke="#22d3ee" strokeWidth="18" />
-          <path
-            d="M 318 512 L 418 602 L 318 692"
-            fill="none"
-            stroke="#e2e8f0"
-            strokeWidth="40"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          />
-        </svg>
+        {/* 品牌 logo = 设置弹窗入口(点击打开,无独立齿轮图标)。拖拽区内 Radix hover 在
+            拖拽按下时失效,保留原生 title 兜底(同 dock back);hover 轻微放大给出可点反馈。 */}
+        {onOpenSettings ? (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                onClick={() => onOpenSettings()}
+                onMouseDown={(e) => e.stopPropagation()}
+                title={t("topbar.settings")}
+                aria-label={t("topbar.settings")}
+                className="pointer-events-auto cursor-pointer rounded-[6px] transition-transform duration-150 hover:scale-110 focus-visible:outline focus-visible:outline-1 focus-visible:outline-[var(--mx-accent)]"
+              >
+                <BrandLogo />
+              </button>
+            </TooltipTrigger>
+            <TooltipContent>{t("topbar.settings")}</TooltipContent>
+          </Tooltip>
+        ) : (
+          <BrandLogo className="pointer-events-none" />
+        )}
         <div className="pointer-events-none text-[length:var(--mx-ui-fs)] font-[760] tracking-[0.02em]">txuyStudio</div>
       </div>
 
@@ -193,22 +222,6 @@ export function TopProjectBar({
         )}
       </div>
 
-      {/* 跨项目 AI 状态点:仅当有 AI 正在工作/需注意时显示(空闲不占位)。
-          紫=Claude 青=Codex 小圆点 + 状态文字,全局一处可见(替代 pane 内状态条,克制不侵入)。 */}
-      {aiStatus && (
-        <div
-          data-tauri-drag-region
-          className="mr-1.5 flex shrink-0 items-center gap-1.5 rounded-full border border-[var(--mx-border)] px-2.5 py-[3px] text-[11px] text-[var(--mx-muted)]"
-          title={aiStatus.label}
-        >
-          <span
-            aria-hidden
-            className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full"
-            style={{ background: aiStatus.provider === "claude" ? "#7c3aed" : "#22d3ee" }}
-          />
-          <span className="truncate">{aiStatus.label}</span>
-        </div>
-      )}
       {/* 窗口控制:交互按钮区,stopPropagation 避免被拖拽吞掉点击。 */}
       <div className="flex items-center" onMouseDown={(e) => e.stopPropagation()}>
         <div className="-mr-3 ml-1 flex h-[length:var(--mx-titlebar-h)] items-stretch">
