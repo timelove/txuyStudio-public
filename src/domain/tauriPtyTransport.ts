@@ -6,7 +6,7 @@ import type { TerminalStartOpts, TerminalTransport } from "./terminalTransport";
  * 基于 Tauri + Rust PTY 的真实终端 transport。
  *
  * 每个实例对应一个终端面板：start 时后端 spawn 一个真实 shell 会话，
- * 通过全局 `pty-output` 事件回推输出，由本实例按 sessionId 路由。
+ * 通过全局 `pty-output` 事件回推输出，由本实例按 **projectId + sessionId 双键**路由。
  *
  * 顺序约束：必须先 listen 再 invoke spawn，否则会丢掉 shell 启动首批输出
  * （PowerShell 冷启动有延迟）。
@@ -69,9 +69,12 @@ export class TauriPtyTransport implements TerminalTransport {
 
     try {
       // 1) 先订阅全局事件，避免丢首批输出。
+      // 路由必须 (projectId, sessionId) 双键:各项目默认 pane 的 sessionId 恒为 `ps-1`,
+      // 只按 sessionId 过滤会让所有项目的 ps-1 transport 都命中彼此输出(跨项目互串,
+      // 另一项目的提示符/OSC cwd 标记渲染进本面板,即「根目录变成第一个项目的」)。
       if (!this.unlisten) {
         this.unlisten = await listen<PtyOutputPayload>("pty-output", (event) => {
-          if (event.payload.sessionId === this.ptySessionId) {
+          if (event.payload.projectId === this.projectId && event.payload.sessionId === this.ptySessionId) {
             this.handlePtyChunk(sessionId, event.payload.data);
           }
         });
@@ -175,6 +178,8 @@ export class TauriPtyTransport implements TerminalTransport {
 }
 
 type PtyOutputPayload = {
+  /** 后端 2026-09 起随 pty-output 附带(前端按 projectId+sessionId 双键路由,防跨项目 ps-1 互串)。 */
+  projectId: string;
   sessionId: string;
   data: string;
 };

@@ -28,6 +28,7 @@ const en = {
       splitVertical: "Vertical",
       close: "Close pane",
       noActiveTab: "No active tab",
+      expand: "Expand / restore (main pane gets the big share)",
     },
   },
   project: {
@@ -255,6 +256,7 @@ const en = {
   },
   claudepane: {
     inputPlaceholder: "Send a message… (Enter to send, Shift+Enter for newline)",
+    resend: "Resend",
     slashHint: "Message… / for commands",
     busy: "Claude is responding…",
     thinking: "Thinking…",
@@ -335,6 +337,7 @@ const en = {
   // (no approval/compact/retry copy; includes sandbox denial). `!` command copy reuses claudepane.shell*.
   codexpane: {
     slashHint: "Message, / for commands",
+    resend: "Resend",
     busy: "Codex is responding…",
     thinking: "Thinking…",
     runningTool: "Running {{tool}}…",

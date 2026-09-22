@@ -16,6 +16,7 @@ import {
   defaultPaneTree,
   findPane,
   findPaneByTabId,
+  findSplitContaining,
   focusPane,
   getActiveTab,
   listPanes,
@@ -425,6 +426,27 @@ export function AppShell({
       });
     },
     [],
+  );
+
+  /**
+   * AI pane ◱ 展开/还原:定位包含该 pane 的最近 split,把它**自身**的占比列出 (>0.7=已展开,
+   * 还原到默认主体占比 0.6;否则展开到 0.78)。关键:split.ratio 是第一个 child 的占比,若该 AI
+   * pane 在第二侧,展开=调小 ratio(否则 0.78 会把第二侧 AI 缩到 22%)。单 pane 项目 no-op。
+   */
+  const handleToggleExpandPane = useCallback(
+    (projectId: ProjectId, paneId: string) => {
+      const cur = treesByProject[projectId];
+      if (!cur) return;
+      const split = findSplitContaining(cur, paneId);
+      if (!split) return;
+      // 该 pane 的实际占比:第一侧=ratio,第二侧=1-ratio。据此判断当前是否已展开 + 设目标。
+      const paneShare = split.paneIsFirst ? split.ratio : 1 - split.ratio;
+      const targetShare = paneShare > 0.7 ? 0.6 : 0.78;
+      // 换算回 split.ratio(第一侧占比):第二侧的目标要取反。
+      const targetRatio = split.paneIsFirst ? targetShare : 1 - targetShare;
+      handleSetSplitRatio(projectId, `${projectId}::${split.splitId}`, targetRatio, true);
+    },
+    [treesByProject, handleSetSplitRatio],
   );
 
   /**
@@ -1082,6 +1104,47 @@ export function AppShell({
   // 全部 codex tab 的对外状态汇总(与 claude 并列,StatusBar 分别显示)。
   const codexStatuses = useCodexStatuses();
 
+  // 顶栏 AI 状态点:跨「可见项目」聚合,取优先级最高的活跃态(running>retrying>waiting>bg>error)。
+  // 克制显示——仅当有 AI 正在工作/需注意时出现一个小圆点胶囊(紫=Claude/青=Codex),空闲不占位;
+  // 这是被否决的「pane 内状态条」的替代:AI 活动状态全局一处可见,不侵入 pane。
+  const aiStatus = useMemo(() => {
+    const visible = new Set(visibleProjectIds);
+    const prioOf = (kind: string) =>
+      kind === "running" ? 5 :
+      kind === "retrying" ? 4 :
+      kind === "waiting" ? 3 :
+      kind === "bg" ? 2 :
+      kind === "error" ? 1 : 0;
+    const labelOf = (provider: "claude" | "codex", kind: string, bgTasks?: number) =>
+      provider === "claude"
+        ? kind === "running" ? "Claude 工作中…"
+          : kind === "retrying" ? "Claude 重试中…"
+          : kind === "waiting" ? "Claude 待确认"
+          : kind === "bg" ? `Claude 后台任务 ×${bgTasks ?? ""}`
+          : "Claude 出错"
+        : kind === "running" ? "Codex 执行中…" : "Codex 出错";
+    // 先收集候选再逐条比较(不用嵌套闭包改外层变量,避免 TS CFA 窄化成 never)。
+    const candidates: Array<{ prio: number; provider: "claude" | "codex"; label: string }> = [];
+    for (const e of claudeStatuses) {
+      if (visible.has(e.projectId) && e.summary.active) {
+        candidates.push({ prio: prioOf(e.summary.kind), provider: "claude", label: labelOf("claude", e.summary.kind, e.summary.bgTasks) });
+      }
+    }
+    for (const e of codexStatuses) {
+      if (visible.has(e.projectId) && e.summary.active) {
+        candidates.push({ prio: prioOf(e.summary.kind), provider: "codex", label: labelOf("codex", e.summary.kind) });
+      }
+    }
+    let bestPrio = 0;
+    let best: { provider: "claude" | "codex"; label: string } | null = null;
+    for (const c of candidates) {
+      if (c.prio <= bestPrio) continue;
+      bestPrio = c.prio;
+      best = { provider: c.provider, label: c.label };
+    }
+    return best;
+  }, [claudeStatuses, codexStatuses, visibleProjectIds]);
+
   // StatusBar 点击某个 AI 状态药丸 -> 跳到该状态第一个 claude tab:切项目 + 聚焦 pane + 切活动 tab。
   const handleFocusClaudeTab = useCallback(
     (projectId: string, tabId: string) => {
@@ -1136,9 +1199,13 @@ export function AppShell({
         visibleProjectCount={visibleProjects.length}
         pinnedLayout={pinnedLayout}
         onPinnedLayoutChange={changePinnedLayout}
+        aiStatus={aiStatus}
       />
-      <div className="grid min-h-0 grid-cols-[length:var(--mx-sidebar-w)_1fr]">
-        <div className="flex min-h-0 flex-col">
+      {/* 左栏 shell 列表(ShellSidebar):长期使用基本用不到,2026-09-22 注释禁用——
+          中央区整宽铺开直连顶栏/状态栏。恢复:外层 grid 改回
+          grid-cols-[length:var(--mx-sidebar-w)_1fr] 并取消下方整段注释(组件/import 未删)。 */}
+      <div className="grid min-h-0 grid-cols-[1fr]">
+        {/* <div className="flex min-h-0 flex-col">
           {hasProject ? (
             <ShellSidebar
               visibleProjects={visibleProjects}
@@ -1153,7 +1220,7 @@ export function AppShell({
               {t("project.emptyHint")}
             </div>
           )}
-        </div>
+        </div> */}
         {/* 中央区留白:紧凑贴边——上下零留白(终端区直贴顶栏/状态栏,原 py-2 的 8px 空带
             会稀释栏高、造成内容不居中的错觉),仅右侧 6px 与窗口边隔开。 */}
         <div className="min-h-0 min-w-0 pr-[6px]">
@@ -1206,6 +1273,7 @@ export function AppShell({
                         handleSetSplitRatio(p.id, splitId, ratio, commit)
                       }
                       onRenameTab={(paneId, tabId, title) => handleRenameTab(p.id, paneId, tabId, title)}
+                      onToggleExpandPane={(paneId) => handleToggleExpandPane(p.id, paneId)}
                     />
                   ))}
                 </div>

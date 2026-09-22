@@ -92,6 +92,50 @@ function getRenderPipeline() {
   return renderPipelinePromise;
 }
 
+/**
+ * 代码块增强(会话流 B3):每个 `<pre>` 包进 `.mx-codeblock` 容器,头部加语言 label(取自
+ * `language-xxx` 类)+ 复制按钮(⧉,data-mx-copy)+ 长块折叠按钮(▾/▴,data-mx-toggle)。
+ * 按钮用纯符号(语言无关,缓存 HTML 不绑定 i18n),点击走 MdPreview 根元素的委托 onClick。
+ * 必须在 hljs highlightElement 之后调用(此时 className 已含 language-xxx,未被覆盖)。
+ */
+function enrichCodeBlocks(root: HTMLElement): void {
+  root.querySelectorAll("pre").forEach((pre) => {
+    const code = pre.querySelector("code");
+    if (!code) return;
+    const lang = /\blanguage-([\w-]+)/.exec(code.className)?.[1] ?? "";
+    // 长块阈值:>30 行折叠(默认限高滚动),短块直接全显。
+    const long = (code.textContent ?? "").split("\n").length > 30;
+
+    const wrap = document.createElement("div");
+    wrap.className = `mx-codeblock${long ? " long" : ""}`;
+    const head = document.createElement("div");
+    head.className = "mx-codeblock-head";
+    const label = document.createElement("span");
+    label.className = "mx-codeblock-lang";
+    label.textContent = lang || "code";
+    head.appendChild(label);
+    const copy = document.createElement("button");
+    copy.type = "button";
+    copy.className = "mx-codeblock-copy";
+    copy.title = "copy";
+    copy.textContent = "⧉";
+    copy.setAttribute("data-mx-copy", "1");
+    head.appendChild(copy);
+    if (long) {
+      const toggle = document.createElement("button");
+      toggle.type = "button";
+      toggle.className = "mx-codeblock-toggle";
+      toggle.title = "expand";
+      toggle.textContent = "▾";
+      toggle.setAttribute("data-mx-toggle", "1");
+      head.appendChild(toggle);
+    }
+    pre.parentNode?.insertBefore(wrap, pre);
+    wrap.appendChild(head);
+    wrap.appendChild(pre);
+  });
+}
+
 export const MdPreview = memo(function MdPreview({ content, inline = false }: { content: string; inline?: boolean }) {
   const { t } = useTranslation();
   const { fontSize } = useSettings();
@@ -119,6 +163,7 @@ export const MdPreview = memo(function MdPreview({ content, inline = false }: { 
         const off = document.createElement("div");
         off.innerHTML = render(content);
         highlightAll(off);
+        enrichCodeBlocks(off);
         const finalHtml = off.innerHTML;
         setCached(content, finalHtml);
         setHtml(finalHtml);
@@ -141,9 +186,26 @@ export const MdPreview = memo(function MdPreview({ content, inline = false }: { 
     return inline ? null : <div className="grid h-full place-items-center text-[11px] text-[var(--mx-faint)]">{t("common.loading")}</div>;
   }
 
+  // 代码块复制/折叠委托:缓存 HTML 是静态串,按钮交互经根元素 onClick 委托处理
+  // (复制→取 .mx-codeblock 内 code 文本;折叠→toggle .expanded 并换 ▾/▴)。
+  const handleBlockClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    const target = e.target as HTMLElement;
+    const wrap = target.closest<HTMLElement>(".mx-codeblock");
+    if (!wrap) return;
+    if (target.dataset?.mxCopy !== undefined) {
+      const code = wrap.querySelector("pre code");
+      const text = code?.textContent ?? "";
+      void navigator.clipboard?.writeText(text).catch(() => {});
+    } else if (target.dataset?.mxToggle !== undefined) {
+      const expanded = wrap.classList.toggle("expanded");
+      target.textContent = expanded ? "▴" : "▾";
+    }
+  };
+
   return (
     <div
       ref={ref}
+      onClick={handleBlockClick}
       className={
         inline
           ? "mx-md-preview mx-scroll-pretty break-words leading-relaxed text-[var(--mx-text)]"

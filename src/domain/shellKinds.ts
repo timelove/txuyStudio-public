@@ -60,9 +60,13 @@ export const NEW_SHELL_GROUPS: { title: string; kinds: ShellKind[] }[] = [
   // AI CLI:Claude 走自渲染 ClaudePane(claudepane);codex 走自渲染 CodexPane(codexpane)。
   // 旧 xterm TUI 版 claude/codex 退居兼容存量 tab、移出菜单(自渲染 pane 是唯一新建入口)。
   { title: "AI CLI", kinds: ["claudepane", "codexpane"] },
-  { title: "shellgroup.tui", kinds: ["lazygit", "yazi", "fresh"] },
+  // 会话列表:AI 历史会话浏览/恢复,与 AI 主体配套保留(工作台对 AI 工作流定位的一环)。
   { title: "shellgroup.session", kinds: ["sessionbrowser"] },
-  { title: "shellgroup.browse", kinds: ["filetree", "htmlpreview", "notes"] },
+  // 2026-09-22 工具收敛:lazygit/yazi/fresh/filetree/htmlpreview/notes 从新建入口移除
+  // (长期使用基本用不到)。组件与渲染逻辑保留——存量 pane 树中这类 tab 仍正常渲染/可关,
+  // 仅不再能从 + / ▥ 菜单新建。恢复入口:把这组加回下方即可。
+  // { title: "shellgroup.tui", kinds: ["lazygit", "yazi", "fresh"] },
+  // { title: "shellgroup.browse", kinds: ["filetree", "htmlpreview", "notes"] },
 ];
 
 /** 新建菜单暴露的全部 shell 类型(NEW_SHELL_GROUPS 的扁平投影)。 */

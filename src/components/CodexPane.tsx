@@ -113,6 +113,8 @@ type CodexPaneProps = {
   onResumeSession?: (sessionId: string) => void;
   onCloseTab?: (paneId: string, tabId: string) => void;
   onSetActiveTab?: (paneId: string, tabId: string) => void;
+  /** ◱ 展开/还原所在分屏比例(主体 pane 占大头,方便操控)。无分屏(单 pane)时 AppShell no-op。 */
+  onToggleExpand?: () => void;
   className?: string;
 };
 
@@ -268,6 +270,7 @@ export function CodexPane(props: CodexPaneProps) {
     onResumeSession,
     onCloseTab,
     onSetActiveTab,
+    onToggleExpand,
     className,
   } = props;
   const { t, i18n } = useTranslation();
@@ -836,6 +839,17 @@ export function CodexPane(props: CodexPaneProps) {
     void transport.send(text);
   }, [activeTabId, input, busy, shellRunning, sessions, paneId, onCloseTab]);
 
+  // C6 重新发送:user 消息 hover ↻ 重跑同一轮。busy 时先中断(同 handleSend 语义),不记输入历史。
+  const resendText = useCallback(
+    (text: string) => {
+      if (!text.trim()) return;
+      if (busy) void getCodexTransportRef.current(activeTabId).interrupt();
+      scrollToBottom();
+      void getCodexTransportRef.current(activeTabId).send(text);
+    },
+    [activeTabId, busy, scrollToBottom],
+  );
+
   const handleInterrupt = useCallback(() => {
     const transport = getCodexTransportRef.current(activeTabId);
     void transport.interrupt();
@@ -1056,6 +1070,23 @@ export function CodexPane(props: CodexPaneProps) {
           </TabsList>
         </Tabs>
         <div className="flex shrink-0 items-center gap-1 text-[var(--mx-muted)]">
+          {/* ◱ 展开/还原所在分屏比例(主体 pane 占大头;单 pane 项目 AppShell no-op)。 */}
+          {onToggleExpand && (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  className="text-[13px] text-[var(--mx-muted)] hover:bg-[var(--mx-border)] hover:text-[var(--mx-text)]"
+                  onMouseDown={(e) => e.stopPropagation()}
+                  onClick={() => onToggleExpand()}
+                >
+                  ◱
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>{t("shell.pane.expand")}</TooltipContent>
+            </Tooltip>
+          )}
           {/* 重置当前会话:清屏 + resume 当前 thread id(下次 send 续接同 thread)。 */}
           <Tooltip>
             <TooltipTrigger asChild>
@@ -1188,6 +1219,17 @@ export function CodexPane(props: CodexPaneProps) {
         <div ref={scrollRef} onScroll={handleScroll} className="mx-scroll-pretty relative min-h-0 overflow-y-auto px-4 py-4" style={{ fontSize }}>
           {state && (state.messages.length > 0 || (shellState?.messages.length ?? 0) > 0) ? (
             <div ref={contentRef} className="mx-auto w-full max-w-[54.25rem] space-y-1">
+              {/* C5 会话头:会话开端信息(品牌块 + 模型 + session 尾部 + 窗口),让会话有"开端感"。 */}
+              {state?.meta && (state.meta.model || state.meta.sessionId) && mergedMessages.length > 0 && (
+                <div className="flex items-center gap-2 px-1.5 py-1 text-[10px] text-[var(--mx-faint)]">
+                  <span aria-hidden className="grid h-4 w-4 shrink-0 place-items-center rounded bg-[var(--mx-accent)] text-[8px] font-extrabold text-[#06222b]">X</span>
+                  <span className="shrink-0 text-[var(--mx-muted)]">Codex</span>
+                  {state.meta.model && <span className="shrink-0 font-mono">{state.meta.model}</span>}
+                  {state.meta.sessionId && <span className="shrink-0 font-mono">#{state.meta.sessionId.slice(-8)}</span>}
+                  {state.meta.contextWindow ? <span className="shrink-0 font-mono">{Math.round(state.meta.contextWindow / 1000)}k ctx</span> : null}
+                  <div className="h-px min-w-0 flex-1" style={{ borderTop: "1px solid rgba(148,163,184,0.14)" }} />
+                </div>
+              )}
               {mergedMessages.map((item) =>
                 item.kind === "shell" ? (
                   <div key={`shell-${item.msg.id}`} className="mx-chat-row">
@@ -1195,7 +1237,7 @@ export function CodexPane(props: CodexPaneProps) {
                   </div>
                 ) : (
                   <div key={item.msg.id} className="mx-chat-row">
-                    <MessageRow message={item.msg} t={t} />
+                    <MessageRow message={item.msg} t={t} onResend={resendText} />
                   </div>
                 ),
               )}
@@ -1736,9 +1778,12 @@ function DialogLike({ open, onClose, title, children }: { open: boolean; onClose
 const MessageRow = memo(function MessageRow({
   message,
   t,
+  onResend,
 }: {
   message: CodexMessage;
   t: (k: string, opts?: Record<string, unknown>) => string;
+  /** user 消息 hover「重新发送」(C6):重跑同一轮。 */
+  onResend?: (text: string) => void;
 }) {
   const time = formatTime(message.timestamp);
 
@@ -1749,10 +1794,16 @@ const MessageRow = memo(function MessageRow({
       .join("\n");
     if (text.trim().length === 0) return null;
     return (
-      <div className="flex gap-2">
-        {/* 行首圆点:与 assistant violet 圆点同构,改青色(mx-accent,即 codex 品牌色)区分 user/assistant。 */}
+      // A2 消息卡片化:角色行 hover 显浅底卡(平时透明),形成对话节奏。
+      <div className="group/message flex gap-2 rounded-md px-1.5 py-1 -mx-1.5 transition-colors hover:bg-[var(--mx-hover-bg)]">
+        {/* A1 角色徽标:user 用人形图标(青底),替代原青点。 */}
         <span aria-hidden className="flex h-[1.625em] shrink-0 items-center">
-          <span className="h-2 w-2 rounded-full bg-[var(--mx-accent)]" />
+          <span className="grid h-[18px] w-[18px] place-items-center rounded-md bg-[var(--mx-accent-soft)] text-[var(--mx-accent)]">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+              <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+              <circle cx="12" cy="7" r="4" />
+            </svg>
+          </span>
         </span>
         <div className="group min-w-0 flex-1">
           <div dir="auto" className="whitespace-pre-wrap break-words leading-relaxed text-[var(--mx-text)]">
@@ -1760,6 +1811,16 @@ const MessageRow = memo(function MessageRow({
           </div>
           <div className="mt-0.5 flex items-center gap-1.5 text-[10px] tabular-nums text-[var(--mx-faint)]">
             {time && <span>{time}</span>}
+            {onResend && (
+              <button
+                type="button"
+                title={t("codexpane.resend")}
+                onClick={() => onResend(text)}
+                className="cursor-pointer opacity-0 transition-opacity hover:text-[var(--mx-text)] group-hover:opacity-100"
+              >
+                ↻
+              </button>
+            )}
             <CopyButton text={text} t={t} className="ml-auto opacity-0 group-hover:opacity-100" />
           </div>
         </div>
@@ -1767,15 +1828,17 @@ const MessageRow = memo(function MessageRow({
     );
   }
 
-  // assistant:行首 violet 圆点 + 正文块流 + 末行时间/tokens。
+  // assistant:行首品牌徽标(青 X)+ 正文块流 + 末行时间/tokens。
   const fullText = message.blocks
     .filter((b): b is Extract<CodexBlock, { type: "text" }> => b.type === "text")
     .map((b) => b.text)
     .join("\n");
   return (
-    <div className="flex gap-2">
+    // A2 消息卡片化:assistant 行同样 hover 显浅底卡。
+    <div className="group/message flex gap-2 rounded-md px-1.5 py-1 -mx-1.5 transition-colors hover:bg-[var(--mx-hover-bg)]">
+      {/* A1 角色徽标:assistant 用品牌块(青 X,codex 品牌色),替代原 violet 圆点。 */}
       <span aria-hidden className="flex h-[1.625em] shrink-0 items-center">
-        <span className="h-2 w-2 rounded-full bg-[var(--mx-violet)]" />
+        <span className="grid h-[18px] w-[18px] place-items-center rounded-md bg-[var(--mx-accent)] text-[10px] font-extrabold text-[#06222b]">X</span>
       </span>
       <div className="group min-w-0 flex-1">
         <div className="flex flex-col gap-2">
@@ -1848,7 +1911,8 @@ function BlockView({
       }
     }
     return (
-      <div dir="auto" className="leading-relaxed text-[var(--mx-text)]">
+      // D7 流式切换平滑:轮末由纯文本切 markdown 时新元素挂载带 0.18s 淡入。
+      <div dir="auto" className="mx-fade-in leading-relaxed text-[var(--mx-text)]">
         <Suspense fallback={null}>
           <MdPreviewLazy content={block.text} inline />
         </Suspense>

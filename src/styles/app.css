@@ -510,6 +510,57 @@ button {
   padding: 0;
   font-size: 0.88em;
 }
+/* 代码块增强(会话流 B3):语言 label + 复制 ⧉ + 长代码折叠 ▾/▴。pre 收进 .mx-codeblock 容器,
+   头部贴顶、正文圆角下收;长块默认限高内部滚动,点 ▾ 展开。样式同 .mx-md-preview 前缀限定。 */
+.mx-md-preview .mx-codeblock {
+  margin: 0.8em 0;
+  border: 1px solid var(--mx-border);
+  border-radius: var(--mx-radius-md);
+  overflow: hidden;
+  background: rgba(2, 6, 23, 0.6);
+}
+.mx-md-preview .mx-codeblock-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  border-bottom: 1px solid var(--mx-border);
+  background: rgba(148, 163, 184, 0.06);
+}
+.mx-md-preview .mx-codeblock-lang {
+  font-family: var(--mx-mono, Consolas, monospace);
+  font-size: 0.78em;
+  color: var(--mx-muted);
+  text-transform: lowercase;
+}
+.mx-md-preview .mx-codeblock-copy,
+.mx-md-preview .mx-codeblock-toggle {
+  border: none;
+  background: transparent;
+  color: var(--mx-muted);
+  font-size: 0.82em;
+  line-height: 1.4;
+  cursor: pointer;
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+.mx-md-preview .mx-codeblock-copy { margin-left: auto; }
+.mx-md-preview .mx-codeblock-copy:hover,
+.mx-md-preview .mx-codeblock-toggle:hover {
+  color: var(--mx-text);
+  background: var(--mx-hover-bg);
+}
+.mx-md-preview .mx-codeblock pre {
+  margin: 0;
+  border: none;
+  border-radius: 0;
+  background: none;
+}
+.mx-md-preview .mx-codeblock.long pre { max-height: 320px; overflow: auto; }
+.mx-md-preview .mx-codeblock.long.expanded pre { max-height: none; }
+/* 消息流内容淡入(会话流 D7):流式纯文本 → 轮末 markdown 化切换不突兀。 */
+@keyframes mx-fade-in { from { opacity: 0; } to { opacity: 1; } }
+.mx-fade-in { animation: mx-fade-in 0.18s ease-out; }
 .mx-md-preview blockquote {
   border-left: 3px solid var(--mx-accent);
   margin: 0.8em 0;
