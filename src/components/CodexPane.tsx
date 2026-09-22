@@ -1794,22 +1794,13 @@ const MessageRow = memo(function MessageRow({
       .join("\n");
     if (text.trim().length === 0) return null;
     return (
-      // A2 消息卡片化:角色行 hover 显浅底卡(平时透明),形成对话节奏。
-      <div className="group/message flex gap-2 rounded-md px-1.5 py-1 -mx-1.5 transition-colors hover:bg-[var(--mx-hover-bg)]">
-        {/* A1 角色徽标:user 用人形图标(青底),替代原青点。 */}
-        <span aria-hidden className="flex h-[1.625em] shrink-0 items-center">
-          <span className="grid h-[18px] w-[18px] place-items-center rounded-md bg-[var(--mx-accent-soft)] text-[var(--mx-accent)]">
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-              <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
-              <circle cx="12" cy="7" r="4" />
-            </svg>
-          </span>
-        </span>
-        <div className="group min-w-0 flex-1">
-          <div dir="auto" className="whitespace-pre-wrap break-words leading-relaxed text-[var(--mx-text)]">
+      // 左右对话框:user 消息靠右,青底气泡 + 右侧人形徽标。
+      <div className="group/message flex items-start justify-end gap-1.5">
+        <div className="min-w-0 max-w-[85%]">
+          <div dir="auto" className="whitespace-pre-wrap break-words rounded-lg rounded-br-[4px] bg-[var(--mx-accent-soft)] px-3 py-1.5 leading-relaxed text-[var(--mx-text)]">
             {text}
           </div>
-          <div className="mt-0.5 flex items-center gap-1.5 text-[10px] tabular-nums text-[var(--mx-faint)]">
+          <div className="mt-0.5 flex items-center justify-end gap-1.5 text-[10px] tabular-nums text-[var(--mx-faint)]">
             {time && <span>{time}</span>}
             {onResend && (
               <button
@@ -1821,9 +1812,18 @@ const MessageRow = memo(function MessageRow({
                 ↻
               </button>
             )}
-            <CopyButton text={text} t={t} className="ml-auto opacity-0 group-hover:opacity-100" />
+            <CopyButton text={text} t={t} className="ml-0 opacity-0 group-hover:opacity-100" />
           </div>
         </div>
+        {/* A1 角色徽标:user 人形图标(青底),置于气泡右侧。 */}
+        <span aria-hidden className="flex h-[1.625em] shrink-0 items-center">
+          <span className="grid h-[18px] w-[18px] place-items-center rounded-md bg-[var(--mx-accent-soft)] text-[var(--mx-accent)]">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+              <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+              <circle cx="12" cy="7" r="4" />
+            </svg>
+          </span>
+        </span>
       </div>
     );
   }
@@ -1834,14 +1834,14 @@ const MessageRow = memo(function MessageRow({
     .map((b) => b.text)
     .join("\n");
   return (
-    // A2 消息卡片化:assistant 行同样 hover 显浅底卡。
-    <div className="group/message flex gap-2 rounded-md px-1.5 py-1 -mx-1.5 transition-colors hover:bg-[var(--mx-hover-bg)]">
-      {/* A1 角色徽标:assistant 用品牌块(青 X,codex 品牌色),替代原 violet 圆点。 */}
+    // 左右对话框:assistant 消息靠左,深底气泡 + 左侧品牌徽标。不设 max-w 限宽(工具卡/代码块需要宽)。
+    <div className="group/message flex items-start gap-1.5">
+      {/* A1 角色徽标:assistant 品牌块(青 X),置于气泡左侧。 */}
       <span aria-hidden className="flex h-[1.625em] shrink-0 items-center">
         <span className="grid h-[18px] w-[18px] place-items-center rounded-md bg-[var(--mx-accent)] text-[10px] font-extrabold text-[#06222b]">X</span>
       </span>
       <div className="group min-w-0 flex-1">
-        <div className="flex flex-col gap-2">
+        <div className="flex flex-col gap-2 rounded-lg rounded-bl-[4px] bg-[var(--mx-card-bg)] px-3 py-1.5">
           {message.blocks.map((b, i) => (
             <BlockView key={i} block={b} t={t} />
           ))}

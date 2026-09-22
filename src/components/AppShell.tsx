@@ -1222,8 +1222,9 @@ export function AppShell({
           )}
         </div> */}
         {/* 中央区留白:紧凑贴边——上下零留白(终端区直贴顶栏/状态栏,原 py-2 的 8px 空带
-            会稀释栏高、造成内容不居中的错觉),仅右侧 6px 与窗口边隔开。 */}
-        <div className="min-h-0 min-w-0 pr-[6px]">
+            会稀释栏高、造成内容不居中的错觉),左右各 6px 与窗口边隔开(左栏禁用后左缘贴边,
+            2026-09-22 补 pl 与右侧对称)。 */}
+        <div className="min-h-0 min-w-0 px-[6px]">
           {hasProject ? (
             // 并排区两层嵌套 grid(布局偏好 = 流向 + 行分组):
             // 外层 = 组(row 流时组沿纵向均分行,column 沿横向均分列),
