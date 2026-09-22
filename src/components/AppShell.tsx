@@ -1104,6 +1104,47 @@ export function AppShell({
   // 全部 codex tab 的对外状态汇总(与 claude 并列,StatusBar 分别显示)。
   const codexStatuses = useCodexStatuses();
 
+  // 顶栏 AI 状态点:跨「可见项目」聚合,取优先级最高的活跃态(running>retrying>waiting>bg>error)。
+  // 克制显示——仅当有 AI 正在工作/需注意时出现一个小圆点胶囊(紫=Claude/青=Codex),空闲不占位;
+  // 这是被否决的「pane 内状态条」的替代:AI 活动状态全局一处可见,不侵入 pane。
+  const aiStatus = useMemo(() => {
+    const visible = new Set(visibleProjectIds);
+    const prioOf = (kind: string) =>
+      kind === "running" ? 5 :
+      kind === "retrying" ? 4 :
+      kind === "waiting" ? 3 :
+      kind === "bg" ? 2 :
+      kind === "error" ? 1 : 0;
+    const labelOf = (provider: "claude" | "codex", kind: string, bgTasks?: number) =>
+      provider === "claude"
+        ? kind === "running" ? "Claude 工作中…"
+          : kind === "retrying" ? "Claude 重试中…"
+          : kind === "waiting" ? "Claude 待确认"
+          : kind === "bg" ? `Claude 后台任务 ×${bgTasks ?? ""}`
+          : "Claude 出错"
+        : kind === "running" ? "Codex 执行中…" : "Codex 出错";
+    // 先收集候选再逐条比较(不用嵌套闭包改外层变量,避免 TS CFA 窄化成 never)。
+    const candidates: Array<{ prio: number; provider: "claude" | "codex"; label: string }> = [];
+    for (const e of claudeStatuses) {
+      if (visible.has(e.projectId) && e.summary.active) {
+        candidates.push({ prio: prioOf(e.summary.kind), provider: "claude", label: labelOf("claude", e.summary.kind, e.summary.bgTasks) });
+      }
+    }
+    for (const e of codexStatuses) {
+      if (visible.has(e.projectId) && e.summary.active) {
+        candidates.push({ prio: prioOf(e.summary.kind), provider: "codex", label: labelOf("codex", e.summary.kind) });
+      }
+    }
+    let bestPrio = 0;
+    let best: { provider: "claude" | "codex"; label: string } | null = null;
+    for (const c of candidates) {
+      if (c.prio <= bestPrio) continue;
+      bestPrio = c.prio;
+      best = { provider: c.provider, label: c.label };
+    }
+    return best;
+  }, [claudeStatuses, codexStatuses, visibleProjectIds]);
+
   // StatusBar 点击某个 AI 状态药丸 -> 跳到该状态第一个 claude tab:切项目 + 聚焦 pane + 切活动 tab。
   const handleFocusClaudeTab = useCallback(
     (projectId: string, tabId: string) => {
@@ -1158,6 +1199,7 @@ export function AppShell({
         visibleProjectCount={visibleProjects.length}
         pinnedLayout={pinnedLayout}
         onPinnedLayoutChange={changePinnedLayout}
+        aiStatus={aiStatus}
       />
       {/* 左栏 shell 列表(ShellSidebar):长期使用基本用不到,2026-09-22 注释禁用——
           中央区整宽铺开直连顶栏/状态栏。恢复:外层 grid 改回
