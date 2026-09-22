@@ -40,8 +40,6 @@ type TopProjectBarProps = {
   pinnedLayout?: PinnedLayout;
   /** 修改并排布局偏好(部分字段 patch),透传。 */
   onPinnedLayoutChange?: (patch: Partial<PinnedLayout>) => void;
-  /** 跨项目 AI 活跃状态(顶栏全局一处可见,克制显示):null=无 AI 正在工作,不渲染。 */
-  aiStatus?: { provider: "claude" | "codex"; label: string } | null;
 };
 
 /**
@@ -73,7 +71,6 @@ export function TopProjectBar({
   visibleProjectCount,
   pinnedLayout,
   onPinnedLayoutChange,
-  aiStatus,
 }: TopProjectBarProps) {
   const { t } = useTranslation();
   const activeProject = projects.find((p) => p.id === activeProjectId) ?? null;
@@ -193,22 +190,6 @@ export function TopProjectBar({
         )}
       </div>
 
-      {/* 跨项目 AI 状态点:仅当有 AI 正在工作/需注意时显示(空闲不占位)。
-          紫=Claude 青=Codex 小圆点 + 状态文字,全局一处可见(替代 pane 内状态条,克制不侵入)。 */}
-      {aiStatus && (
-        <div
-          data-tauri-drag-region
-          className="mr-1.5 flex shrink-0 items-center gap-1.5 rounded-full border border-[var(--mx-border)] px-2.5 py-[3px] text-[11px] text-[var(--mx-muted)]"
-          title={aiStatus.label}
-        >
-          <span
-            aria-hidden
-            className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full"
-            style={{ background: aiStatus.provider === "claude" ? "#7c3aed" : "#22d3ee" }}
-          />
-          <span className="truncate">{aiStatus.label}</span>
-        </div>
-      )}
       {/* 窗口控制:交互按钮区,stopPropagation 避免被拖拽吞掉点击。 */}
       <div className="flex items-center" onMouseDown={(e) => e.stopPropagation()}>
         <div className="-mr-3 ml-1 flex h-[length:var(--mx-titlebar-h)] items-stretch">

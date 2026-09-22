@@ -2638,23 +2638,14 @@ const MessageRow = memo(function MessageRow({
       .join("\n");
     if (text.trim().length === 0) return null;
     return (
-      // A2 消息卡片化:角色行 hover 显浅底卡(平时透明,不喧宾夺主),形成对话节奏。
-      <div className="group/message flex gap-2 rounded-md px-1.5 py-1 -mx-1.5 transition-colors hover:bg-[var(--mx-hover-bg)]">
-        {/* A1 角色徽标:user 用人形图标(青底),替代原青点——角色一眼可辨。 */}
-        <span aria-hidden className="flex h-[1.625em] shrink-0 items-center">
-          <span className="grid h-[18px] w-[18px] place-items-center rounded-md bg-[var(--mx-accent-soft)] text-[var(--mx-accent)]">
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-              <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
-              <circle cx="12" cy="7" r="4" />
-            </svg>
-          </span>
-        </span>
-        <div className="group min-w-0 flex-1">
-          <div dir="auto" className="whitespace-pre-wrap break-words leading-relaxed text-[var(--mx-text)]">
+      // 左右对话框:user 消息靠右,青底气泡 + 右侧人形徽标。max-w 限宽,气泡右下角收小圆角。
+      <div className="group/message flex items-start justify-end gap-1.5">
+        <div className="min-w-0 max-w-[85%]">
+          <div dir="auto" className="whitespace-pre-wrap break-words rounded-lg rounded-br-[4px] bg-[var(--mx-accent-soft)] px-3 py-1.5 leading-relaxed text-[var(--mx-text)]">
             {text}
           </div>
-          {/* 末行:时间 + 重新发送 + 复制按钮(user 不显示消耗时长/tokens)。 */}
-          <div className="mt-0.5 flex items-center gap-1.5 text-[10px] tabular-nums text-[var(--mx-faint)]">
+          {/* 末行:时间 + 重新发送 + 复制按钮(user 不显示消耗时长/tokens),右对齐。 */}
+          <div className="mt-0.5 flex items-center justify-end gap-1.5 text-[10px] tabular-nums text-[var(--mx-faint)]">
             {time && <span>{time}</span>}
             {onResend && (
               <button
@@ -2666,9 +2657,18 @@ const MessageRow = memo(function MessageRow({
                 ↻
               </button>
             )}
-            <CopyButton text={text} t={t} className="ml-auto opacity-0 group-hover:opacity-100" />
+            <CopyButton text={text} t={t} className="ml-0 opacity-0 group-hover:opacity-100" />
           </div>
         </div>
+        {/* A1 角色徽标:user 人形图标(青底),置于气泡右侧。 */}
+        <span aria-hidden className="flex h-[1.625em] shrink-0 items-center">
+          <span className="grid h-[18px] w-[18px] place-items-center rounded-md bg-[var(--mx-accent-soft)] text-[var(--mx-accent)]">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+              <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+              <circle cx="12" cy="7" r="4" />
+            </svg>
+          </span>
+        </span>
       </div>
     );
   }
@@ -2679,14 +2679,15 @@ const MessageRow = memo(function MessageRow({
     .map((b) => b.text)
     .join("\n");
   return (
-    // A2 消息卡片化:assistant 行同样 hover 显浅底卡(与 user 同节奏)。
-    <div className="group/message flex gap-2 rounded-md px-1.5 py-1 -mx-1.5 transition-colors hover:bg-[var(--mx-hover-bg)]">
-      {/* A1 角色徽标:assistant 用品牌块(紫 C,claude 品牌色)——替代原 violet 圆点。 */}
+    // 左右对话框:assistant 消息靠左,深底气泡(工具卡/思考块保持自体内边框区分)+ 左侧品牌徽标。
+    // 不设 max-w 限宽(工具卡/代码块需要宽),气泡整体呈对话框。
+    <div className="group/message flex items-start gap-1.5">
+      {/* A1 角色徽标:assistant 品牌块(紫 C),置于气泡左侧。 */}
       <span aria-hidden className="flex h-[1.625em] shrink-0 items-center">
         <span className="grid h-[18px] w-[18px] place-items-center rounded-md bg-[var(--mx-violet)] text-[10px] font-extrabold text-white">C</span>
       </span>
       <div className="group min-w-0 flex-1">
-        <div className="flex flex-col gap-2">
+        <div className="flex flex-col gap-2 rounded-lg rounded-bl-[4px] bg-[var(--mx-card-bg)] px-3 py-1.5">
           {message.blocks.map((b, i) => (
             <BlockView
               key={i}
@@ -2743,29 +2744,17 @@ const MessageRow = memo(function MessageRow({
  * 实时跟随最新思考,上文收进滚动区,用户上翻回看即暂停贴底,滚回底部附近才恢复。
  */
 function ThinkingBlock({ text, streaming, t }: { text: string; streaming: boolean; t: (k: string) => string }) {
-  // 内部 open 状态:仅在「用户尚未手动操作」时跟随 streaming(思考中开、结束关)。
-  const [userToggled, setUserToggled] = useState(false);
-  const [open, setOpen] = useState(streaming);
+  // 2026-09-22:思考内容**默认收起**(不再跟随流式自动展开)——保持对话紧凑、不霸屏,
+  // 用户点开 summary 才展开看推理。open 完全由用户手动控制。
+  const [open, setOpen] = useState(false);
   const bodyRef = useRef<HTMLDivElement>(null);
-  // 贴底标记:仅当滚动位置在底部附近(距底 <24px)时为 true,用户上翻后暂停自动贴底。
-  const stickToBottom = useRef(true);
-  useEffect(() => {
-    if (!userToggled) setOpen(streaming);
-  }, [streaming, userToggled]);
-  // streaming 且展开时 text 增长 → 贴底(依赖含 open:details 展开后内容 div 才挂载)。
+  // 用户展开且流式中 text 增长 → 贴底(仅手动展开时才有意义)。
   useEffect(() => {
     const el = bodyRef.current;
-    if (streaming && el && stickToBottom.current) el.scrollTop = el.scrollHeight;
+    if (streaming && open && el) el.scrollTop = el.scrollHeight;
   }, [text, streaming, open]);
   return (
-    <details
-      className="group"
-      open={open}
-      onToggle={(e) => {
-        setUserToggled(true);
-        setOpen((e.currentTarget as HTMLDetailsElement).open);
-      }}
-    >
+    <details className="group" open={open} onToggle={(e) => setOpen((e.currentTarget as HTMLDetailsElement).open)}>
       <summary className="flex cursor-pointer list-none items-center gap-1.5 py-0.5 text-xs text-[var(--mx-muted)] transition-colors hover:text-[var(--mx-text)]">
         <svg
           className="h-3 w-3 flex-shrink-0 transition-transform duration-150 group-open:rotate-90"
@@ -2782,10 +2771,6 @@ function ThinkingBlock({ text, streaming, t }: { text: string; streaming: boolea
       <div className="mt-1.5 pl-[18px]">
         <div
           ref={bodyRef}
-          onScroll={() => {
-            const el = bodyRef.current;
-            if (el) stickToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
-          }}
           className="mx-scroll-pretty max-h-[min(40vh,320px)] overflow-y-auto whitespace-pre-wrap break-words text-xs italic leading-relaxed text-[var(--mx-muted)]"
         >
           {text || "…"}
