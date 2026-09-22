@@ -120,11 +120,11 @@ export function ShellSidebar({
                         className={[
                           "h-[length:var(--mx-sidebar-icon)] w-[length:var(--mx-sidebar-icon)] text-[length:var(--mx-ui-fs)] font-bold",
                           isFocused
-                            ? "bg-[var(--mx-selected-bg)] text-white hover:bg-[var(--mx-selected-bg)]"
+                            ? "bg-[var(--mx-selected-bg)] text-[var(--mx-text-bright)] hover:bg-[var(--mx-selected-bg)]"
                             : "bg-[var(--mx-surface-soft)] text-[var(--mx-text)] hover:bg-[var(--mx-border-soft)]",
                         ].join(" ")}
                       >
-                        <span className="grid place-items-center" style={{ color: isFocused ? "#fff" : meta.accent }}>
+                        <span className="grid place-items-center" style={{ color: isFocused ? "var(--mx-text-bright)" : meta.accent }}>
                           {meta.glyph}
                         </span>
                         {/* 左侧色条:区分 shellKind,聚焦时点亮。 */}

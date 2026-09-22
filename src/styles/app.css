@@ -117,6 +117,17 @@
   --mx-orange-soft: rgba(249, 115, 22, 0.08);
   --mx-orange-border: rgba(249, 115, 22, 0.28);
   --mx-accent-deep-soft: rgba(124, 58, 237, 0.12);
+  /* 跨主题可读性 token(浅色主题引入时收口):值 = 原硬编码,深色主题观感零变化。
+   * info/soft = 状态药丸「运行中」蓝;link = md 链接;code-bg = 代码块底;
+   * accent-contrast = Codex 品牌块(accent 底)上的前景字色。 */
+  --mx-info: #93c5fd;
+  --mx-info-soft: rgba(59, 130, 246, 0.16);
+  --mx-link: #22d3ee;
+  --mx-code-bg: rgba(2, 6, 23, 0.6);
+  --mx-accent-contrast: #06222b;
+  /* 模态遮罩(Dialog overlay):恒为半透明深色压暗,与 surface-2(实际底色)分离——
+   * 浅色主题 surface-2 是实色浅灰(代码块/输出底),若复用会把弹窗后整屏盖成不透明白板。 */
+  --mx-overlay: rgba(2, 6, 23, 0.5);
 }
 
 /* ============================================================
@@ -169,6 +180,74 @@
   --mx-orange-soft: rgba(209, 154, 102, 0.08);
   --mx-orange-border: rgba(209, 154, 102, 0.28);
   --mx-accent-deep-soft: rgba(198, 120, 221, 0.12);
+  --mx-info: #93c5fd;
+  --mx-info-soft: rgba(59, 130, 246, 0.16);
+  --mx-link: #22d3ee;
+  --mx-code-bg: rgba(2, 6, 23, 0.6);
+  --mx-accent-contrast: #06222b;
+  --mx-overlay: rgba(44, 49, 58, 0.5);
+}
+
+/* ============================================================
+ * IntelliJ Light 主题(JetBrains IDEA Light 新 UI 观感):白底编辑区 +
+ * 灰白 chrome(#F7F8FA 窗底/面板)+ IntelliJ 蓝 #3574F0 强调 + 灰阶分隔线。
+ * 亮色语义色取白底可读深档(info/绿/红/黄均加深);品牌紫(块面/Claude)保持。
+ * ============================================================ */
+[data-theme="intellij-light"] {
+  color: #1f1f1f;
+  background: #f7f8fa;
+  color-scheme: light;
+  --mx-bg: #f7f8fa;
+  --mx-border: #dfe1e5;
+  --mx-border-strong: #b9bdc4;
+  --mx-surface: #ffffff;
+  --mx-text: #1f1f1f;
+  --mx-muted: #5c5f66;
+  --mx-faint: #878b93;
+  --mx-accent: #3574f0;
+  --mx-accent-deep: #7c3aed;
+  --mx-brand-gradient: linear-gradient(135deg, #7c3aed, #3574f0);
+  --mx-selected-bg: rgba(53, 116, 240, 0.12);
+  --mx-selected-border: rgba(53, 116, 240, 0.45);
+  --mx-hover-bg: rgba(0, 0, 0, 0.045);
+  --mx-guarded: #0891b2;
+  --mx-permissive: #c48900;
+  --mx-editor-bg: #ffffff;
+  --mx-card-bg: #f7f8fa;
+  --mx-text-bright: #000000;
+  --mx-text-dim: #8c919b;
+  --mx-accent-bright: #2456c8;
+  --mx-accent-soft: rgba(53, 116, 240, 0.1);
+  --mx-user-bubble: rgba(0, 0, 0, 0.055);
+  --mx-user-bubble-badge: rgba(0, 0, 0, 0.09);
+  --mx-violet: #7c3aed;
+  --mx-danger: #e5545f;
+  --mx-danger-bright: #cf3b46;
+  --mx-danger-bg: rgba(229, 84, 95, 0.1);
+  --mx-danger-border: rgba(229, 84, 95, 0.42);
+  --mx-success: #369650;
+  --mx-success-bright: #2f7d43;
+  --mx-success-soft: rgba(54, 150, 80, 0.12);
+  --mx-warning: #c48900;
+  --mx-warning-bright: #8f6800;
+  --mx-warning-soft: rgba(196, 137, 0, 0.12);
+  --mx-surface-2: #f2f3f5;
+  --mx-surface-soft: #fafafb;
+  --mx-border-soft: rgba(0, 0, 0, 0.06);
+  --mx-tabbar-bg: #f2f3f5;
+  --mx-violet-soft: rgba(124, 58, 237, 0.07);
+  --mx-violet-border: rgba(124, 58, 237, 0.3);
+  --mx-indigo-soft: rgba(62, 118, 216, 0.08);
+  --mx-indigo-border: rgba(62, 118, 216, 0.28);
+  --mx-orange-soft: rgba(221, 120, 42, 0.09);
+  --mx-orange-border: rgba(221, 120, 42, 0.3);
+  --mx-accent-deep-soft: rgba(124, 58, 237, 0.08);
+  --mx-info: #2e5fd8;
+  --mx-info-soft: rgba(53, 116, 240, 0.1);
+  --mx-link: #2470b3;
+  --mx-code-bg: #f7f8fa;
+  --mx-accent-contrast: #ffffff;
+  --mx-overlay: rgba(15, 23, 42, 0.32);
 }
 
 * {
@@ -357,7 +436,7 @@ button {
 }
 
 .kind-filter-row[data-on="true"] .kind-filter-name {
-  color: #cbd5e1;
+  color: var(--mx-text);
 }
 
 .kind-filter-row[data-on="true"] {
@@ -492,7 +571,7 @@ button {
 /* 首块元素去 margin-top:行内嵌入对话流(ClaudePane)时,首 p/h 的 margin-top 会把第一行下推,
    导致与行首圆点图标错位(图标固定对齐容器顶)。探针预览(block 态)有 py-3 padding 不受影响。 */
 .mx-md-preview > :first-child { margin-top: 0; }
-.mx-md-preview a { color: #22d3ee; text-decoration: none; }
+.mx-md-preview a { color: var(--mx-link); text-decoration: none; }
 .mx-md-preview a:hover { text-decoration: underline; }
 .mx-md-preview code {
   font-family: var(--mx-mono, Consolas, monospace);
@@ -502,7 +581,7 @@ button {
   border-radius: var(--mx-radius-sm);
 }
 .mx-md-preview pre {
-  background: rgba(2, 6, 23, 0.6);
+  background: var(--mx-code-bg);
   border: 1px solid var(--mx-border);
   border-radius: var(--mx-radius-md);
   padding: 0.75em 1em;
@@ -521,7 +600,7 @@ button {
   border: 1px solid var(--mx-border);
   border-radius: var(--mx-radius-md);
   overflow: hidden;
-  background: rgba(2, 6, 23, 0.6);
+  background: var(--mx-code-bg);
 }
 .mx-md-preview .mx-codeblock-head {
   display: flex;

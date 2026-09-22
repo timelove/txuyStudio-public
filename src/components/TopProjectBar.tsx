@@ -160,7 +160,7 @@ export function TopProjectBar({
              target 落在它身上,向上到带 attr 的父级已不满足 path[0] → 独立窗口拖不动。
              主窗口无此层(ProjectTabs 容器自带 attr),行为对齐。 */
           <div data-tauri-drag-region className="flex min-w-0 items-center gap-2">
-            <span className="mx-chip flex h-[length:var(--mx-tab-h)] min-w-0 items-center gap-[6px] bg-[var(--mx-selected-bg)] px-[10px] text-xs text-white">
+            <span className="mx-chip flex h-[length:var(--mx-tab-h)] min-w-0 items-center gap-[6px] bg-[var(--mx-selected-bg)] px-[10px] text-xs text-[var(--mx-text-bright)]">
               {/* 项目稳定色 dot(与主窗口顶栏 chip/下拉同色源,跨窗口同项目同色)。 */}
               <span
                 aria-hidden

@@ -142,6 +142,7 @@ const en = {
   theme: {
     midnight: "Midnight",
     "one-dark": "One Dark",
+    intellijLight: "IntelliJ Light",
   },
   settings: {
     title: "Settings",

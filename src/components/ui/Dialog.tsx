@@ -18,7 +18,8 @@ const DialogTrigger = DialogPrimitive.Trigger;
 const DialogPortal = DialogPrimitive.Portal;
 const DialogClose = DialogPrimitive.Close;
 
-/** 遮罩层:全屏半透明深底,淡入淡出。点它关闭(Radix 内置,无需手写 onMouseDown)。 */
+/** 遮罩层:全屏半透明深底(--mx-overlay,恒压暗语义,与 surface-2 实际底色分离),淡入淡出。
+ * 点它关闭(Radix 内置,无需手写 onMouseDown)。 */
 const DialogOverlay = React.forwardRef<
   React.ElementRef<typeof DialogPrimitive.Overlay>,
   React.ComponentPropsWithoutRef<typeof DialogPrimitive.Overlay>
@@ -26,7 +27,7 @@ const DialogOverlay = React.forwardRef<
   <DialogPrimitive.Overlay
     ref={ref}
     className={cn(
-      "mx-dialog-overlay fixed inset-0 z-[200] bg-[var(--mx-surface-2)]",
+      "mx-dialog-overlay fixed inset-0 z-[200] bg-[var(--mx-overlay)]",
       className,
     )}
     {...props}

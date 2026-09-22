@@ -163,10 +163,10 @@ export function StatusBar({ focusedProject, gitBranch, claudeStatuses, codexStat
           <button
             type="button"
             onClick={() => onOpenSettings?.("about")}
-            className="flex shrink-0 cursor-pointer items-center gap-1.5 rounded-[var(--mx-radius-md)] px-1.5 py-0.5 text-[11px] text-[#86efac] transition-colors hover:bg-[var(--mx-hover-bg)]"
+            className="flex shrink-0 cursor-pointer items-center gap-1.5 rounded-[var(--mx-radius-md)] px-1.5 py-0.5 text-[11px] text-[var(--mx-success-bright)] transition-colors hover:bg-[var(--mx-hover-bg)]"
             title={t("statusbar.updateAvailable")}
           >
-            <span aria-hidden className="h-1.5 w-1.5 animate-pulse rounded-full bg-[#86efac]" />
+            <span aria-hidden className="h-1.5 w-1.5 animate-pulse rounded-full bg-[var(--mx-success-bright)]" />
             <span className="tabular-nums">{t("statusbar.updateAvailable")}</span>
             <span className="font-[600] tabular-nums">v{updaterSnap.update.version}</span>
           </button>

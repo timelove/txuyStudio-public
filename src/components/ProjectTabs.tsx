@@ -130,7 +130,7 @@ export function ProjectTabs({ projects, activeProjectId, pinnedProjectIds, onSel
                 className={[
                   "mx-chip flex h-[length:var(--mx-chip-h)] min-w-0 items-center gap-[6px] px-[10px] text-xs transition-colors cursor-pointer",
                   activeProject
-                    ? "bg-[var(--mx-selected-bg)] text-white"
+                    ? "bg-[var(--mx-selected-bg)] text-[var(--mx-text-bright)]"
                     : "bg-[var(--mx-surface-soft)] text-[var(--mx-muted)] hover:bg-[var(--mx-hover-bg)] hover:text-[var(--mx-text)]",
                 ].join(" ")}
               >
@@ -221,7 +221,7 @@ export function ProjectTabs({ projects, activeProjectId, pinnedProjectIds, onSel
                   key={p.id}
                   className={[
                     "group flex items-center gap-2 px-3 py-[6px] text-xs",
-                    isActive ? "bg-[var(--mx-selected-bg)] text-white" : "text-[var(--mx-text)] hover:bg-[var(--mx-hover-bg)]",
+                    isActive ? "bg-[var(--mx-selected-bg)] text-[var(--mx-text-bright)]" : "text-[var(--mx-text)] hover:bg-[var(--mx-hover-bg)]",
                   ].join(" ")}
                 >
                   {/* 项目名:点击选中。右键弹 ContextMenu(钉住/分离/删除)。 */}
