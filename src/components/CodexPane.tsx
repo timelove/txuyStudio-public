@@ -1225,7 +1225,7 @@ export function CodexPane(props: CodexPaneProps) {
               {state?.meta && (state.meta.model || state.meta.sessionId) && (
                 <SessionHeader
                   brandLetter="X"
-                  brandClass="bg-[var(--mx-accent)] text-[#06222b]"
+                  brandClass="bg-[var(--mx-accent)] text-[var(--mx-accent-contrast)]"
                   name="Codex"
                   model={state.meta.model}
                   sessionId={state.meta.sessionId}
@@ -1261,7 +1261,7 @@ export function CodexPane(props: CodexPaneProps) {
             <div className="grid h-full place-items-center">
               {state ? (
                 <div className="flex flex-col items-center gap-2.5 py-10">
-                  <span aria-hidden className="grid h-10 w-10 place-items-center rounded-xl bg-[var(--mx-accent)] text-sm font-extrabold text-[#06222b] shadow-lg">
+                  <span aria-hidden className="grid h-10 w-10 place-items-center rounded-xl bg-[var(--mx-accent)] text-sm font-extrabold text-[var(--mx-accent-contrast)] shadow-lg">
                     X
                   </span>
                   <span className="text-xs text-[var(--mx-muted)]">
@@ -1836,7 +1836,7 @@ const MessageRow = memo(function MessageRow({
     <div className="group/message flex items-start gap-1.5">
       {/* A1 角色徽标:assistant 品牌块(青 X),置于气泡左侧。 */}
       <span aria-hidden className="flex h-[1.625em] shrink-0 items-center">
-        <span className="grid h-[18px] w-[18px] place-items-center rounded-md bg-[var(--mx-accent)] text-[10px] font-extrabold text-[#06222b]">X</span>
+        <span className="grid h-[18px] w-[18px] place-items-center rounded-md bg-[var(--mx-accent)] text-[10px] font-extrabold text-[var(--mx-accent-contrast)]">X</span>
       </span>
       <div className="group min-w-0 flex-1">
         <div className="flex flex-col gap-2 rounded-lg rounded-bl-[4px] bg-[var(--mx-card-bg)] px-3 py-1.5">
@@ -2003,9 +2003,9 @@ const ShellRow = memo(function ShellRow({
   const statusMeta = (() => {
     switch (message.status) {
       case "running":
-        return { label: t("claudepane.shellRunning"), bg: "rgba(59,130,246,0.16)", fg: "#93c5fd" };
+        return { label: t("claudepane.shellRunning"), bg: "var(--mx-info-soft)", fg: "var(--mx-info)" };
       case "done":
-        return { label: t("claudepane.shellDone"), bg: "var(--mx-success-soft)", fg: "#86efac" };
+        return { label: t("claudepane.shellDone"), bg: "var(--mx-success-soft)", fg: "var(--mx-success-bright)" };
       case "error":
         return {
           label:
@@ -2013,10 +2013,10 @@ const ShellRow = memo(function ShellRow({
               ? t("claudepane.shellError", { code: message.exitCode })
               : t("claudepane.shellError", { code: 1 }),
           bg: "var(--mx-danger-bg)",
-          fg: "#fca5a5",
+          fg: "var(--mx-danger-bright)",
         };
       case "interrupted":
-        return { label: t("claudepane.shellInterrupted"), bg: "var(--mx-border)", fg: "#cbd5e1" };
+        return { label: t("claudepane.shellInterrupted"), bg: "var(--mx-border)", fg: "var(--mx-text)" };
     }
   })();
   return (
@@ -2099,9 +2099,9 @@ function ToolCard({
 /** 状态药丸:小药丸 text-[10px] 四态。 */
 function ToolStatusBadge({ status, t }: { status: ToolBadgeStatus; t: (k: string) => string }) {
   const map: Record<ToolBadgeStatus, { label: string; bg: string; fg: string }> = {
-    running: { label: t("codexpane.toolRunning"), bg: "rgba(59,130,246,0.16)", fg: "#93c5fd" },
-    completed: { label: t("codexpane.toolDone"), bg: "var(--mx-success-soft)", fg: "#86efac" },
-    error: { label: t("codexpane.toolError"), bg: "var(--mx-danger-bg)", fg: "#fca5a5" },
+    running: { label: t("codexpane.toolRunning"), bg: "var(--mx-info-soft)", fg: "var(--mx-info)" },
+    completed: { label: t("codexpane.toolDone"), bg: "var(--mx-success-soft)", fg: "var(--mx-success-bright)" },
+    error: { label: t("codexpane.toolError"), bg: "var(--mx-danger-bg)", fg: "var(--mx-danger-bright)" },
     denied: { label: t("codexpane.sandboxDenied"), bg: "var(--mx-warning-soft)", fg: "#fdba74" },
   };
   const s = map[status];

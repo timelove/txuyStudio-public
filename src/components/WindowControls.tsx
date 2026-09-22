@@ -46,10 +46,10 @@ export function WindowControls() {
 
   if (!available) return null;
 
-  // Win11 标题栏按钮共用样式:等宽 46px、直角、深色主题浅图标 + 各自悬停色。
+  // Win11 标题栏按钮共用样式:等宽 46px、直角、图标/悬停全走主题 token(浅色主题自动深图标)。
   // border-0/bg-transparent/p-0:覆盖原生 button 默认边框/背景/内边距(Tailwind preflight 已重置大部分,显式声明保险)。
   const base = "grid h-full w-[46px] place-items-center border-0 bg-transparent p-0 text-[var(--mx-text)] transition-colors";
-  const hoverNormal = "hover:bg-[rgba(255,255,255,0.08)] hover:text-white";
+  const hoverNormal = "hover:bg-[var(--mx-hover-bg)] hover:text-[var(--mx-text-bright)]";
   const hoverClose = "hover:bg-[var(--mx-danger)] hover:text-white";
 
   return (

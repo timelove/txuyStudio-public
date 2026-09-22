@@ -142,6 +142,7 @@ const zh = {
   theme: {
     midnight: "午夜蓝",
     "one-dark": "One Dark",
+    intellijLight: "IntelliJ Light",
   },
   settings: {
     title: "设置",

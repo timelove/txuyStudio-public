@@ -290,7 +290,7 @@ function TaskListContent({
                   e.stopPropagation();
                   onKillTask(task.taskId, task.description);
                 }}
-                className="shrink-0 rounded p-0.5 text-[var(--mx-faint)] opacity-0 transition-opacity hover:bg-[var(--mx-danger-bg)] hover:text-[#fca5a5] group-hover/task:opacity-100"
+                className="shrink-0 rounded p-0.5 text-[var(--mx-faint)] opacity-0 transition-opacity hover:bg-[var(--mx-danger-bg)] hover:text-[var(--mx-danger-bright)] group-hover/task:opacity-100"
               >
                 <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
                   <rect x="6" y="6" width="12" height="12" rx="2" />
@@ -311,7 +311,7 @@ function TaskListContent({
             return (
               <div key={i} className="flex items-start gap-2 rounded px-2 py-1 text-[10px] leading-relaxed">
                 {stopped ? (
-                  <svg className="mt-[4px] h-2.5 w-2.5 shrink-0" viewBox="0 0 24 24" fill="#fbbf24" aria-hidden>
+                  <svg className="mt-[4px] h-2.5 w-2.5 shrink-0" viewBox="0 0 24 24" fill="var(--mx-warning-bright)" aria-hidden>
                     <rect x="6" y="6" width="12" height="12" rx="2" />
                   </svg>
                 ) : (
@@ -319,7 +319,7 @@ function TaskListContent({
                     className="mt-[3px] h-3 w-3 shrink-0"
                     viewBox="0 0 24 24"
                     fill="none"
-                    stroke={done ? "#86efac" : "#fca5a5"}
+                    stroke={done ? "var(--mx-success-bright)" : "var(--mx-danger-bright)"}
                     strokeWidth="2.4"
                     strokeLinecap="round"
                     strokeLinejoin="round"
@@ -2621,7 +2621,7 @@ const MessageRow = memo(function MessageRow({
     const resumed = kind === "history_resumed";
     const hist = message.notice?.history;
     const ok = done || (resumed && !hist?.failed);
-    const tone = stopped ? "#fbbf24" : ok ? (resumed ? "#7dd3fc" : "#86efac") : "#fca5a5";
+    const tone = stopped ? "var(--mx-warning-bright)" : ok ? (resumed ? "var(--mx-info)" : "var(--mx-success-bright)") : "var(--mx-danger-bright)";
     const label = stopped
       ? t("claudepane.bgTaskStoppedLabel")
       : done
@@ -2943,9 +2943,9 @@ const ShellRow = memo(function ShellRow({
   const statusMeta = (() => {
     switch (message.status) {
       case "running":
-        return { label: t("claudepane.shellRunning"), bg: "rgba(59,130,246,0.16)", fg: "#93c5fd" };
+        return { label: t("claudepane.shellRunning"), bg: "var(--mx-info-soft)", fg: "var(--mx-info)" };
       case "done":
-        return { label: t("claudepane.shellDone"), bg: "var(--mx-success-soft)", fg: "#86efac" };
+        return { label: t("claudepane.shellDone"), bg: "var(--mx-success-soft)", fg: "var(--mx-success-bright)" };
       case "error":
         return {
           label:
@@ -2953,10 +2953,10 @@ const ShellRow = memo(function ShellRow({
               ? t("claudepane.shellError", { code: message.exitCode })
               : t("claudepane.shellError", { code: 1 }),
           bg: "var(--mx-danger-bg)",
-          fg: "#fca5a5",
+          fg: "var(--mx-danger-bright)",
         };
       case "interrupted":
-        return { label: t("claudepane.shellInterrupted"), bg: "var(--mx-border)", fg: "#cbd5e1" };
+        return { label: t("claudepane.shellInterrupted"), bg: "var(--mx-border)", fg: "var(--mx-text)" };
     }
   })();
   return (
@@ -3287,7 +3287,7 @@ function PermissionConfirmCard({
             className="rounded px-1.5 py-px text-[9px] font-semibold"
             style={{
               background: badge.tone === "new" ? "var(--mx-success-soft)" : "var(--mx-warning-soft)",
-              color: badge.tone === "new" ? "#86efac" : "#fbbf24",
+              color: badge.tone === "new" ? "var(--mx-success-bright)" : "var(--mx-warning-bright)",
             }}
           >
             {badge.text}
@@ -3446,10 +3446,10 @@ function TaskToolView({
 /** 状态药丸(参考 claudecodeui ToolStatusBadge):小药丸 text-[10px] 四态。 */
 function ToolStatusBadge({ status, t }: { status: ToolBadgeStatus; t: (k: string) => string }) {
   const map: Record<ToolBadgeStatus, { label: string; bg: string; fg: string }> = {
-    running: { label: t("claudepane.toolRunning"), bg: "rgba(59,130,246,0.16)", fg: "#93c5fd" },
-    completed: { label: t("claudepane.toolDone"), bg: "var(--mx-success-soft)", fg: "#86efac" },
-    error: { label: t("claudepane.permissionDenied"), bg: "var(--mx-danger-bg)", fg: "#fca5a5" },
-    denied: { label: t("claudepane.permissionDenied"), bg: "var(--mx-warning-soft)", fg: "#fdba74" },
+    running: { label: t("claudepane.toolRunning"), bg: "var(--mx-info-soft)", fg: "var(--mx-info)" },
+    completed: { label: t("claudepane.toolDone"), bg: "var(--mx-success-soft)", fg: "var(--mx-success-bright)" },
+    error: { label: t("claudepane.permissionDenied"), bg: "var(--mx-danger-bg)", fg: "var(--mx-danger-bright)" },
+    denied: { label: t("claudepane.permissionDenied"), bg: "var(--mx-warning-soft)", fg: "var(--mx-warning-bright)" },
   };
   const s = map[status];
   return (
@@ -3618,7 +3618,7 @@ function DiffToolView({
           </span>
         )}
         {badge && (
-          <span className="flex-shrink-0 rounded px-1 py-px text-[9px] font-semibold" style={{ background: badge.tone === "new" ? "var(--mx-success-soft)" : "var(--mx-warning-soft)", color: badge.tone === "new" ? "#86efac" : "#fbbf24" }}>{badge.text}</span>
+          <span className="flex-shrink-0 rounded px-1 py-px text-[9px] font-semibold" style={{ background: badge.tone === "new" ? "var(--mx-success-soft)" : "var(--mx-warning-soft)", color: badge.tone === "new" ? "var(--mx-success-bright)" : "var(--mx-warning-bright)" }}>{badge.text}</span>
         )}
         <span className="ml-auto flex flex-shrink-0 items-center gap-2">
           {segments.stats && (
@@ -3904,7 +3904,7 @@ function DefaultToolView({
             className="flex-shrink-0 rounded px-1 py-px text-[9px] font-semibold"
             style={{
               background: badge.tone === "new" ? "var(--mx-success-soft)" : "var(--mx-border)",
-              color: badge.tone === "new" ? "#86efac" : "#cbd5e1",
+              color: badge.tone === "new" ? "var(--mx-success-bright)" : "var(--mx-text)",
             }}
           >
             {badge.text}

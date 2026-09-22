@@ -160,8 +160,8 @@ function AppUpdater({ t }: { t: (k: string, o?: Record<string, unknown>) => stri
         <span className="text-[11px] font-[600] text-[var(--mx-text)]">{t("settings.updater.title")}</span>
         {/* 当前阶段轻提示 */}
         {state.phase === "checking" && <span className="text-[10px] text-[var(--mx-faint)]">{t("settings.updater.checking")}</span>}
-        {state.phase === "upToDate" && <span className="text-[10px] text-[#86efac]">{t("settings.updater.upToDate")}</span>}
-        {state.phase === "ready" && <span className="text-[10px] text-[#86efac]">{t("settings.updater.installed")}</span>}
+        {state.phase === "upToDate" && <span className="text-[10px] text-[var(--mx-success-bright)]">{t("settings.updater.upToDate")}</span>}
+        {state.phase === "ready" && <span className="text-[10px] text-[var(--mx-success-bright)]">{t("settings.updater.installed")}</span>}
         {state.phase === "error" && (
           <span className="min-w-0 flex-1 truncate text-[10px] text-[var(--mx-danger)]" title={state.message}>
             {t("settings.updater.error")} · {state.message}

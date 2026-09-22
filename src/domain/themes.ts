@@ -10,17 +10,18 @@ import type { ITheme } from "@xterm/xterm";
  * 默认 `midnight` = 改动前的深蓝/slate 配色(变量值与原硬编码一致,观感零变化)。
  */
 
-export type ThemeId = "midnight" | "one-dark";
+export type ThemeId = "midnight" | "one-dark" | "intellij-light";
 
 export const DEFAULT_THEME_ID: ThemeId = "midnight";
 
 /** 主题白名单(用于校验 hydrate 回传/未知值回退默认)。 */
-export const KNOWN_THEME_IDS: readonly ThemeId[] = ["midnight", "one-dark"];
+export const KNOWN_THEME_IDS: readonly ThemeId[] = ["midnight", "one-dark", "intellij-light"];
 
 /** UI 列表(数据驱动 SettingsModal 的主题 ToggleGroup)。labelKey 走 i18n。 */
 export const THEMES: { id: ThemeId; labelKey: string }[] = [
   { id: "midnight", labelKey: "theme.midnight" },
   { id: "one-dark", labelKey: "theme.one-dark" },
+  { id: "intellij-light", labelKey: "theme.intellijLight" },
 ];
 
 /** 把任意字符串归一为合法 ThemeId(未知/空 -> 默认)。 */
@@ -84,5 +85,30 @@ export const TERMINAL_THEMES: Record<ThemeId, ITheme> = {
     brightMagenta: "#c678dd",
     brightCyan: "#56b6c2",
     brightWhite: "#ffffff",
+  },
+  /** IntelliJ Light(JetBrains IDEA Light 新 UI:白底终端 + 高饱和深档 ANSI,白底可读;
+   *  bg 对齐 --mx-editor-bg #FFFFFF,与 ClaudePane 输入流统一)。white 给中灰、brightWhite
+   *  反转近黑(浅底惯例,亮白在白底不可见)。 */
+  "intellij-light": {
+    background: "#ffffff",
+    foreground: "#1f1f1f",
+    cursor: "#1f1f1f",
+    selectionBackground: "#c9dbf9",
+    black: "#000000",
+    red: "#ff3535",
+    green: "#0a8400",
+    yellow: "#bf8c00",
+    blue: "#3064bf",
+    magenta: "#8264f4",
+    cyan: "#0e9ba8",
+    white: "#8a8a8a",
+    brightBlack: "#767676",
+    brightRed: "#ff6d68",
+    brightGreen: "#3fa22c",
+    brightYellow: "#d9a400",
+    brightBlue: "#4c82f0",
+    brightMagenta: "#9a7bf7",
+    brightCyan: "#3bb8c4",
+    brightWhite: "#1f1f1f",
   },
 };
