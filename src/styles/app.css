@@ -250,6 +250,69 @@
   --mx-overlay: rgba(15, 23, 42, 0.32);
 }
 
+/* ============================================================
+ * IntelliJ Dark 主题(JetBrains IDEA Dark 新 UI 观感):#1E1F22 编辑区/窗底 +
+ * #2B2D30 面板浮层 + IntelliJ 蓝 #3574F0 强调(亮档 #548AF7 = 官方 link/focus 色)
+ * + #393B40 灰阶分隔线。语义色取 JetBrains dark 图标档(error #E5545F 同 light,
+ *  green/warning 亮化为深底可读)。品牌紫(块面/Claude)保持,深底亮化到 #9A7BF7。
+ * ============================================================ */
+[data-theme="intellij-dark"] {
+  color: #dfe1e5;
+  background: #1e1f22;
+  color-scheme: dark;
+  --mx-bg: #1e1f22;
+  --mx-border: #393b40;
+  --mx-border-strong: #4c4f56;
+  --mx-surface: #2b2d30;
+  --mx-text: #dfe1e5;
+  --mx-muted: #9da0a8;
+  --mx-faint: #6f737a;
+  --mx-accent: #3574f0;
+  --mx-accent-deep: #7c3aed;
+  --mx-brand-gradient: linear-gradient(135deg, #7c3aed, #3574f0);
+  --mx-selected-bg: rgba(53, 116, 240, 0.28);
+  --mx-selected-border: rgba(84, 138, 247, 0.55);
+  --mx-hover-bg: rgba(255, 255, 255, 0.06);
+  --mx-guarded: #3bb8c4;
+  --mx-permissive: #d6bf55;
+  --mx-editor-bg: #1e1f22;
+  --mx-card-bg: #222427;
+  --mx-text-bright: #ffffff;
+  --mx-text-dim: #777b84;
+  --mx-accent-bright: #548af7;
+  --mx-accent-soft: rgba(53, 116, 240, 0.18);
+  --mx-user-bubble: rgba(255, 255, 255, 0.06);
+  --mx-user-bubble-badge: rgba(255, 255, 255, 0.1);
+  --mx-violet: #9a7bf7;
+  --mx-danger: #e5545f;
+  --mx-danger-bright: #f5989f;
+  --mx-danger-bg: rgba(229, 84, 95, 0.16);
+  --mx-danger-border: rgba(229, 84, 95, 0.45);
+  --mx-success: #5fb865;
+  --mx-success-bright: #7ec980;
+  --mx-success-soft: rgba(95, 184, 101, 0.16);
+  --mx-warning: #f5a623;
+  --mx-warning-bright: #ffc53d;
+  --mx-warning-soft: rgba(245, 166, 35, 0.14);
+  --mx-surface-2: #26282c;
+  --mx-surface-soft: #222427;
+  --mx-border-soft: rgba(255, 255, 255, 0.07);
+  --mx-tabbar-bg: #26282c;
+  --mx-violet-soft: rgba(154, 123, 247, 0.1);
+  --mx-violet-border: rgba(154, 123, 247, 0.32);
+  --mx-indigo-soft: rgba(84, 138, 247, 0.12);
+  --mx-indigo-border: rgba(84, 138, 247, 0.35);
+  --mx-orange-soft: rgba(245, 146, 62, 0.1);
+  --mx-orange-border: rgba(245, 146, 62, 0.32);
+  --mx-accent-deep-soft: rgba(124, 58, 237, 0.16);
+  --mx-info: #77a9f8;
+  --mx-info-soft: rgba(84, 138, 247, 0.16);
+  --mx-link: #548af7;
+  --mx-code-bg: #26282c;
+  --mx-accent-contrast: #ffffff;
+  --mx-overlay: rgba(0, 0, 0, 0.45);
+}
+
 * {
   box-sizing: border-box;
 }

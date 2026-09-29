@@ -10,18 +10,24 @@ import type { ITheme } from "@xterm/xterm";
  * 默认 `midnight` = 改动前的深蓝/slate 配色(变量值与原硬编码一致,观感零变化)。
  */
 
-export type ThemeId = "midnight" | "one-dark" | "intellij-light";
+export type ThemeId = "midnight" | "one-dark" | "intellij-light" | "intellij-dark";
 
 export const DEFAULT_THEME_ID: ThemeId = "midnight";
 
 /** 主题白名单(用于校验 hydrate 回传/未知值回退默认)。 */
-export const KNOWN_THEME_IDS: readonly ThemeId[] = ["midnight", "one-dark", "intellij-light"];
+export const KNOWN_THEME_IDS: readonly ThemeId[] = [
+  "midnight",
+  "one-dark",
+  "intellij-light",
+  "intellij-dark",
+];
 
 /** UI 列表(数据驱动 SettingsModal 的主题 ToggleGroup)。labelKey 走 i18n。 */
 export const THEMES: { id: ThemeId; labelKey: string }[] = [
   { id: "midnight", labelKey: "theme.midnight" },
   { id: "one-dark", labelKey: "theme.one-dark" },
   { id: "intellij-light", labelKey: "theme.intellijLight" },
+  { id: "intellij-dark", labelKey: "theme.intellijDark" },
 ];
 
 /** 把任意字符串归一为合法 ThemeId(未知/空 -> 默认)。 */
@@ -110,5 +116,30 @@ export const TERMINAL_THEMES: Record<ThemeId, ITheme> = {
     brightMagenta: "#9a7bf7",
     brightCyan: "#3bb8c4",
     brightWhite: "#1f1f1f",
+  },
+  /** IntelliJ Dark(JetBrains IDEA Dark 新 UI:深灰底终端 + Darcula console ANSI;
+   *  bg 对齐 --mx-editor-bg #1E1F22,与 ClaudePane 输入流统一)。ANSI 取 JetBrains
+   *  Darcula console 官方 16 色(部分 bright 与 normal 同值,官方口径如此)。 */
+  "intellij-dark": {
+    background: "#1e1f22",
+    foreground: "#a9b7c6",
+    cursor: "#dfe1e5",
+    selectionBackground: "#2e4a7a",
+    black: "#000000",
+    red: "#ff6b68",
+    green: "#a8c023",
+    yellow: "#d6bf55",
+    blue: "#5394ec",
+    magenta: "#ae8abe",
+    cyan: "#299999",
+    white: "#a9b7c6",
+    brightBlack: "#555555",
+    brightRed: "#ff8785",
+    brightGreen: "#a8c023",
+    brightYellow: "#d6bf55",
+    brightBlue: "#7eaef1",
+    brightMagenta: "#ae8abe",
+    brightCyan: "#6cdada",
+    brightWhite: "#ffffff",
   },
 };

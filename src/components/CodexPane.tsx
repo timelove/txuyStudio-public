@@ -88,7 +88,7 @@ const FALLBACK_SLASH_CMDS: SlashCmd[] = [
 
 /**
  * codex sandbox 策略(codex exec -s),状态栏可切换 + Shift+Tab 循环。
- * 档位表收敛到 domain/codexSandbox.ts(与设置面板的全局默认档共用,单一真源)。
+ * 档位表收敛到 domain/codexSandbox.ts(单一真源;全局默认档设置已移除,仅状态栏每 tab 切换)。
  */
 
 /** 兜底 reasoning 档位(catalog 无当前 model 的 supported_reasoning_levels 时用)。 */
@@ -379,6 +379,9 @@ export function CodexPane(props: CodexPaneProps) {
   const atLoadedCwdRef = useRef<string | null>(null);
   const [helpOpen, setHelpOpen] = useState(false);
   const [costOpen, setCostOpen] = useState(false);
+  /** /mcp 弹窗:~/.codex/config.toml 的 [mcp_servers.*] 段解析(null=加载中/失败空)。 */
+  const [mcpOpen, setMcpOpen] = useState(false);
+  const [mcpServers, setMcpServers] = useState<{ name: string; brief: string }[] | null>(null);
   const [unsupportedMsg, setUnsupportedMsg] = useState<string | null>(null);
   /** 模型目录(list_codex_models 实时拉取 cc-switch catalog;打开选择器时刷新)。 */
   const [availableModels, setAvailableModels] = useState<CodexModelInfo[]>([]);
@@ -664,9 +667,18 @@ export function CodexPane(props: CodexPaneProps) {
         case "auth":
           openCodexHomeFile("auth.json");
           break;
-        case "mcp":
-          openCodexHomeFile("config.toml");
+        case "mcp": {
+          // 查看 MCP 服务器(与 codex TUI /mcp 对齐):弹窗列 config.toml 的 [mcp_servers.*] 段,
+          // 每次打开重读(改完配置即刷新);「定位 config.toml」降级为弹窗内次要按钮(原直接开资源管理器)。
+          setMcpOpen(true);
+          void homeDir()
+            .then((home) =>
+              invoke<{ content: string | null; binary: boolean }>("read_file", { path: `${home}/.codex/config.toml` }),
+            )
+            .then((res) => setMcpServers(res.content && !res.binary ? parseMcpServers(res.content) : []))
+            .catch(() => setMcpServers([]));
           break;
+        }
         case "agent":
           openCodexHomeFile("AGENTS.md");
           break;
@@ -1531,7 +1543,7 @@ export function CodexPane(props: CodexPaneProps) {
                             align="start"
                             sideOffset={4}
                             onOpenAutoFocus={(e) => e.preventDefault()}
-                            className="mx-menu w-[230px] max-w-[calc(100vw-2rem)] border border-[var(--mx-border)] bg-[var(--mx-surface)] p-1 shadow-xl"
+                            className="mx-menu w-[340px] max-w-[calc(100vw-2rem)] border border-[var(--mx-border)] bg-[var(--mx-surface)] p-1 shadow-xl"
                           >
                             {SANDBOX_MODES.map((m) => (
                               <button
@@ -1545,7 +1557,7 @@ export function CodexPane(props: CodexPaneProps) {
                                     : "text-[var(--mx-muted)] hover:bg-[var(--mx-hover-bg)] hover:text-[var(--mx-text)]"
                                 }`}
                               >
-                                <span className="w-14 shrink-0 font-mono text-[11px] font-semibold">{m.label}</span>
+                                <span className="w-36 shrink-0 whitespace-nowrap font-mono text-[11px] font-semibold">{m.label}</span>
                                 <span className="text-[10px] leading-tight">{t(m.desc)}</span>
                               </button>
                             ))}
@@ -1760,6 +1772,37 @@ export function CodexPane(props: CodexPaneProps) {
                   <div>ctx 窗口<span className="ml-2 text-[var(--mx-text)]">{formatTokens(contextInfo.window)}</span></div>
                 )}
                 <div>耗时<span className="ml-2 text-[var(--mx-text)]"><ElapsedText start={sessionStart} /></span></div>
+              </div>
+            </DialogLike>
+            {/* /mcp:MCP 服务器列表(config.toml [mcp_servers.*] 段);插件型 MCP 由 codex 自动加载。 */}
+            <DialogLike open={mcpOpen} onClose={() => setMcpOpen(false)} title={t("codexpane.mcpTitle")}>
+              <div className="mt-3 space-y-1.5 text-[11px] text-[var(--mx-muted)]">
+                {mcpServers === null ? (
+                  <div>{t("common.loading")}</div>
+                ) : mcpServers.length === 0 ? (
+                  <div>{t("codexpane.mcpEmpty")}</div>
+                ) : (
+                  mcpServers.map((s) => (
+                    <div key={s.name} className="flex min-w-0 items-center gap-2">
+                      <span aria-hidden className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--mx-success)]" />
+                      <span className="shrink-0 font-mono text-[var(--mx-text)]">{s.name}</span>
+                      {s.brief && (
+                        <span className="min-w-0 flex-1 truncate font-mono text-[10px] text-[var(--mx-faint)]" title={s.brief}>
+                          {s.brief}
+                        </span>
+                      )}
+                    </div>
+                  ))
+                )}
+                <div className="pt-1 text-[10px] text-[var(--mx-faint)]">{t("codexpane.mcpPluginNote")}</div>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="self-start text-[10px] text-[var(--mx-muted)] hover:text-[var(--mx-text)]"
+                  onClick={() => openCodexHomeFile("config.toml")}
+                >
+                  {t("codexpane.mcpReveal")}
+                </Button>
               </div>
             </DialogLike>
             {unsupportedMsg && (
@@ -2305,6 +2348,41 @@ function formatInput(input: unknown): string {
   } catch {
     return String(input);
   }
+}
+
+/**
+ * 解析 ~/.codex/config.toml 的 [mcp_servers.<name>] 段(/mcp 弹窗):name + 段内首个
+ * command/url/args 值作摘要。轻量行扫描(仅展示用,不做完整 TOML 解析);
+ * stdio 型取 command 值,HTTP/SSE 型取 url 值。
+ */
+function parseMcpServers(toml: string): { name: string; brief: string }[] {
+  const out: { name: string; brief: string }[] = [];
+  let cur: { name: string; brief: string } | null = null;
+  for (const raw of toml.split(/\r?\n/)) {
+    const line = raw.trim();
+    const header = line.match(/^\[mcp_servers\.([^\]\s]+)\]$/);
+    if (header) {
+      if (cur) out.push(cur);
+      cur = { name: header[1], brief: "" };
+      continue;
+    }
+    if (!cur) continue;
+    if (line.startsWith("[")) {
+      // 离开 mcp_servers 段,收尾。
+      out.push(cur);
+      cur = null;
+      continue;
+    }
+    if (!cur.brief) {
+      const kv = line.match(/^(command|url|args)\s*=\s*(?:"([^"\r\n]*)"|'([^'\r\n]*)'|([^\s#][^\r\n]*))/);
+      if (kv) {
+        const value = kv[2] ?? kv[3] ?? kv[4] ?? "";
+        cur.brief = kv[1] === "url" ? `url: ${value}` : value;
+      }
+    }
+  }
+  if (cur) out.push(cur);
+  return out;
 }
 
 /** 时间戳格式化。 */

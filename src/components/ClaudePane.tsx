@@ -12,8 +12,8 @@ import type { ClaudeTransport } from "../domain/claudeTransport";
 import type { ShellRunTransport } from "../domain/shellRunTransport";
 import { SHELL_MAX_OUTPUT_LINES, type ShellMessage, type ShellRunState } from "../domain/shellRun";
 import type { BackgroundTaskInfo, ClaudeBlock, ClaudeMessage, ClaudeSessionKind, ClaudeStreamState, ClaudeUsage, CompactMeta } from "../domain/claudeStream";
-import { hasPendingApproval as hasPendingApprovalFn, hasPendingPlan as hasPendingPlanFn, hasUsage, inferContextWindow, summarize } from "../domain/claudeStream";
-import { liftContextWindow, totalInputTokens } from "../domain/contextMeter";
+import { computeContextInfo, hasPendingApproval as hasPendingApprovalFn, hasPendingPlan as hasPendingPlanFn, hasUsage, inferContextWindow, summarize } from "../domain/claudeStream";
+import { totalInputTokens } from "../domain/contextMeter";
 import {
   getToolConfig,
   getToolCategory,
@@ -127,12 +127,18 @@ const FALLBACK_SLASH_CMDS: SlashCmd[] = [
 /**
  * claude 权限模式(--permission-mode),状态栏可切换 + Shift+Tab 循环。
  * id 传后端;label 状态栏显示;desc 菜单说明。
+ * id 必须是 claude CLI --permission-mode 的合法 choices(本机 2.1.23x 实测:
+ * acceptEdits/auto/bypassPermissions/manual/dontAsk/plan)——旧档 "default" 已被
+ * CLI 移除(改名 manual),传非法值 claude 进程启动即退(commander invalid choice),
+ * 状态栏显示与实际权限对不上(UI 徽标来自期望值,进程根本没起来)。
+ * label 一并显示 CLI 原值(不用自创短标签 auto/yolo——与 codex 侧 sandbox 的 auto/yolo
+ * 混淆,且不是 CLI 里的真实名字);auto/dontAsk 两值未暴露(语义与 acceptEdits/manual 重叠)。
  */
 const PERMISSION_MODES = [
-  { id: "acceptEdits", label: "auto", desc: "自动接受文件编辑" },
+  { id: "acceptEdits", label: "acceptEdits", desc: "自动接受文件编辑" },
   { id: "plan", label: "plan", desc: "计划模式(只读,先提方案)" },
-  { id: "default", label: "default", desc: "每次操作都确认" },
-  { id: "bypassPermissions", label: "yolo", desc: "跳过所有权限(谨慎)" },
+  { id: "manual", label: "manual", desc: "每次操作都确认" },
+  { id: "bypassPermissions", label: "bypassPermissions", desc: "跳过所有权限(谨慎)" },
 ] as const;
 
 /**
@@ -601,6 +607,11 @@ export function ClaudePane(props: ClaudePaneProps) {
   // slash 命令逐个触发的弹窗状态(/config /help /cost)+ 不支持命令的内联提示。
   const [configOpen, setConfigOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
+  /** /mcp 弹窗:~/.claude.json 解析的 MCP 服务器(全局 + 本项目;null=加载中)。 */
+  const [mcpOpen, setMcpOpen] = useState(false);
+  const [mcpEntries, setMcpEntries] = useState<
+    { scope: "global" | "project"; name: string; brief: string }[] | null
+  >(null);
   const [costOpen, setCostOpen] = useState(false);
   const [unsupportedMsg, setUnsupportedMsg] = useState<string | null>(null);
   /** API 重试用尽 toast:重试序列从有(retry≠null)变无(null)且最终 status=error 时弹一次。
@@ -983,13 +994,23 @@ export function ClaudePane(props: ClaudePaneProps) {
           setCostOpen(true);
           break;
         case "agents":
-        case "skills":
-        case "mcp": {
-          // 在资源管理器定位 claude 配置位置(agents/skills 目录 / mcp 的 .claude.json),
-          // 用户自行决定用什么打开(后端 reveal_in_folder)。
+        case "skills": {
+          // 在资源管理器定位 ~/.claude/<agents|skills> 目录(目录型管理仍走定位)。
           invoke<string>("get_claude_config_path", { target: cmd.name })
             .then((p) => void invoke("reveal_in_folder", { path: p }).catch(() => {}))
             .catch(() => setUnsupportedMsg(t("claudepane.unsupported", { cmd: `/${cmd.name}` })));
+          break;
+        }
+        case "mcp": {
+          // 查看 MCP 服务器(对齐 claude CLI /mcp 语义):弹窗列 ~/.claude.json 的全局
+          // mcpServers + 本项目 projects[cwd].mcpServers,每次打开重读;
+          // 原「定位 .claude.json」降级为弹窗内次要按钮。
+          setMcpOpen(true);
+          const cwd = sessions.find((s) => s.id === activeTabId)?.cwd;
+          void invoke<string>("get_claude_config_path", { target: "mcp" })
+            .then((p) => invoke<{ content: string | null; binary: boolean }>("read_file", { path: p }))
+            .then((res) => setMcpEntries(parseClaudeMcpServers(res.content ?? "", cwd)))
+            .catch(() => setMcpEntries([]));
           break;
         }
         case "compact": {
@@ -1324,8 +1345,9 @@ export function ClaudePane(props: ClaudePaneProps) {
   const handleReject = useCallback(() => {
     requestAnimationFrame(() => inputRef.current?.focus());
   }, []);
-  // 批准被拒的工具调用(确认框「批准本次」/「批准且不再问」):标记 resolved + interrupt(幂等,
-  // headless 单轮被拒后进程已退)+ approveTool。persist=true 持久化到项目 allowlist(后续免确认)。
+  // 批准被拒的工具调用(确认框「批准本次」/「批准且不再问」):标记 resolved + approveToolRun
+  // (本地执行 + tool_result 原地回传;busy 时 transport 自愈 kill+--resume+重试,见 sendToolResult)。
+  // persist=true 持久化到项目 allowlist(后续免确认)。
   // resolve 时一并清掉最后一条 assistant 消息里所有「需审批被拒」的 block——同轮常有多项被拒,
   // 一次批准/拒绝就整批隐藏确认框(批准只放行点中的工具,其余下轮若再被调会重新弹框)。
   const handleApproveTool = useCallback(
@@ -1380,6 +1402,40 @@ export function ClaudePane(props: ClaudePaneProps) {
   const handleFeedback = useCallback(() => {
     requestAnimationFrame(() => inputRef.current?.focus());
   }, []);
+
+  // —— 待确认权限卡的键盘流(焦点留在输入框,不抢焦点) ——
+  // 派生「当前待确认 block」= 最近一条 assistant 消息里第一个被拒且未 resolved 的 tool_use
+  // (同轮多卡时任何一张批准即整批 resolve,故键盘只控制第一张)。空输入 + 无面板时输入框里
+  // ←→ 移动高亮、Enter 触发对应动作(见输入框 onKeyDown);非空输入不拦(打字优先,发消息
+  // 本身也是对确认的回应)。卡片高亮由 approvalFocusIdx 驱动(外部状态,非 DOM 焦点)。
+  const activeApproval = useMemo(() => {
+    if (!state) return null;
+    for (let i = state.messages.length - 1; i >= 0; i--) {
+      const m = state.messages[i];
+      if (m.role !== "assistant") continue;
+      for (const b of m.blocks) {
+        if (b.type === "tool_use" && isPermissionDenied(b) && !resolvedApprovals.has(b.id)) return b;
+      }
+      return null; // 只认最近一条 assistant(更早的属历史轮,不进键盘流)
+    }
+    return null;
+  }, [state, resolvedApprovals]);
+  const activeApprovalId = activeApproval?.id ?? null;
+  const [approvalFocusIdx, setApprovalFocusIdx] = useState(0);
+  useEffect(() => {
+    setApprovalFocusIdx(0);
+  }, [activeApprovalId]);
+  const triggerApprovalAction = useCallback(
+    (idx: number) => {
+      const block = activeApproval;
+      if (!block) return;
+      if (idx === 0) void handleApproveTool(block, false);
+      else if (idx === 1) void handleApproveTool(block, true);
+      else if (idx === 2) handleRejectTool(block);
+      // 3 = 反馈修改:聚焦输入框——键盘流前提即焦点在输入框,no-op。
+    },
+    [activeApproval, handleApproveTool, handleRejectTool],
+  );
 
   // —— Ctrl+A 智能选框(pane focused 时)——
   // 选区锚点(最后点击处)落在消息流某个 <pre> 输出框内 → 只全选该框,配合 Ctrl+C 整块复制;
@@ -1444,19 +1500,31 @@ export function ClaudePane(props: ClaudePaneProps) {
     prevBusyRef.current = busy;
   }, [busy]);
 
-  // 本次会话累计 token(遍历所有 assistant message 的 usage 求和;input 每轮含历史,反映实际计费)。
-  // totalInputTokens 兼容互斥/重叠两种网关语义(重叠语义下直接相加会双倍)。
+  // 本次会话累计 token(计费口径)。两种 usage 来源语义不同:
+  // - 流式快照(官方):各轮本轮值 → Σ 求和;
+  // - result 回填的会话累计(glm 流式恒 {0,0};claude code result.usage 本身就是多轮之和)
+  //   → Σ 会变「累计的累计」(天文数字),正确值 = 最近一条累计本身。
   const sessionTokens = useMemo(() => {
     if (!state) return { input: 0, output: 0 };
+    const used = (u: ClaudeUsage) =>
+      totalInputTokens(u.input_tokens ?? 0, u.cache_creation_input_tokens ?? 0, u.cache_read_input_tokens ?? 0);
+    // 段内最近一条有真实用量的 assistant(倒序找第一条)。
+    let last: ClaudeMessage | undefined;
+    for (let i = state.messages.length - 1; i >= 0; i--) {
+      const m = state.messages[i];
+      if (m.role === "assistant" && hasUsage(m.usage)) {
+        last = m;
+        break;
+      }
+    }
+    if (last?.usageCumulative && last.usage) {
+      return { input: used(last.usage), output: last.usage.output_tokens ?? 0 };
+    }
     let input = 0;
     let output = 0;
     for (const m of state.messages) {
       if (m.role === "assistant" && m.usage) {
-        input += totalInputTokens(
-          m.usage.input_tokens ?? 0,
-          m.usage.cache_creation_input_tokens ?? 0,
-          m.usage.cache_read_input_tokens ?? 0,
-        );
+        input += used(m.usage);
         output += m.usage.output_tokens ?? 0;
       }
     }
@@ -1473,37 +1541,13 @@ export function ClaudePane(props: ClaudePaneProps) {
     return undefined;
   })();
 
-  // 当前上下文用量:取最近一次 compact boundary 之后、最近一条**有真实用量**的 assistant
-  // message 的 usage(totalInputTokens 兼容官方互斥/网关重叠两种字段语义)。
-  // glm 流式中 assistant usage 恒全 0 对象(非 null),须 hasUsage 过滤,否则每轮流式中
-  // ctx 跳回 0 显示「剩 200k · 0.0%」抖动。
-  // **boundary 停扫**:compact 已把历史压缩,前段的 usage 峰值不再代表当前上下文——
-  // 继续累计会让 liftContextWindow 的窗口跨压缩单调爬升(多次 compact 循环后显示超 1m)。
-  // window = meta.contextWindow(result.modelUsage 回填)?? inferContextWindow 兜底;
-  // 实测 ctx 突破兜底时按**当前压缩段**峰值动态抬升(liftContextWindow)。
-  const contextInfo = useMemo(() => {
-    if (!state) return null;
-    const used = (u: ClaudeUsage) =>
-      totalInputTokens(u.input_tokens ?? 0, u.cache_creation_input_tokens ?? 0, u.cache_read_input_tokens ?? 0);
-    let usage: ClaudeUsage | undefined;
-    let peak = 0;
-    for (let i = state.messages.length - 1; i >= 0; i--) {
-      const m = state.messages[i];
-      if (m.role === "compact" && m.compactKind === "boundary") break;
-      if (m.role !== "assistant" || !hasUsage(m.usage)) continue;
-      const c = used(m.usage!);
-      peak = Math.max(peak, c);
-      if (!usage) usage = m.usage!;
-    }
-    const ctx = usage ? used(usage) : 0;
-    // **权威窗口不抬升**:meta.contextWindow 来自 result.modelUsage.<model>.contextWindow
-    // (网关权威值,实测 glm-5.3[1m] 报 1000000),peak 逼近真实窗口时 liftContextWindow
-    // 会 +2% 抬到 1.05m,显示「窗口超 1m」违和。抬升只留给拿不到权威值的兜底场景
-    // (inferContextWindow 的 200k 猜测可能偏小)。
-    const window = state.meta?.contextWindow ?? liftContextWindow(inferContextWindow(model), peak);
-    const pct = ctx > 0 ? Math.min(100, (ctx / window) * 100) : 0;
-    return { window, ctx, pct };
-  }, [state, model]);
+  // 当前上下文用量:公共口径 computeContextInfo(claudeStream 导出;曾与 summarize 各一份
+  // 漂移后收敛)。glm 下最近 assistant 的 usage 是 result 回填的**会话累计**,函数内部与前
+  // 一轮累计差分得本轮真实上下文(长会话不再显示 5m/1m 这类累计值)。
+  const contextInfo = useMemo(
+    () => (state ? computeContextInfo(state, inferContextWindow(model)) : null),
+    [state, model],
+  );
 
   // 合并后的消息流(claude + `!` shell),useMemo 缓存:否则每次按键/每帧 render 都重跑
   // O(n) 归并 + Date.parse,跑过 `!` 命令后是每帧 O(n log n)。
@@ -1852,6 +1896,14 @@ export function ClaudePane(props: ClaudePaneProps) {
                           onRejectTool={handleRejectTool}
                           onFeedback={handleFeedback}
                           onResend={resendText}
+                          approvalActiveId={activeApprovalId}
+                          approvalActiveIdx={
+                            activeApprovalId !== null &&
+                            item.msg.role === "assistant" &&
+                            item.msg.blocks.some((b) => b.type === "tool_use" && b.id === activeApprovalId)
+                              ? approvalFocusIdx
+                              : -1
+                          }
                         />
                       </div>
                     )}
@@ -2054,6 +2106,27 @@ export function ClaudePane(props: ClaudePaneProps) {
                           });
                           return;
                         }
+                        // 待确认权限卡键盘流(见 activeApproval 注释):空输入 + 面板全关时
+                        // ←→ 移动卡上高亮、Enter 触发(空输入 Enter 本就无操作,拦截无损失;
+                        // ←→ 在空文本域里也无光标语义)。
+                        if (
+                          activeApprovalId !== null &&
+                          !input.trim() &&
+                          !slashOpen &&
+                          !atOpen &&
+                          !e.nativeEvent.isComposing
+                        ) {
+                          if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+                            e.preventDefault();
+                            setApprovalFocusIdx((i) => (e.key === "ArrowRight" ? (i + 1) % 4 : (i + 3) % 4));
+                            return;
+                          }
+                          if (e.key === "Enter" && !e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey) {
+                            e.preventDefault();
+                            triggerApprovalAction(approvalFocusIdx);
+                            return;
+                          }
+                        }
                         // ↑/↓ 浏览输入历史(类 shell 命令历史):slash 面板关闭 + 非 IME 组合输入时;
                         // 仅当光标在首行拦 ↑、末行拦 ↓(否则放行让光标在多行文本里正常上下移动)。
                         if (!slashOpen && !atOpen && !e.nativeEvent.isComposing && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
@@ -2126,7 +2199,7 @@ export function ClaudePane(props: ClaudePaneProps) {
                             return;
                           }
                         }
-                        // Shift+Tab 循环切换权限模式(auto/plan/default/yolo)。
+                        // Shift+Tab 循环切换权限模式(acceptEdits/plan/manual/bypassPermissions)。
                         if (e.key === "Tab" && e.shiftKey) {
                           e.preventDefault();
                           cycleMode();
@@ -2201,7 +2274,7 @@ export function ClaudePane(props: ClaudePaneProps) {
                           <span>{t("claudepane.approvalWaiting")}</span>
                         </span>
                       ) : null}
-                      {/* 权限模式:auto/plan/default/yolo,点击切换,Shift+Tab 循环。 */}
+                      {/* 权限模式:acceptEdits/plan/manual/bypassPermissions,点击切换,Shift+Tab 循环。 */}
                       <Popover open={menuMode === "perm"} onOpenChange={(o) => setMenuMode(o ? "perm" : null)}>
                         <PopoverTrigger asChild>
                           <button
@@ -2232,7 +2305,7 @@ export function ClaudePane(props: ClaudePaneProps) {
                             align="start"
                             sideOffset={4}
                             onOpenAutoFocus={(e) => e.preventDefault()}
-                            className="mx-menu w-[230px] max-w-[calc(100vw-2rem)] border border-[var(--mx-border)] bg-[var(--mx-surface)] p-1 shadow-xl"
+                            className="mx-menu w-[330px] max-w-[calc(100vw-2rem)] border border-[var(--mx-border)] bg-[var(--mx-surface)] p-1 shadow-xl"
                           >
                             {PERMISSION_MODES.map((m) => (
                               <button
@@ -2246,7 +2319,7 @@ export function ClaudePane(props: ClaudePaneProps) {
                                     : "text-[var(--mx-muted)] hover:bg-[var(--mx-hover-bg)] hover:text-[var(--mx-text)]"
                                 }`}
                               >
-                                <span className="w-14 shrink-0 font-mono text-[11px] font-semibold">{m.label}</span>
+                                <span className="w-32 shrink-0 whitespace-nowrap font-mono text-[11px] font-semibold">{m.label}</span>
                                 <span className="text-[10px] leading-tight">{m.desc}</span>
                               </button>
                             ))}
@@ -2490,6 +2563,53 @@ export function ClaudePane(props: ClaudePaneProps) {
                 </div>
               </DialogContent>
             </Dialog>
+            {/* /mcp:MCP 服务器列表(~/.claude.json 全局 mcpServers + 本项目 projects[cwd].mcpServers)。 */}
+            <Dialog open={mcpOpen} onOpenChange={(o) => !o && setMcpOpen(false)}>
+              <DialogContent className="w-[420px] max-w-[90vw] px-5 py-4">
+                <DialogTitle className="text-sm font-semibold text-[var(--mx-text)]">{t("claudepane.mcpTitle")}</DialogTitle>
+                <div className="mt-3 space-y-1.5 text-[11px] text-[var(--mx-muted)]">
+                  {mcpEntries === null ? (
+                    <div>{t("common.loading")}</div>
+                  ) : mcpEntries.length === 0 ? (
+                    <div>{t("claudepane.mcpEmpty")}</div>
+                  ) : (
+                    (["global", "project"] as const).map((scope) => {
+                      const items = mcpEntries.filter((e) => e.scope === scope);
+                      if (items.length === 0) return null;
+                      return (
+                        <div key={scope}>
+                          <div className="pb-0.5 text-[10px] font-[600] text-[var(--mx-faint)]">
+                            {scope === "global" ? t("claudepane.mcpGlobal") : t("claudepane.mcpProject")}
+                          </div>
+                          {items.map((e) => (
+                            <div key={`${scope}:${e.name}`} className="flex min-w-0 items-center gap-2 py-0.5">
+                              <span aria-hidden className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--mx-success)]" />
+                              <span className="shrink-0 font-mono text-[var(--mx-text)]">{e.name}</span>
+                              {e.brief && (
+                                <span className="min-w-0 flex-1 truncate font-mono text-[10px] text-[var(--mx-faint)]" title={e.brief}>
+                                  {e.brief}
+                                </span>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      );
+                    })
+                  )}
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="self-start text-[10px] text-[var(--mx-muted)] hover:text-[var(--mx-text)]"
+                    onClick={() => {
+                      void invoke<string>("get_claude_config_path", { target: "mcp" })
+                        .then((p) => void invoke("reveal_in_folder", { path: p }).catch(() => {}));
+                    }}
+                  >
+                    {t("claudepane.mcpReveal")}
+                  </Button>
+                </div>
+              </DialogContent>
+            </Dialog>
             {unsupportedMsg && (
               <BottomToast tone="warning" onClose={() => setUnsupportedMsg(null)}>
                 {unsupportedMsg}
@@ -2592,6 +2712,8 @@ const MessageRow = memo(function MessageRow({
   onRejectTool,
   onFeedback,
   onResend,
+  approvalActiveId,
+  approvalActiveIdx,
 }: {
   message: ClaudeMessage;
   t: (k: string, opts?: Record<string, unknown>) => string;
@@ -2603,6 +2725,10 @@ const MessageRow = memo(function MessageRow({
   onFeedback?: () => void;
   /** user 消息 hover「重新发送」(C6):重跑同一轮。 */
   onResend?: (text: string) => void;
+  /** 键盘流当前待确认 block 的 id(见 ClaudePane activeApproval);null=无待确认。 */
+  approvalActiveId: string | null;
+  /** 本消息内待确认 block 的键盘高亮索引(0-3);消息不含 active block 时恒 -1(memo 稳定)。 */
+  approvalActiveIdx: number;
 }) {
   const time = formatTime(message.timestamp);
 
@@ -2687,13 +2813,18 @@ const MessageRow = memo(function MessageRow({
               key={i}
               block={b}
               t={t}
-              streaming={message.streaming}
+              /* thinking 块仅在仍是消息末块时显示流式思考中——后续 text/tool 块到达即视为
+               * 思考结束,变「已思考」(及时反馈);跨消息拆分(glm 一轮拆多条 assistant)场景
+               * 由 claudeStream result 分支全量置 streaming=false 兜底。text/tool 不受影响。 */
+              streaming={message.streaming && (b.type !== "thinking" || i === message.blocks.length - 1)}
               onApprovePlan={onApprovePlan}
               onReject={onReject}
               resolvedApprovals={resolvedApprovals}
               onApproveTool={onApproveTool}
               onRejectTool={onRejectTool}
               onFeedback={onFeedback}
+              approvalActiveId={approvalActiveId}
+              approvalActiveIdx={approvalActiveIdx}
             />
           ))}
           {message.blocks.length === 0 && message.streaming && (
@@ -2801,6 +2932,8 @@ function BlockView({
   onApproveTool,
   onRejectTool,
   onFeedback,
+  approvalActiveId,
+  approvalActiveIdx,
 }: {
   block: ClaudeBlock;
   t: (k: string) => string;
@@ -2811,6 +2944,10 @@ function BlockView({
   onApproveTool?: (block: Extract<ClaudeBlock, { type: "tool_use" }>, persist: boolean) => void;
   onRejectTool?: (block: Extract<ClaudeBlock, { type: "tool_use" }>) => void;
   onFeedback?: () => void;
+  /** 键盘流当前待确认 block 的 id;null=无待确认(见 ClaudePane activeApproval)。 */
+  approvalActiveId: string | null;
+  /** 本消息内待确认 block 的键盘高亮索引;非 active block 恒 -1(memo 稳定)。 */
+  approvalActiveIdx: number;
 }) {
   if (block.type === "text") {
     if (streaming) {
@@ -2870,6 +3007,7 @@ function BlockView({
       onApproveTool={onApproveTool}
       onRejectTool={onRejectTool}
       onFeedback={onFeedback}
+      approvalActiveIdx={block.id === approvalActiveId ? approvalActiveIdx : -1}
     />
   );
 }
@@ -3127,6 +3265,7 @@ function ToolCard({
   onApproveTool,
   onRejectTool,
   onFeedback,
+  approvalActiveIdx,
 }: {
   block: Extract<ClaudeBlock, { type: "tool_use" }>;
   t: (k: string) => string;
@@ -3136,6 +3275,8 @@ function ToolCard({
   onApproveTool?: (block: Extract<ClaudeBlock, { type: "tool_use" }>, persist: boolean) => void;
   onRejectTool?: (block: Extract<ClaudeBlock, { type: "tool_use" }>) => void;
   onFeedback?: () => void;
+  /** 键盘流高亮索引(本 block 为 active 待确认时 0-3,否则 -1)。 */
+  approvalActiveIdx: number;
 }) {
   const config = getToolConfig(block.name);
   if (config.variant === "plan") {
@@ -3147,6 +3288,7 @@ function ToolCard({
     return (
       <PermissionConfirmCard
         block={block}
+        activeIdx={approvalActiveIdx}
         config={config}
         t={t}
         onApproveOnce={() => onApproveTool?.(block, false)}
@@ -3247,14 +3389,18 @@ function PlanToolView({
  *
  * claude headless 下未授权的敏感操作(写文件/非只读命令)被拒 → 此卡替代静态 denied 药丸,
  * 给用户多选项:批准本次 / 批准且不再问[工具](持久化)/ 拒绝(发消息)/ 反馈修改(聚焦输入框)。
- * 批准 → transport.approveTool(persist) interrupt + --resume --allowedTools 重放;
+ * 批准 → transport.approveToolRun(本地执行 + tool_result 原地回传,busy 自愈);
  * 拒绝 → transport.rejectTool 发拒绝消息;反馈 → 聚焦输入框。
  * 卡片三段:标题行(⚠ + 工具名 + 摘要 + 需批准药丸)+ 次要文本 + 决策条 4 按钮。
+ * 决策条键盘流(焦点留在输入框,不抢焦点):输入框空且无面板时 ←→ 移动高亮(activeIdx 由
+ * ClaudePane 的 approvalFocusIdx 驱动,非 DOM 焦点)、Enter 触发——见 ClaudePane 输入框
+ * onKeyDown 与 activeApproval 派生。按钮本身仍可鼠标点击/Tab 聚焦。
  */
 function PermissionConfirmCard({
   block,
   config,
   t,
+  activeIdx,
   onApproveOnce,
   onApprovePersist,
   onReject,
@@ -3263,6 +3409,8 @@ function PermissionConfirmCard({
   block: Extract<ClaudeBlock, { type: "tool_use" }>;
   config: ToolDisplayConfig;
   t: (k: string) => string;
+  /** 键盘流高亮索引(0-3;-1=非当前控制卡)。 */
+  activeIdx: number;
   onApproveOnce?: () => void;
   onApprovePersist?: () => void;
   onReject?: () => void;
@@ -3271,6 +3419,10 @@ function PermissionConfirmCard({
   const value = config.getValue?.(block.input) ?? "";
   const secondary = config.getSecondary?.(block.input);
   const badge = config.getBadge?.(block.input);
+  const focusRing = (i: number) =>
+    i === activeIdx ? " ring-1 ring-[var(--mx-accent-bright)] ring-offset-0" : "";
+  // Tab 键盘聚焦仍有原生 outline 提示(键盘流 ring 与 DOM 焦点是两套,鼠标点击不显 outline)。
+  const focusVisible = " focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-1 focus-visible:outline-[var(--mx-accent-bright)]";
   return (
     <div className="my-1.5 overflow-hidden rounded-lg border border-[var(--mx-orange-border)] bg-[var(--mx-orange-soft)] shadow-[0_0_0_1px_var(--mx-orange-soft)]">
       {/* 标题行:⚠ + 工具名 + 摘要 + Edit/New badge + 「需手动批准」药丸 */}
@@ -3305,45 +3457,38 @@ function PermissionConfirmCard({
           {secondary}
         </div>
       )}
-      {/* 决策条:批准本次(主) / 批准且不再问(indigo 边框) / 拒绝(ghost) / 反馈修改(faint ghost) */}
-      <div className="flex flex-wrap items-center gap-2 border-t border-[var(--mx-orange-border)] bg-[var(--mx-orange-soft)] px-3 py-2">
+      {/* 决策条:批准本次(主) / 批准且不再问(indigo 边框) / 拒绝(ghost) / 反馈修改(faint ghost)。
+          无图标紧凑档(px-2.5 py-1);键盘流在输入框操作(空输入 ←→/Enter,见组件头注释)。 */}
+      <div className="flex flex-wrap items-center gap-1.5 border-t border-[var(--mx-orange-border)] bg-[var(--mx-orange-soft)] px-3 py-1.5">
         <button
           type="button"
           onClick={onApproveOnce}
-          className="inline-flex items-center gap-1.5 rounded-md bg-[var(--mx-accent-deep)] px-3 py-1.5 text-[11px] font-medium text-white transition-colors hover:bg-[var(--mx-accent-deep)]"
+          className={"inline-flex items-center rounded-md bg-[var(--mx-accent-deep)] px-2.5 py-1 text-[11px] font-medium text-white transition-colors hover:bg-[var(--mx-accent-deep)] focus:outline-none" + focusVisible + focusRing(0)}
         >
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" aria-hidden>
-            <path d="M20 6L9 17l-5-5" />
-          </svg>
           {t("claudepane.approveOnce")}
         </button>
         <button
           type="button"
           onClick={onApprovePersist}
-          className="inline-flex items-center gap-1.5 rounded-md border border-[var(--mx-indigo-border)] bg-transparent px-3 py-1.5 text-[11px] font-medium text-[var(--mx-violet)] transition-colors hover:border-[var(--mx-indigo-border)] hover:bg-[var(--mx-indigo-soft)]"
+          className={"inline-flex items-center rounded-md border border-[var(--mx-indigo-border)] bg-transparent px-2.5 py-1 text-[11px] font-medium text-[var(--mx-violet)] transition-colors hover:border-[var(--mx-indigo-border)] hover:bg-[var(--mx-indigo-soft)] focus:outline-none" + focusVisible + focusRing(1)}
         >
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" aria-hidden>
-            <path d="M20 6L9 17l-5-5" />
-          </svg>
           {t("claudepane.approvePersist")}
         </button>
         <button
           type="button"
           onClick={onReject}
-          className="inline-flex items-center gap-1.5 rounded-md border border-[var(--mx-border-strong)] bg-transparent px-3 py-1.5 text-[11px] font-medium text-[var(--mx-muted)] transition-colors hover:border-[var(--mx-border-strong)] hover:bg-[var(--mx-hover-bg)] hover:text-[var(--mx-text)]"
+          className={"inline-flex items-center rounded-md border border-[var(--mx-border-strong)] bg-transparent px-2.5 py-1 text-[11px] font-medium text-[var(--mx-muted)] transition-colors hover:border-[var(--mx-border-strong)] hover:bg-[var(--mx-hover-bg)] hover:text-[var(--mx-text)] focus:outline-none" + focusVisible + focusRing(2)}
         >
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" aria-hidden>
-            <path d="M18 6L6 18M6 6l12 12" />
-          </svg>
           {t("claudepane.reject")}
         </button>
         <button
           type="button"
           onClick={onFeedback}
-          className="inline-flex items-center gap-1.5 rounded-md border border-[var(--mx-border-strong)] bg-transparent px-3 py-1.5 text-[11px] font-medium text-[var(--mx-faint)] transition-colors hover:border-[var(--mx-border-strong)] hover:bg-[var(--mx-border-soft)] hover:text-[var(--mx-muted)]"
+          className={"inline-flex items-center rounded-md border border-[var(--mx-border-strong)] bg-transparent px-2.5 py-1 text-[11px] font-medium text-[var(--mx-faint)] transition-colors hover:border-[var(--mx-border-strong)] hover:bg-[var(--mx-border-soft)] hover:text-[var(--mx-muted)] focus:outline-none" + focusVisible + focusRing(3)}
         >
           {t("claudepane.feedback")}
         </button>
+        <span className="ml-auto shrink-0 text-[10px] text-[var(--mx-faint)]">{t("claudepane.approvalKeysHint")}</span>
       </div>
     </div>
   );
@@ -3949,6 +4094,53 @@ function DefaultToolView({
       )}
     </div>
   );
+}
+
+/**
+ * 解析 ~/.claude.json(/mcp 弹窗):顶层全局 `mcpServers` + `projects[cwd].mcpServers`
+ * (cwd = 当前会话工作区)。条目摘要:HTTP/SSE 型显 url,stdio 型显 command + 前两个 args。
+ * JSON 不合法(被 read_file 512KB 截断/损坏)返回 [] 由空态文案兜底。
+ */
+function parseClaudeMcpServers(
+  raw: string,
+  cwd: string | undefined,
+): { scope: "global" | "project"; name: string; brief: string }[] {
+  let cfg: unknown;
+  try {
+    cfg = JSON.parse(raw);
+  } catch {
+    return [];
+  }
+  if (!cfg || typeof cfg !== "object") return [];
+  const root = cfg as Record<string, unknown>;
+  const out: { scope: "global" | "project"; name: string; brief: string }[] = [];
+  const push = (obj: unknown, scope: "global" | "project") => {
+    if (!obj || typeof obj !== "object") return;
+    for (const [name, v] of Object.entries(obj)) {
+      const s = (v && typeof v === "object" ? v : {}) as Record<string, unknown>;
+      const brief =
+        typeof s.url === "string" && s.url
+          ? `url: ${s.url}`
+          : typeof s.command === "string" && s.command
+            ? [
+                s.command,
+                ...(Array.isArray(s.args) ? s.args.slice(0, 2).map(String) : []),
+              ].join(" ")
+            : "";
+      out.push({ scope, name, brief });
+    }
+  };
+  push(root.mcpServers, "global");
+  if (cwd) {
+    const projects = root.projects;
+    if (projects && typeof projects === "object") {
+      const proj = (projects as Record<string, unknown>)[cwd];
+      if (proj && typeof proj === "object") {
+        push((proj as Record<string, unknown>).mcpServers, "project");
+      }
+    }
+  }
+  return out;
 }
 
 function formatInput(input: unknown): string {

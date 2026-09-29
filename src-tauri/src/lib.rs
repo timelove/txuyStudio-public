@@ -27,8 +27,8 @@ use shell_run::commands::{kill_shell_command, run_shell_command};
 use shell_run::ShellRunRegistry;
 use state::commands::{
     add_claude_allowed_tool, close_project, hydrate_window, open_project, open_recent_project,
-    remove_recent_project, save_pane_tree, save_window_bounds, set_active_project,
-    set_codex_sandbox, set_locale, set_terminal_font_size, set_theme,
+    remove_recent_project, save_pane_tree, save_window_bounds, set_active_project, set_locale,
+    set_terminal_font_size, set_theme,
 };
 use system::commands::{
     check_commands_installed, check_dev_environment, delete_ai_cli_session, get_ai_cli_session_messages,
@@ -388,7 +388,6 @@ pub fn run() {
             set_locale,
             set_terminal_font_size,
             set_theme,
-            set_codex_sandbox,
             save_window_bounds,
             save_pane_tree,
             add_claude_allowed_tool,

@@ -49,8 +49,6 @@ export type BackendAppSnapshot = {
   terminalFontSize?: number;
   /** 界面主题 id;undefined/未设 = 默认(midnight)。 */
   themeId?: string | null;
-  /** Codex 会话默认 sandbox 档位(codex exec -s);undefined/未设 = 前端默认(workspace-write)。 */
-  codexSandbox?: string | null;
   /** 最近项目历史(关闭项目/工作台窗口关窗时后端归档;+ 菜单「历史项目」数据源)。 */
   recentProjects?: ProjectRecord[];
 };

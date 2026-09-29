@@ -143,6 +143,7 @@ const zh = {
     midnight: "午夜蓝",
     "one-dark": "One Dark",
     intellijLight: "IntelliJ Light",
+    intellijDark: "IntelliJ Dark",
   },
   settings: {
     title: "设置",
@@ -195,10 +196,6 @@ const zh = {
       decrease: "调小",
       increase: "调大",
       reset: "重置",
-    },
-    codexSandbox: {
-      title: "Codex 沙箱",
-      hint: "新建 Codex 会话的默认策略;已开会话不受影响,可在其状态栏单独切换",
     },
     bg: {
       title: "背景图",
@@ -312,6 +309,7 @@ const zh = {
     approveOnce: "批准本次",
     approvePersist: "批准且不再问",
     feedback: "反馈修改",
+    approvalKeysHint: "←→ 选择 · Enter 确认",
     approvalWaiting: "等待你的批准",
     approvalTitle: "需要你的批准",
     approveProceed: "已批准,请继续执行该操作",
@@ -342,6 +340,11 @@ const zh = {
     modelApply: "应用",
     rewindTitle: "回滚到某条消息",
     rewindHint: "选一条历史消息 → 清空会话 + 回填输入框,基于它重开",
+    mcpTitle: "MCP 服务器",
+    mcpEmpty: "未读取到 MCP 配置(.claude.json 无 mcpServers,或文件过大被截断)",
+    mcpGlobal: "全局",
+    mcpProject: "本项目",
+    mcpReveal: "在资源管理器定位 .claude.json",
   },
   // codexpane(自渲染 codex 对话面板):与 claudepane 平行,codex 特有文案
   // (无审批/压缩/重试文案;含 sandbox 拦截提示)。`!` 命令文案复用 claudepane.shell*。
@@ -379,6 +382,10 @@ const zh = {
     modelCurrent: "当前",
     modelEmpty: "未读取到 codex 配置中的模型",
     reasoningTitle: "推理强度(reasoning)",
+    mcpTitle: "MCP 服务器",
+    mcpEmpty: "config.toml 中未配置 [mcp_servers]",
+    mcpPluginNote: "插件安装的 MCP(如 openviking-memory)由 codex 自动加载,不写入 config.toml",
+    mcpReveal: "在资源管理器定位 config.toml",
   },
   // 快捷键分组与描述(域常量 key 化后,SettingsModal 渲染时 t(item.title)/t(item.desc))
   shortcut: {

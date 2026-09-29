@@ -6,7 +6,6 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { getUpdaterSnapshot, publishUpdater, type UpdaterSnapshot } from "../domain/appUpdater";
-import { SANDBOX_MODES } from "../domain/codexSandbox";
 import { SHORTCUT_GROUPS } from "../domain/shortcuts";
 import { useI18n } from "../i18n/I18nProvider";
 import { SUPPORTED_LOCALES, type Locale } from "../i18n";
@@ -243,7 +242,7 @@ type SettingsModalProps = {
 export function SettingsModal({ open, onClose, initialTab }: SettingsModalProps) {
   const { t } = useTranslation();
   const { locale, changeLanguage } = useI18n();
-  const { fontSize, changeFontSize, codexSandbox, changeCodexSandbox, bgSetting, changeBgSetting } = useSettings();
+  const { fontSize, changeFontSize, bgSetting, changeBgSetting } = useSettings();
   const { themeId, changeTheme, themes } = useTheme();
 
   return (
@@ -435,31 +434,6 @@ export function SettingsModal({ open, onClose, initialTab }: SettingsModalProps)
                   </>
                 )}
                 <div className="mt-1.5 text-[10px] text-[var(--mx-faint)]">{t("settings.bg.hint")}</div>
-              </section>
-
-              {/* Codex 沙箱分区:默认档三选一(ToggleGroup,与 CodexPane 状态栏同源 SANDBOX_MODES)。
-                  只影响新建 codex 会话的初始 -s;已开会话不跟随(其状态栏单独切)。 */}
-              <section className="mt-4 border-t border-[var(--mx-border)] pt-3">
-                <div className="mb-1 text-[10px] uppercase tracking-wide text-[var(--mx-faint)]">{t("settings.codexSandbox.title")}</div>
-                <ToggleGroup
-                  type="single"
-                  value={codexSandbox}
-                  onValueChange={(v) => {
-                    // type="single" 点中已选中项回传 "",忽略(必有选中档)。
-                    if (v) changeCodexSandbox(v);
-                  }}
-                >
-                  {SANDBOX_MODES.map((m) => (
-                    <ToggleGroupItem key={m.id} value={m.id}>
-                      {m.label}
-                    </ToggleGroupItem>
-                  ))}
-                </ToggleGroup>
-                {/* 当前选中档的中文描述(随选择动态变),让用户知道每档含义而不只看短标签。 */}
-                <div className="mt-1.5 text-[10px] text-[var(--mx-faint)]">
-                  {t(SANDBOX_MODES.find((m) => m.id === codexSandbox)?.desc ?? "")}
-                </div>
-                <div className="mt-1.5 text-[10px] text-[var(--mx-faint)]">{t("settings.codexSandbox.hint")}</div>
               </section>
             </TabsContent>
 

@@ -463,7 +463,7 @@ export function SessionBrowserPane({ paneId, focused, sessions, activeTabId, onF
                       >
                         <span className="text-[8px] leading-none text-[var(--mx-faint)]">{collapsed ? "▶" : "▼"}</span>
                         <span className="truncate">{t(group.label)}</span>
-                        {isCurrent && <span className="mx-icon-tile shrink-0 bg-[var(--mx-accent)] px-1 text-[8px] text-[var(--mx-editor-bg)]">{t("session.current")}</span>}
+                        {isCurrent && <span className="mx-icon-tile shrink-0 bg-[var(--mx-accent)] px-1 text-[8px] text-(color:--mx-accent-contrast)">{t("session.current")}</span>}
                         <span className="ml-auto shrink-0 tabular-nums text-[var(--mx-faint)]">{group.sessions.length}</span>
                         {/* hover:删除整组(小图标,与组会话数同行)。 */}
                         {!confirmingGroup && (

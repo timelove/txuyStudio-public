@@ -128,10 +128,6 @@ pub struct AppSnapshot {
     /// 界面主题 id("midnight"/"one-dark")。None = 默认(midnight)。
     /// Option + serde default 兼容旧 state.json 缺字段,无需迁移。
     pub theme_id: Option<String>,
-    /// Codex 会话默认 sandbox 档位(codex exec -s:"read-only"/"workspace-write"/
-    /// "danger-full-access")。None = 前端默认(workspace-write)。仅影响新建 codex 会话,
-    /// 已开会话在其状态栏单独切换。Option + serde default 兼容旧 state.json,无需迁移。
-    pub codex_sandbox: Option<String>,
     /// 最近项目历史(关闭/工作台窗口关窗时归档的项目记录,rootPath 去重、最新在前)。
     /// + 菜单「历史项目」数据源:点击重开(整份记录原样移回 projects,布局/claude 会话
     /// 映射保留),✕ 删除。空 Vec 不写盘,旧 state.json 缺字段 -> default 空,零迁移。
@@ -161,7 +157,7 @@ impl AppState {
     }
 }
 
-/// 默认 pane tree:**AI 主体**——横向分屏 Claude(claudepane)占 60% + PowerShell 占 40%。
+/// 默认 pane tree:**AI 主体**——横向分屏 Claude(claudepane)占 55% + PowerShell 占 45%。
 ///
 /// 2026-09-22 依用户定位「用这个工具就是要用 AI」:新项目打开即 AI 为主角、终端为第二表面,
 /// 不再一进来是个空 shell。ratio 可拖拽分隔线或 AI header 的 ◱ 按钮调整。前端运行时树全部
@@ -170,7 +166,7 @@ pub fn default_pane_tree() -> PaneNode {
     PaneNode::Split {
         id: "root".to_string(),
         direction: SplitDirection::Horizontal,
-        ratio: 0.6,
+        ratio: 0.55,
         children: vec![
             PaneNode::Pane {
                 id: "ai-1".to_string(),

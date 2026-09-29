@@ -516,7 +516,12 @@ export class ClaudeTransport {
   /**
    * 把工具结果作为 stream-json tool_result user 消息写 stdin(批准/拒绝被拒工具的原地回传)。
    * claude 像收到正常工具结果一样续跑下一 turn(claude cli 交互批准的同语义),**不插对话
-   * 消息、不 restart**。置 running(新 turn 开始);失败统一 handleEvent(terminated)。
+   * 消息、不 restart**。置 running(新 turn 开始)。
+   *
+   * **busy 自愈**:glm 被拒后常不结束 turn(继续重试别的工具),确认卡在 Running 中弹出,
+   * 此时写 stdin 撞后端 busy 检查直接 Err。不能把它当 terminated(进程没死,标死会连锁
+   * 误 restart + 注入丢失)——改为 kill 当前轮 + `--resume` 重启(tool_use 仍在上下文,
+   * tool_result 可配对)后重试一次;再失败才 handleEvent(terminated)。
    */
   async sendToolResult(toolUseId: string, content: string, isError: boolean): Promise<void> {
     if (this.sendingPromise) {
@@ -529,14 +534,26 @@ export class ClaudeTransport {
     this.state = { ...this.state, status: "running", terminatedReason: null };
     this.emit();
     this.sendingPromise = (async () => {
-      try {
-        await this.ensureListening();
-        await invoke("send_claude_message", {
+      const write = () =>
+        invoke("send_claude_message", {
           projectId: this.projectId,
           tabId: this.tabId,
           prompt: "",
           toolResult: { toolUseId, content, isError },
         });
+      try {
+        await this.ensureListening();
+        try {
+          await write();
+        } catch (err) {
+          const msg = typeof err === "string" ? err : String(err);
+          if (!msg.includes("busy")) throw err;
+          // busy:被拒后 claude 还在跑。kill + --resume 重启后重试(见方法注释)。
+          console.warn("[ClaudeTransport] sendToolResult busy, kill+resume+retry:", msg);
+          await this.interrupt();
+          await this.ensureStarted();
+          await write();
+        }
       } catch (err) {
         this.handleEvent({
           kind: "terminated",
@@ -624,6 +641,9 @@ export class ClaudeTransport {
         projectId: this.projectId,
         tabId: this.tabId,
       });
+      // kill invoke 返回即后端已 kill:同步置 dead,防竞态(interrupted 事件异步到达前,
+      // 紧随的 ensureStarted 误判进程仍活直接 return → 写入丢失)。
+      this.dead = true;
     } catch (err) {
       console.warn("[ClaudeTransport] interrupt failed:", err);
     }
