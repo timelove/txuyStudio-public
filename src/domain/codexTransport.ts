@@ -55,8 +55,8 @@ export class CodexTransport {
   private selectedModelAlias: string | null = null;
   /** 期望 reasoning effort(codex -c model_reasoning_effort)。undefined=不传(模型默认档)。 */
   private reasoningEffort: string | undefined = undefined;
-  /** sandbox 策略(codex -s)。初始 = 构造传入的全局默认档(设置面板可改,持久化 state.json)。 */
-  private sandbox: string;
+  /** sandbox 策略(codex -s)。初始 = DEFAULT_CODEX_SANDBOX(每 tab 状态栏可切,全局默认档设置已移除)。 */
+  private sandbox: string = DEFAULT_CODEX_SANDBOX;
   /** 首轮 --resume 的 session_id(用户从 SessionBrowser 恢复历史会话时注入,消费后清空)。 */
   private resumeSessionId: string | null = null;
   /** newSession() 后置 true:下次 send 传 newSession=true(后端不带 resume、开新会话)。 */
@@ -64,12 +64,11 @@ export class CodexTransport {
   /** 注册到 codexStatusRegistry 的 key(空串=不注册,正常由 AppShell 传入)。 */
   private readonly registryKey: string;
 
-  constructor(projectId: string, tabId: string, cwd?: string | null, registryKey = "", defaultSandbox?: string) {
+  constructor(projectId: string, tabId: string, cwd?: string | null, registryKey = "") {
     this.projectId = projectId;
     this.tabId = tabId;
     this.cwd = cwd ?? null;
     this.registryKey = registryKey;
-    this.sandbox = defaultSandbox ?? DEFAULT_CODEX_SANDBOX;
     if (registryKey) codexStatusRegistry.register(registryKey, projectId, tabId);
   }
 

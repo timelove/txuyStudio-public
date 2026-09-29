@@ -65,8 +65,6 @@ export default function App() {
   const [terminalFontSize, setTerminalFontSize] = useState<number | undefined>(undefined);
   /** 后端持久化的主题 id(hydrate 后传入 ThemeProvider 作权威初始值;undefined -> 默认 midnight)。 */
   const [themeId, setThemeId] = useState<string | null | undefined>(undefined);
-  /** 后端持久化的 Codex 默认 sandbox 档位(hydrate 后传入 SettingsProvider;undefined -> 默认档)。 */
-  const [codexSandbox, setCodexSandbox] = useState<string | null | undefined>(undefined);
   /** 最近项目历史(+ 菜单「历史项目」数据源;关闭项目/工作台关窗时后端归档,随快照回传)。 */
   const [recentProjects, setRecentProjects] = useState<ProjectRecord[]>([]);
 
@@ -108,7 +106,6 @@ export default function App() {
         setLocale(snap.locale ?? null);
         setTerminalFontSize(snap.terminalFontSize);
         setThemeId(snap.themeId ?? null);
-        setCodexSandbox(snap.codexSandbox ?? null);
         setRecentProjects(snap.recentProjects ?? []);
         setLoadState("ready");
       })
@@ -305,7 +302,7 @@ export default function App() {
   return (
     <I18nProvider initialLocale={locale}>
       <ThemeProvider initialThemeId={themeId}>
-      <SettingsProvider initialFontSize={terminalFontSize} initialCodexSandbox={codexSandbox ?? undefined}>
+      <SettingsProvider initialFontSize={terminalFontSize}>
         <AppShell
           projects={projects}
           activeProjectId={activeProjectId}

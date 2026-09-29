@@ -197,10 +197,6 @@ const zh = {
       increase: "调大",
       reset: "重置",
     },
-    codexSandbox: {
-      title: "Codex 沙箱",
-      hint: "新建 Codex 会话的默认策略;已开会话不受影响,可在其状态栏单独切换",
-    },
     bg: {
       title: "背景图",
       choose: "选择图片…",
@@ -313,6 +309,7 @@ const zh = {
     approveOnce: "批准本次",
     approvePersist: "批准且不再问",
     feedback: "反馈修改",
+    approvalKeysHint: "←→ 选择 · Enter 确认",
     approvalWaiting: "等待你的批准",
     approvalTitle: "需要你的批准",
     approveProceed: "已批准,请继续执行该操作",

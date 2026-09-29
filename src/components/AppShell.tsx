@@ -119,9 +119,8 @@ export function AppShell({
   onNewWindow,
 }: AppShellProps) {
   const { t } = useTranslation();
-  // 全局设置:Codex 默认 sandbox 档位(新建 codex 会话的初始 -s;已开会话不跟随,其状态栏单独切)
-  // + 全局 fontSize(驱动 chrome 等比缩放,见下方 effect)。
-  const { codexSandbox, fontSize, bgSetting } = useSettings();
+  // 全局设置:全局 fontSize(驱动 chrome 等比缩放,见下方 effect)+ 背景图。
+  const { fontSize, bgSetting } = useSettings();
 
   // chrome 等比缩放:全局 fontSize(默认 14 为 1.0)驱动顶栏/状态栏/侧栏/pane 头/tab/chip 的
   // 高宽与 chrome 字号。在 documentElement 上覆写 CSS 变量:inline style 优先级高于 app.css
@@ -379,7 +378,6 @@ export function AppShell({
   // codex transport 池取/建:同 triple key 复用同一实例。一个 codexpane tab = 一个 CodexTransport。
   // 与 getClaudeTransport 同构:传项目根作 cwd(-C 参数)、registryKey 上报 codexStatusRegistry、
   // 消费 pendingResume(codex 分支,SessionBrowser 恢复历史会话 -> setResumeSessionId)。
-  // 构造传全局默认 sandbox 档(设置面板可改):只影响新建实例,已建的不跟随。
   const getCodexTransport = useCallback(
     (projectId: string, paneId: string, tabId: string): CodexTransport => {
       const pool = codexTransportsRef.current;
@@ -389,7 +387,7 @@ export function AppShell({
         const rootPath = projects.find((p) => p.id === projectId)?.rootPath;
         const pending = pendingResumeRef.current.get(key);
         const cwd = pending?.provider === "codex" ? pending.cwd : rootPath;
-        t = new CodexTransport(projectId, tabId, cwd, key, codexSandbox);
+        t = new CodexTransport(projectId, tabId, cwd, key);
         t.setRegistryPaneId(paneId);
         if (pending?.provider === "codex") {
           t.setResumeSessionId(pending.sessionId);
@@ -401,7 +399,7 @@ export function AppShell({
       }
       return t;
     },
-    [projects, codexSandbox],
+    [projects],
   );
 
   /** 把某项目的新 tree 写入本地 + 落盘后端。 */

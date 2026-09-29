@@ -197,10 +197,6 @@ const en = {
       increase: "Increase",
       reset: "Reset",
     },
-    codexSandbox: {
-      title: "Codex sandbox",
-      hint: "Default policy for new Codex sessions; existing sessions keep their own and can be switched in their status bar",
-    },
     bg: {
       title: "Background image",
       choose: "Choose image…",
@@ -312,6 +308,7 @@ const en = {
     approveOnce: "Approve once",
     approvePersist: "Approve & don't ask again",
     feedback: "Revise (feedback)",
+    approvalKeysHint: "←→ select · Enter confirm",
     approvalWaiting: "Awaiting your approval",
     approvalTitle: "Approval needed",
     approveProceed: "Approved, please continue",

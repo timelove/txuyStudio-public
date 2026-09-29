@@ -402,31 +402,6 @@ pub async fn set_theme(
     Ok(snapshot)
 }
 
-/// 设置 Codex 会话默认 sandbox 档位(codex exec -s),持久化到 state.json。
-///
-/// 仿 [[set_theme]] 三段式:短锁改 `codex_sandbox` + 克隆 + 释放锁 + save + 返回。
-/// 不做白名单校验(前端只给已知档位;后端仅透传存储)。仅影响新建 codex 会话的初始档,
-/// 已开会话不跟随(transport 内部档位独立,状态栏可单独切)。
-#[tauri::command]
-pub async fn set_codex_sandbox(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    sandbox: String,
-) -> Result<AppSnapshot, String> {
-    let snapshot = {
-        let mut snap = state.inner.lock().map_err(|e| e.to_string())?;
-        snap.codex_sandbox = Some(sandbox.clone());
-        snap.clone()
-    };
-
-    log::info!("set_codex_sandbox: sandbox = {sandbox}");
-    if let Err(e) = persistence::save(&app, &snapshot) {
-        log::error!("set_codex_sandbox: persist failed: {e}");
-        return Err(e);
-    }
-    Ok(snapshot)
-}
-
 /// 持久化主窗口大小/位置。
 ///
 /// 阶段2 仅存 main 窗口 bounds;`windowLabel` 非 "main" 时忽略,

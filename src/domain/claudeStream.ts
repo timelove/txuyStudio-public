@@ -153,6 +153,10 @@ export type ClaudeMessage = {
   streaming: boolean;
   /** assistant 消息的 token 用量(从 message.usage 提取,用于行尾 token 显示)。 */
   usage?: ClaudeUsage;
+  /** usage 口径标记:true = result 回填的**会话累计**(claude code result.usage 官方语义是
+   *  多轮之和;glm 流式 usage 恒 {0,0} 只能靠它回填),当前上下文须与前一轮累计差分;
+   *  undefined = 流式 assistant 快照(本轮值,直接用)。 */
+  usageCumulative?: boolean;
   /** 本轮耗时(result 事件回填,assistant 末行显示 ⏱ 时长)。 */
   durationMs?: number;
 };
@@ -620,10 +624,14 @@ export function applyEvent(state: ClaudeStreamState, payload: ClaudeEventPayload
         const prev = next.messages[i];
         if (prev.role !== "assistant") continue;
         if (!finalizedLast) {
+          const usedStream = hasUsage(prev.usage);
           next.messages[i] = {
             ...prev,
             streaming: false,
-            usage: hasUsage(prev.usage) ? prev.usage : (payload.usage ?? prev.usage),
+            usage: usedStream ? prev.usage : (payload.usage ?? prev.usage),
+            // 累计口径标记(见 ClaudeMessage.usageCumulative):result 回填的值是会话累计,
+            // ctx 显示须差分;流式快照(usedStream)保持 undefined。
+            usageCumulative: usedStream ? undefined : (payload.usage ? true : undefined),
             // 回填本轮耗时(assistant 末行显示 ⏱)。durationMs 仅 result 有,流式中不显示。
             durationMs: payload.durationMs ?? prev.durationMs,
           };
@@ -952,37 +960,57 @@ export function inferContextWindow(model?: string): number {
 }
 
 /**
- * 当前上下文占用%(0-100):取最近一次 compact boundary 后、最近一条**有真实用量**的
- * assistant message 的 usage(totalInputTokens 兼容互斥/重叠网关语义)
- * / contextWindow。glm 流式中 assistant usage 恒全 0 对象(非 null),须 hasUsage 过滤,
- * 否则轮次进行中占比跳回 0。窗口被实测 ctx 突破时动态抬升(liftContextWindow;
- * 峰值只在当前压缩段内统计,跨 compact 不累计——否则窗口单调爬升)。
+ * 当前上下文用量(公共口径,ctx 显示/占用%共用;曾双份实现漂移后收敛于此):
+ * 取最近一次 compact boundary 后、最近一条**有真实用量**的 assistant message 的 usage。
+ * - 流式快照(usageCumulative undefined,官方语义)= 本轮值,直接用;
+ * - result 回填的**会话累计**(usageCumulative=true;glm 流式恒 {0,0} 只能靠它)→ 与前一条
+ *   累计回填差分得本轮(≈ 当前上下文);无前一条(会话首轮)= 累计本身;差分非正
+ *   (回放数据混入口径异常)回退累计值(宁可高估不误 0)。
+ * totalInputTokens 兼容互斥/重叠网关语义;glm 全 0 流式 usage 由 hasUsage 过滤。
+ * window:meta.contextWindow(result.modelUsage 权威值)优先不抬升;兜底 infer + ctx 峰值
+ * 动态抬升(liftContextWindow;boundary 停扫保证不跨 compact 累计)。
  */
-function computeCtxPct(state: ClaudeStreamState): number | undefined {
-  let usage: ClaudeUsage | undefined;
-  let peak = 0;
+export function computeContextInfo(
+  state: ClaudeStreamState,
+  fallbackWindow: number,
+): { ctx: number; window: number; pct: number } | null {
+  const used = (u: ClaudeUsage) =>
+    totalInputTokens(u.input_tokens ?? 0, u.cache_creation_input_tokens ?? 0, u.cache_read_input_tokens ?? 0);
+  // 最近一条有真实用量的 assistant(boundary 停扫:快照口径下压缩前的旧快照不代表当前
+  // 上下文,段内无 usage 即无数据)。
+  let last: ClaudeMessage | undefined;
   for (let i = state.messages.length - 1; i >= 0; i--) {
     const m = state.messages[i];
     if (m.role === "compact" && m.compactKind === "boundary") break;
-    if (m.role !== "assistant" || !hasUsage(m.usage)) continue;
-    const ctx = totalInputTokens(
-      m.usage!.input_tokens ?? 0,
-      m.usage!.cache_creation_input_tokens ?? 0,
-      m.usage!.cache_read_input_tokens ?? 0,
-    );
-    peak = Math.max(peak, ctx);
-    if (!usage) usage = m.usage;
+    if (m.role === "assistant" && hasUsage(m.usage)) {
+      last = m;
+      break;
+    }
   }
-  if (!usage) return undefined;
-  const ctx = totalInputTokens(
-    usage.input_tokens ?? 0,
-    usage.cache_creation_input_tokens ?? 0,
-    usage.cache_read_input_tokens ?? 0,
-  );
-  if (ctx <= 0) return undefined;
-  // 权威窗口(meta.contextWindow,result.modelUsage 回填)不抬升;仅兜底猜测时按峰值抬升。
-  const window = state.meta?.contextWindow ?? liftContextWindow(inferContextWindow(state.meta?.model), peak);
-  return Math.min(100, (ctx / window) * 100);
+  if (!last) return null;
+  const lastUsed = used(last.usage!);
+  let ctx = lastUsed;
+  if (last.usageCumulative) {
+    // 累计口径差分:锚点 = 前一条累计回填(**跨 boundary 找**——claude 计费的累计值序列
+    // 跨 compact 单调连续,compact 后首轮 = cum_after - cum_before 恰是压缩后的真实输入;
+    // 若被 boundary 切断,compact 后段内首条会退回全程累计高估)。锚点非累计(回放注入的
+    // 快照等口径混入)时放弃差分,回退累计值(宁可高估不误 0)。
+    let prev: ClaudeMessage | undefined;
+    for (let i = state.messages.indexOf(last) - 1; i >= 0; i--) {
+      const m = state.messages[i];
+      if (m.role === "assistant" && m.usageCumulative && hasUsage(m.usage)) {
+        prev = m;
+        break;
+      }
+    }
+    if (prev) {
+      const diff = lastUsed - used(prev.usage!);
+      if (diff > 0) ctx = diff;
+    }
+  }
+  if (ctx <= 0) return null;
+  const window = state.meta?.contextWindow ?? liftContextWindow(fallbackWindow, ctx);
+  return { ctx, window, pct: Math.min(100, (ctx / window) * 100) };
 }
 
 export function summarize(
@@ -991,7 +1019,7 @@ export function summarize(
   resolvedApprovals?: Set<string>,
 ): ClaudeSessionSummary {
   // 上下文占用/effort/model 与语义态正交,各分支均带(状态变 error 时 ctx% 不消失)。
-  const ctxPct = computeCtxPct(state);
+  const ctxPct = computeContextInfo(state, inferContextWindow(state.meta.model))?.pct;
   const extra = { ctxPct, model: state.meta.model, effort: state.meta.effort };
 
   if (state.status === "error") return { kind: "error", active: false, ...extra };

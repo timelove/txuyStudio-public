@@ -88,7 +88,7 @@ const FALLBACK_SLASH_CMDS: SlashCmd[] = [
 
 /**
  * codex sandbox 策略(codex exec -s),状态栏可切换 + Shift+Tab 循环。
- * 档位表收敛到 domain/codexSandbox.ts(与设置面板的全局默认档共用,单一真源)。
+ * 档位表收敛到 domain/codexSandbox.ts(单一真源;全局默认档设置已移除,仅状态栏每 tab 切换)。
  */
 
 /** 兜底 reasoning 档位(catalog 无当前 model 的 supported_reasoning_levels 时用)。 */
@@ -1543,7 +1543,7 @@ export function CodexPane(props: CodexPaneProps) {
                             align="start"
                             sideOffset={4}
                             onOpenAutoFocus={(e) => e.preventDefault()}
-                            className="mx-menu w-[230px] max-w-[calc(100vw-2rem)] border border-[var(--mx-border)] bg-[var(--mx-surface)] p-1 shadow-xl"
+                            className="mx-menu w-[340px] max-w-[calc(100vw-2rem)] border border-[var(--mx-border)] bg-[var(--mx-surface)] p-1 shadow-xl"
                           >
                             {SANDBOX_MODES.map((m) => (
                               <button
@@ -1557,7 +1557,7 @@ export function CodexPane(props: CodexPaneProps) {
                                     : "text-[var(--mx-muted)] hover:bg-[var(--mx-hover-bg)] hover:text-[var(--mx-text)]"
                                 }`}
                               >
-                                <span className="w-14 shrink-0 font-mono text-[11px] font-semibold">{m.label}</span>
+                                <span className="w-36 shrink-0 whitespace-nowrap font-mono text-[11px] font-semibold">{m.label}</span>
                                 <span className="text-[10px] leading-tight">{t(m.desc)}</span>
                               </button>
                             ))}
