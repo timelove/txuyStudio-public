@@ -606,14 +606,20 @@ export function applyEvent(state: ClaudeStreamState, payload: ClaudeEventPayload
         const blocks = finalizePendingTools(m.blocks);
         if (blocks !== m.blocks) next.messages[i] = { ...m, blocks };
       }
-      // 最近 assistant 消息置 streaming=false + 回填本轮耗时。**usage 优先保留流式快照**:
+      // 本轮全部 assistant 消息置 streaming=false + 最近一条回填耗时。**全量扫,不能只扫
+      // 末条**:glm 等代理同轮拆多条 assistant 消息(thinking 段与 text/tool 段分属不同
+      // message.id),只置末条会让前面消息的 ThinkingBlock 永显「思考中」不落「已思考」
+      // (与上方 finalizePendingTools 全量扫同因同修)。**usage 优先保留流式快照**:
       // claude code 的 result.usage 官方语义是**会话累计**(多轮之和),而流式 assistant 事件
       // 的 usage 是本轮快照(jsonl 实测 98% 带真实值,互斥语义)——用累计值覆盖会让 ctx/行尾
       // token 显示成「会话累计」(长会话轻松超 1m,模型真实窗口不可能超限,显示必错)。
       // 仅当流式恒全 0(旧版 glm)时才退回 result 值兜底(hasUsage 判定)。
+      // 引用保持:非 streaming 消息不换对象,避免每轮结束整树 reconcile(长会话大帧)。
+      let finalizedLast = false;
       for (let i = next.messages.length - 1; i >= 0; i--) {
-        if (next.messages[i].role === "assistant") {
-          const prev = next.messages[i];
+        const prev = next.messages[i];
+        if (prev.role !== "assistant") continue;
+        if (!finalizedLast) {
           next.messages[i] = {
             ...prev,
             streaming: false,
@@ -621,8 +627,10 @@ export function applyEvent(state: ClaudeStreamState, payload: ClaudeEventPayload
             // 回填本轮耗时(assistant 末行显示 ⏱)。durationMs 仅 result 有,流式中不显示。
             durationMs: payload.durationMs ?? prev.durationMs,
           };
-          break;
+          finalizedLast = true;
+          continue;
         }
+        if (prev.streaming) next.messages[i] = { ...prev, streaming: false };
       }
       return next;
     }

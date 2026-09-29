@@ -601,6 +601,11 @@ export function ClaudePane(props: ClaudePaneProps) {
   // slash 命令逐个触发的弹窗状态(/config /help /cost)+ 不支持命令的内联提示。
   const [configOpen, setConfigOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
+  /** /mcp 弹窗:~/.claude.json 解析的 MCP 服务器(全局 + 本项目;null=加载中)。 */
+  const [mcpOpen, setMcpOpen] = useState(false);
+  const [mcpEntries, setMcpEntries] = useState<
+    { scope: "global" | "project"; name: string; brief: string }[] | null
+  >(null);
   const [costOpen, setCostOpen] = useState(false);
   const [unsupportedMsg, setUnsupportedMsg] = useState<string | null>(null);
   /** API 重试用尽 toast:重试序列从有(retry≠null)变无(null)且最终 status=error 时弹一次。
@@ -983,13 +988,23 @@ export function ClaudePane(props: ClaudePaneProps) {
           setCostOpen(true);
           break;
         case "agents":
-        case "skills":
-        case "mcp": {
-          // 在资源管理器定位 claude 配置位置(agents/skills 目录 / mcp 的 .claude.json),
-          // 用户自行决定用什么打开(后端 reveal_in_folder)。
+        case "skills": {
+          // 在资源管理器定位 ~/.claude/<agents|skills> 目录(目录型管理仍走定位)。
           invoke<string>("get_claude_config_path", { target: cmd.name })
             .then((p) => void invoke("reveal_in_folder", { path: p }).catch(() => {}))
             .catch(() => setUnsupportedMsg(t("claudepane.unsupported", { cmd: `/${cmd.name}` })));
+          break;
+        }
+        case "mcp": {
+          // 查看 MCP 服务器(对齐 claude CLI /mcp 语义):弹窗列 ~/.claude.json 的全局
+          // mcpServers + 本项目 projects[cwd].mcpServers,每次打开重读;
+          // 原「定位 .claude.json」降级为弹窗内次要按钮。
+          setMcpOpen(true);
+          const cwd = sessions.find((s) => s.id === activeTabId)?.cwd;
+          void invoke<string>("get_claude_config_path", { target: "mcp" })
+            .then((p) => invoke<{ content: string | null; binary: boolean }>("read_file", { path: p }))
+            .then((res) => setMcpEntries(parseClaudeMcpServers(res.content ?? "", cwd)))
+            .catch(() => setMcpEntries([]));
           break;
         }
         case "compact": {
@@ -2490,6 +2505,53 @@ export function ClaudePane(props: ClaudePaneProps) {
                 </div>
               </DialogContent>
             </Dialog>
+            {/* /mcp:MCP 服务器列表(~/.claude.json 全局 mcpServers + 本项目 projects[cwd].mcpServers)。 */}
+            <Dialog open={mcpOpen} onOpenChange={(o) => !o && setMcpOpen(false)}>
+              <DialogContent className="w-[420px] max-w-[90vw] px-5 py-4">
+                <DialogTitle className="text-sm font-semibold text-[var(--mx-text)]">{t("claudepane.mcpTitle")}</DialogTitle>
+                <div className="mt-3 space-y-1.5 text-[11px] text-[var(--mx-muted)]">
+                  {mcpEntries === null ? (
+                    <div>{t("common.loading")}</div>
+                  ) : mcpEntries.length === 0 ? (
+                    <div>{t("claudepane.mcpEmpty")}</div>
+                  ) : (
+                    (["global", "project"] as const).map((scope) => {
+                      const items = mcpEntries.filter((e) => e.scope === scope);
+                      if (items.length === 0) return null;
+                      return (
+                        <div key={scope}>
+                          <div className="pb-0.5 text-[10px] font-[600] text-[var(--mx-faint)]">
+                            {scope === "global" ? t("claudepane.mcpGlobal") : t("claudepane.mcpProject")}
+                          </div>
+                          {items.map((e) => (
+                            <div key={`${scope}:${e.name}`} className="flex min-w-0 items-center gap-2 py-0.5">
+                              <span aria-hidden className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--mx-success)]" />
+                              <span className="shrink-0 font-mono text-[var(--mx-text)]">{e.name}</span>
+                              {e.brief && (
+                                <span className="min-w-0 flex-1 truncate font-mono text-[10px] text-[var(--mx-faint)]" title={e.brief}>
+                                  {e.brief}
+                                </span>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      );
+                    })
+                  )}
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="self-start text-[10px] text-[var(--mx-muted)] hover:text-[var(--mx-text)]"
+                    onClick={() => {
+                      void invoke<string>("get_claude_config_path", { target: "mcp" })
+                        .then((p) => void invoke("reveal_in_folder", { path: p }).catch(() => {}));
+                    }}
+                  >
+                    {t("claudepane.mcpReveal")}
+                  </Button>
+                </div>
+              </DialogContent>
+            </Dialog>
             {unsupportedMsg && (
               <BottomToast tone="warning" onClose={() => setUnsupportedMsg(null)}>
                 {unsupportedMsg}
@@ -2687,7 +2749,10 @@ const MessageRow = memo(function MessageRow({
               key={i}
               block={b}
               t={t}
-              streaming={message.streaming}
+              /* thinking 块仅在仍是消息末块时显示流式思考中——后续 text/tool 块到达即视为
+               * 思考结束,变「已思考」(及时反馈);跨消息拆分(glm 一轮拆多条 assistant)场景
+               * 由 claudeStream result 分支全量置 streaming=false 兜底。text/tool 不受影响。 */
+              streaming={message.streaming && (b.type !== "thinking" || i === message.blocks.length - 1)}
               onApprovePlan={onApprovePlan}
               onReject={onReject}
               resolvedApprovals={resolvedApprovals}
@@ -3949,6 +4014,53 @@ function DefaultToolView({
       )}
     </div>
   );
+}
+
+/**
+ * 解析 ~/.claude.json(/mcp 弹窗):顶层全局 `mcpServers` + `projects[cwd].mcpServers`
+ * (cwd = 当前会话工作区)。条目摘要:HTTP/SSE 型显 url,stdio 型显 command + 前两个 args。
+ * JSON 不合法(被 read_file 512KB 截断/损坏)返回 [] 由空态文案兜底。
+ */
+function parseClaudeMcpServers(
+  raw: string,
+  cwd: string | undefined,
+): { scope: "global" | "project"; name: string; brief: string }[] {
+  let cfg: unknown;
+  try {
+    cfg = JSON.parse(raw);
+  } catch {
+    return [];
+  }
+  if (!cfg || typeof cfg !== "object") return [];
+  const root = cfg as Record<string, unknown>;
+  const out: { scope: "global" | "project"; name: string; brief: string }[] = [];
+  const push = (obj: unknown, scope: "global" | "project") => {
+    if (!obj || typeof obj !== "object") return;
+    for (const [name, v] of Object.entries(obj)) {
+      const s = (v && typeof v === "object" ? v : {}) as Record<string, unknown>;
+      const brief =
+        typeof s.url === "string" && s.url
+          ? `url: ${s.url}`
+          : typeof s.command === "string" && s.command
+            ? [
+                s.command,
+                ...(Array.isArray(s.args) ? s.args.slice(0, 2).map(String) : []),
+              ].join(" ")
+            : "";
+      out.push({ scope, name, brief });
+    }
+  };
+  push(root.mcpServers, "global");
+  if (cwd) {
+    const projects = root.projects;
+    if (projects && typeof projects === "object") {
+      const proj = (projects as Record<string, unknown>)[cwd];
+      if (proj && typeof proj === "object") {
+        push((proj as Record<string, unknown>).mcpServers, "project");
+      }
+    }
+  }
+  return out;
 }
 
 function formatInput(input: unknown): string {

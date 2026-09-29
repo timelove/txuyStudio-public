@@ -161,7 +161,7 @@ impl AppState {
     }
 }
 
-/// 默认 pane tree:**AI 主体**——横向分屏 Claude(claudepane)占 60% + PowerShell 占 40%。
+/// 默认 pane tree:**AI 主体**——横向分屏 Claude(claudepane)占 55% + PowerShell 占 45%。
 ///
 /// 2026-09-22 依用户定位「用这个工具就是要用 AI」:新项目打开即 AI 为主角、终端为第二表面,
 /// 不再一进来是个空 shell。ratio 可拖拽分隔线或 AI header 的 ◱ 按钮调整。前端运行时树全部
@@ -170,7 +170,7 @@ pub fn default_pane_tree() -> PaneNode {
     PaneNode::Split {
         id: "root".to_string(),
         direction: SplitDirection::Horizontal,
-        ratio: 0.6,
+        ratio: 0.55,
         children: vec![
             PaneNode::Pane {
                 id: "ai-1".to_string(),

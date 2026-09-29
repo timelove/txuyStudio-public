@@ -143,6 +143,7 @@ const en = {
     midnight: "Midnight",
     "one-dark": "One Dark",
     intellijLight: "IntelliJ Light",
+    intellijDark: "IntelliJ Dark",
   },
   settings: {
     title: "Settings",
@@ -341,6 +342,11 @@ const en = {
     modelApply: "Apply",
     rewindTitle: "Rewind to a message",
     rewindHint: "Pick a past message → clear session + refill input, restart from it",
+    mcpTitle: "MCP servers",
+    mcpEmpty: "No MCP config found (no mcpServers in .claude.json, or file truncated)",
+    mcpGlobal: "Global",
+    mcpProject: "This project",
+    mcpReveal: "Reveal .claude.json in file explorer",
   },
   // codexpane (self-rendered codex chat pane): parallel to claudepane, codex-specific copy
   // (no approval/compact/retry copy; includes sandbox denial). `!` command copy reuses claudepane.shell*.
@@ -378,6 +384,10 @@ const en = {
     modelCurrent: "Current",
     modelEmpty: "No models found in codex config",
     reasoningTitle: "Reasoning effort",
+    mcpTitle: "MCP servers",
+    mcpEmpty: "No [mcp_servers] configured in config.toml",
+    mcpPluginNote: "MCP from installed plugins (e.g. openviking-memory) is loaded by codex automatically, not written to config.toml",
+    mcpReveal: "Reveal config.toml in file explorer",
   },
   shortcut: {
     split: {

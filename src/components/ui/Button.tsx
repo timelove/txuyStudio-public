@@ -72,7 +72,7 @@ const SIZE: Record<ButtonSize, string> = {
  * 「性能面板复制按钮空壳」根因;`text-(color:--x)` 是 v4 的 CSS 变量颜色简写,无歧义)。 */
 const VARIANT: Record<ButtonVariant, string> = {
   default:
-    "bg-[var(--mx-accent)] text-(color:--mx-editor-bg) font-semibold hover:brightness-110",
+    "bg-[var(--mx-accent)] text-(color:--mx-accent-contrast) font-semibold hover:brightness-110",
   outline:
     "border border-[var(--mx-border-strong)] text-(color:--mx-text) hover:bg-[var(--mx-hover-bg)]",
   ghost:
