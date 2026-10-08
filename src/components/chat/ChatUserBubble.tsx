@@ -23,8 +23,8 @@ export const ChatUserBubble = memo(function ChatUserBubble({
   return (
     <div className="group/message flex items-start justify-end gap-1.5">
       <div className="min-w-0 max-w-[85%]">
-        {/* 气泡右下角收小圆角(对话框朝向感);user 不显示消耗时长/tokens。 */}
-        <div dir="auto" className="whitespace-pre-wrap break-words rounded-lg rounded-br-[4px] bg-[var(--mx-user-bubble)] px-3 py-1.5 leading-relaxed text-[var(--mx-text)]">
+        {/* 气泡右下角收小圆角(对话框朝向感;16px 大圆角 = AI 对话产品观感);user 不显示消耗时长/tokens。 */}
+        <div dir="auto" className="whitespace-pre-wrap break-words rounded-2xl rounded-br-[6px] bg-[var(--mx-user-bubble)] px-3 py-1.5 leading-relaxed text-[var(--mx-text)]">
           {text}
         </div>
         <div className="mt-0.5 flex items-center justify-end gap-1.5 text-[10px] tabular-nums text-[var(--mx-faint)]">
@@ -44,7 +44,7 @@ export const ChatUserBubble = memo(function ChatUserBubble({
       </div>
       {/* 角色徽标:user 人形图标(中性底),置于气泡右侧。 */}
       <span aria-hidden className="flex h-[1.625em] shrink-0 items-center">
-        <span className="grid h-[18px] w-[18px] place-items-center rounded-md bg-[var(--mx-user-bubble-badge)] text-[var(--mx-muted)]">
+        <span className="grid h-[18px] w-[18px] place-items-center rounded-full bg-[var(--mx-user-bubble-badge)] text-[var(--mx-muted)]">
           <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
             <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
             <circle cx="12" cy="7" r="4" />

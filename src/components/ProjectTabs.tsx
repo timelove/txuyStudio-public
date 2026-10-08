@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { useTranslation } from "react-i18next";
 import type { ProjectId, ProjectSnapshot } from "../domain/projects";
 import type { ProjectRecord } from "../domain/appState";
@@ -45,6 +46,11 @@ type ProjectTabsProps = {
 
 /** 钉住+当前这块最多占容器宽的比例(其余留给加号/拖拽区)。 */
 const PINNED_WIDTH_RATIO = 0.6;
+
+/** 在资源管理器中打开项目根目录(reveal_in_folder:path 是目录 → 直接 explorer 打开)。 */
+function openInExplorer(rootPath: string) {
+  invoke("reveal_in_folder", { path: rootPath }).catch(() => {});
+}
 
 /**
  * 顶部项目栏:左侧「钉住项 + 当前项」合并成一块常驻 chip(竖线分隔,超长按容器宽度比例
@@ -169,9 +175,12 @@ export function ProjectTabs({ projects, activeProjectId, pinnedProjectIds, onSel
           <TooltipContent>{activeProject ? activeProject.name : t("project.select")}</TooltipContent>
           </Tooltip>
 
-          {/* 右键「更多」菜单(对 activeProject):钉住/分离窗口/删除。onSelect 自动关闭。 */}
+          {/* 右键「更多」菜单(对 activeProject):打开文件夹/钉住/分离窗口/删除。onSelect 自动关闭。 */}
           {activeProject && (
             <ContextMenuContent>
+              <ContextMenuItem onSelect={() => openInExplorer(activeProject.rootPath)}>
+                {t("project.openFolder")}
+              </ContextMenuItem>
               {onTogglePin && (
                 <ContextMenuItem
                   onSelect={() => onTogglePin(activeProject.id)}
@@ -245,6 +254,9 @@ export function ProjectTabs({ projects, activeProjectId, pinnedProjectIds, onSel
                       </button>
                     </ContextMenuTrigger>
                     <ContextMenuContent>
+                      <ContextMenuItem onSelect={() => openInExplorer(p.rootPath)}>
+                        {t("project.openFolder")}
+                      </ContextMenuItem>
                       {onTogglePin && (
                         <ContextMenuItem onSelect={() => onTogglePin(p.id)}>
                           {pinnedProjectIds.includes(p.id) ? t("project.unpin") : t("project.pin")}
@@ -269,6 +281,36 @@ export function ProjectTabs({ projects, activeProjectId, pinnedProjectIds, onSel
                       )}
                     </ContextMenuContent>
                   </ContextMenu>
+                  {/* 内联在资源管理器中打开:hover 显(folder SVG,直接打开项目根目录)。 */}
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          openInExplorer(p.rootPath);
+                        }}
+                        onMouseDown={(e) => e.stopPropagation()}
+                        className="mx-icon-tile grid h-[16px] w-[16px] shrink-0 cursor-pointer place-items-center text-[var(--mx-muted)] opacity-0 transition-colors group-hover:opacity-100 hover:bg-[var(--mx-hover-bg)] hover:text-[var(--mx-text-bright)]"
+                      >
+                        {/* folder(lucide):项目根目录在资源管理器中打开。 */}
+                        <svg
+                          width="12"
+                          height="12"
+                          viewBox="0 0 24 24"
+                          aria-hidden
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="2"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        >
+                          <path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" />
+                        </svg>
+                      </button>
+                    </TooltipTrigger>
+                    <TooltipContent>{t("project.openFolder")}</TooltipContent>
+                  </Tooltip>
                   {/* 内联钉住:已钉 ●(亮),未钉 ○(hover 显)。 */}
                   {onTogglePin && (
                     <Tooltip>

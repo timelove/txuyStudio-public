@@ -23,7 +23,7 @@ export const SessionHeader = memo(function SessionHeader({
 }) {
   return (
     <div className="flex items-center gap-2 px-1.5 py-1 text-[10px] text-[var(--mx-faint)]">
-      <span aria-hidden className={`grid h-4 w-4 shrink-0 place-items-center rounded text-[8px] font-extrabold ${brandClass}`}>
+      <span aria-hidden className={`grid h-4 w-4 shrink-0 place-items-center rounded-full text-[8px] font-extrabold ${brandClass}`}>
         {brandLetter}
       </span>
       <span className="shrink-0 text-[var(--mx-muted)]">{name}</span>

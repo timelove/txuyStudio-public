@@ -9,20 +9,28 @@ type EnvCheckResult = {
   realTimeProtection: OptionBool;
   pnpmStoreExcluded: OptionBool;
   pnpmStorePath: string | null;
+  toolchainDirsExcluded: OptionBool;
   nodeExcluded: OptionBool;
+  aiCliExcluded: OptionBool;
   txuyExcluded: OptionBool;
 };
 type OptionBool = boolean | null;
 
+/** 一键修复按钮状态机:idle → running(等 UAC)→ done(自动重检)/failed(取消或失败)。 */
+type FixState = "idle" | "running" | "done" | "failed";
+
 /**
- * 设置 → 通用「环境体检」分区:检测 Defender 是否会拦截 pnpm 等包管理器
+ * 设置 → 通用「环境体检」分区:检测 Defender 是否会拦截 pnpm/bun 等包管理器
  * (高并发小文件 + junction 是实时扫描重点,本机 EPERM/「unknown 权限」几乎都源于此)。
- * **只读检测**——修复命令拼好进剪贴板,用户到管理员 PowerShell 粘贴执行(应用不提权)。
+ * **检测只读**——修复两条路:一键 UAC(fix_defender_exclusions,批量加 pnpm store/
+ * bun/cargo/node/claude/codex/本应用排除,应用自身不提权、提权进程由用户点 UAC 授权)
+ * 或复制命令到管理员 PowerShell 手动执行。
  */
 export function EnvCheckSection() {
   const { t } = useTranslation();
   const [check, setCheck] = useState<EnvCheckResult | null>(null);
   const [copied, setCopied] = useState(false);
+  const [fixState, setFixState] = useState<FixState>("idle");
 
   const run = useCallback(() => {
     invoke<EnvCheckResult>("check_dev_environment")
@@ -34,14 +42,28 @@ export function EnvCheckSection() {
   // 风险判定:Defender 开着 + 任一关键项未排除 → 有拦截风险(琥珀)。
   const atRisk =
     check?.defenderAvailable === true &&
-    (check.pnpmStoreExcluded === false || check.nodeExcluded === false || check.txuyExcluded === false);
+    (check.pnpmStoreExcluded === false ||
+      check.toolchainDirsExcluded === false ||
+      check.nodeExcluded === false ||
+      check.aiCliExcluded === false ||
+      check.txuyExcluded === false);
+
+  // 一键 UAC 修复:成功后延迟 1.5s 重检(提权进程写排除需一点时间,检测是真相源)。
+  const fixNow = () => {
+    setFixState("running");
+    invoke<boolean>("fix_defender_exclusions")
+      .then(() => {
+        setFixState("done");
+        window.setTimeout(run, 1500);
+      })
+      .catch(() => setFixState("failed"));
+  };
 
   const copyFix = () => {
     const lines = [
-      "# 在管理员 PowerShell 中执行(为 pnpm/node/txuyStudio 添加 Defender 排除,根治 install 时的权限报错):",
-      `Add-MpPreference -ExclusionPath "${check?.pnpmStorePath ?? "$env:LOCALAPPDATA\\pnpm\\store"}"`,
-      'Add-MpPreference -ExclusionProcess "node.exe"',
-      'Add-MpPreference -ExclusionProcess "txuy-studio.exe"',
+      "# 在管理员 PowerShell 中执行(为 pnpm/bun/cargo/node/claude/codex/txuyStudio 添加 Defender 排除,根治 install 时的权限报错):",
+      `Add-MpPreference -ExclusionPath "${check?.pnpmStorePath ?? "$env:LOCALAPPDATA\\pnpm\\store"}", "$HOME\\.bun", "$HOME\\.cargo"`,
+      "Add-MpPreference -ExclusionProcess 'node.exe','bun.exe','bunx.exe','pnpm.exe','claude.exe','codex.exe','txuy-studio.exe'",
     ];
     navigator.clipboard.writeText(lines.join("\n")).then(
       () => {
@@ -85,15 +107,30 @@ export function EnvCheckSection() {
         <div className="mt-1 space-y-0.5 text-[var(--mx-muted)]">
           <CheckRow label={t("settings.envCheck.realTime")} value={check.realTimeProtection} on={check.realTimeProtection === true} />
           <CheckRow label={t("settings.envCheck.pnpmStore")} value={check.pnpmStoreExcluded} on={check.pnpmStoreExcluded === true} />
+          <CheckRow label={t("settings.envCheck.bunCargo")} value={check.toolchainDirsExcluded} on={check.toolchainDirsExcluded === true} />
           <CheckRow label={t("settings.envCheck.node")} value={check.nodeExcluded} on={check.nodeExcluded === true} />
+          <CheckRow label={t("settings.envCheck.aiCli")} value={check.aiCliExcluded} on={check.aiCliExcluded === true} />
           <CheckRow label={t("settings.envCheck.txuy")} value={check.txuyExcluded} on={check.txuyExcluded === true} />
         </div>
         {atRisk && (
           <div className="mt-2 flex items-start justify-between gap-2">
-            <span className="min-w-0 flex-1 text-[var(--mx-faint)]">{t("settings.envCheck.fixHint")}</span>
-            <Button variant="default" size="xs" onClick={copyFix} className="shrink-0">
-              {copied ? t("settings.envCheck.copied") : t("settings.envCheck.copyFix")}
-            </Button>
+            <span className="min-w-0 flex-1 self-center text-[var(--mx-faint)]">
+              {fixState === "failed"
+                ? t("settings.envCheck.fixFailed")
+                : fixState === "done"
+                  ? t("settings.envCheck.fixDone")
+                  : fixState === "running"
+                    ? t("settings.envCheck.fixRunning")
+                    : t("settings.envCheck.fixHint")}
+            </span>
+            <div className="flex shrink-0 items-center gap-1.5">
+              <Button variant="default" size="xs" onClick={fixNow} disabled={fixState === "running"}>
+                {fixState === "running" ? t("settings.envCheck.fixRunning") : t("settings.envCheck.fixNow")}
+              </Button>
+              <Button variant="ghost" size="xs" onClick={copyFix}>
+                {copied ? t("settings.envCheck.copied") : t("settings.envCheck.copyFix")}
+              </Button>
+            </div>
           </div>
         )}
       </div>

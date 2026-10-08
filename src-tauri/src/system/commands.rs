@@ -20,8 +20,12 @@ pub struct EnvCheck {
     pub pnpm_store_excluded: Option<bool>,
     /// 探测到的 pnpm store 路径(未排除时提示用)。
     pub pnpm_store_path: Option<String>,
+    /// bun(~/.bun)与 cargo(~/.cargo)缓存目录是否都已在排除列表。
+    pub toolchain_dirs_excluded: Option<bool>,
     /// node.exe 是否在进程排除列表。
     pub node_excluded: Option<bool>,
+    /// claude.exe/codex.exe 是否都在进程排除列表。
+    pub ai_cli_excluded: Option<bool>,
     /// txuy-studio.exe 是否在进程排除列表。
     pub txuy_excluded: Option<bool>,
 }
@@ -40,10 +44,11 @@ fn ps_query(command: &str) -> Option<String> {
     if s.is_empty() { None } else { Some(s) }
 }
 
-/// 开发者环境体检(只读):Defender 实时防护状态 + 关键排除项(pnpm store/node/本应用)。
-/// 终端里 pnpm install 频繁 EPERM/「unknown 权限」在本机几乎都是 Defender 实时扫描锁
-/// 小文件/junction(pnpm 高并发安装是其重点监控形态);把 store 与进程加排除即根治。
-/// 本命令**只读不改**——修复命令由前端拼好让用户复制到管理员终端执行(不提权)。
+/// 开发者环境体检(只读):Defender 实时防护状态 + 关键排除项(pnpm store/bun/cargo/node/
+/// claude/codex/本应用)。
+/// 终端里 pnpm/bun install 频繁 EPERM/「unknown 权限」在本机几乎都是 Defender 实时扫描锁
+/// 小文件/junction(高并发安装是其重点监控形态);把 store 与进程加排除即根治。
+/// 本命令**只读不改**——写操作走 `fix_defender_exclusions`(一键 UAC)或复制命令手动执行。
 #[tauri::command]
 pub async fn check_dev_environment() -> Result<EnvCheck, String> {
     // 非 Windows 无 Defender 语义,直接返回不可用(前端显 N/A)。
@@ -53,7 +58,9 @@ pub async fn check_dev_environment() -> Result<EnvCheck, String> {
             real_time_protection: None,
             pnpm_store_excluded: None,
             pnpm_store_path: None,
+            toolchain_dirs_excluded: None,
             node_excluded: None,
+            ai_cli_excluded: None,
             txuy_excluded: None,
         });
     }
@@ -61,25 +68,112 @@ pub async fn check_dev_environment() -> Result<EnvCheck, String> {
     let real_time = ps_query("(Get-MpComputerStatus).RealTimeProtectionEnabled").map(|s| s.eq_ignore_ascii_case("true"));
     let exclusions = ps_query("@((Get-MpPreference).ExclusionPath + (Get-MpPreference).ExclusionProcess) -join \"|\"");
     let store_path = ps_query("(pnpm store path) 2>$null");
-    let (pnpm_excluded, node_excluded, txuy_excluded) = match (&exclusions, &store_path) {
-        (Some(list), store) => {
-            let lower = list.to_lowercase();
-            let pnpm = store
-                .as_ref()
-                .map(|sp| lower.contains(&sp.to_lowercase()))
-                .unwrap_or(false);
-            (Some(pnpm), Some(lower.contains("node.exe")), Some(lower.contains("txuy-studio.exe")))
-        }
-        _ => (None, None, None),
-    };
+    // bun/cargo 缓存目录:home 下固定位置(bun install cache 在 ~/.bun/install/cache,
+    // cargo registry/git 在 ~/.cargo),排除整个目录即覆盖。
+    let home = dirs::home_dir().map(|h| h.to_string_lossy().into_owned());
+    let (pnpm_excluded, toolchain_excluded, node_excluded, ai_cli_excluded, txuy_excluded) =
+        match (&exclusions, &store_path) {
+            (Some(list), store) => {
+                let lower = list.to_lowercase();
+                let pnpm = store
+                    .as_ref()
+                    .map(|sp| lower.contains(&sp.to_lowercase()))
+                    .unwrap_or(false);
+                let toolchain = home
+                    .as_ref()
+                    .map(|h| {
+                        let bun = format!("{}\\.bun", h).to_lowercase();
+                        let cargo = format!("{}\\.cargo", h).to_lowercase();
+                        lower.contains(&bun) && lower.contains(&cargo)
+                    })
+                    .unwrap_or(false);
+                let ai_cli = lower.contains("claude.exe") && lower.contains("codex.exe");
+                (
+                    Some(pnpm),
+                    Some(toolchain),
+                    Some(lower.contains("node.exe")),
+                    Some(ai_cli),
+                    Some(lower.contains("txuy-studio.exe")),
+                )
+            }
+            _ => (None, None, None, None, None),
+        };
     Ok(EnvCheck {
         defender_available: true,
         real_time_protection: real_time,
         pnpm_store_excluded: pnpm_excluded,
         pnpm_store_path: store_path,
+        toolchain_dirs_excluded: toolchain_excluded,
         node_excluded: node_excluded,
+        ai_cli_excluded: ai_cli_excluded,
         txuy_excluded: txuy_excluded,
     })
+}
+
+/// 一键修复:把开发工具链相关路径/进程批量加进 Defender 排除列表(幂等,重复添加
+/// Defender 自动去重)。走 `Start-Process -Verb RunAs` 弹 UAC——提权的是**用户在 UAC
+/// 确认后的独立 powershell 进程**,应用自身仍不提权(与「app never elevates itself」
+/// 决策兼容:提权动作由用户点 UAC 的「是」显式授权)。
+///
+/// 内层脚本经 UTF-16LE + base64 以 `-EncodedCommand` 传递,彻底规避「路径含空格/
+/// 特殊字符」的多层引号转义问题。返回 Ok(true) = UAC 已确认(排除命令已下发);
+/// UAC 被取消/Defender 不可用 → Err(前端提示改走复制命令手动执行)。
+///
+/// 注意:外层 powershell 会阻塞等用户响应 UAC(可达几十秒),故用 `spawn_blocking`
+/// 包裹,不占 async runtime 线程;提权进程独立运行,应用不等它结束——前端稍后重新
+/// 体检即见结果(检测是唯一真相源)。
+#[tauri::command]
+pub async fn fix_defender_exclusions() -> Result<bool, String> {
+    if !cfg!(windows) {
+        return Err("not available on this platform".to_string());
+    }
+    tokio::task::spawn_blocking(|| {
+        // 排除路径:pnpm store(实时探测,失败回退 %LOCALAPPDATA% 默认位置)+ bun/cargo
+        // home 目录。路径均来自本机探测(非用户输入),无注入面;单引号内防御性转义 '。
+        let store = ps_query("(pnpm store path) 2>$null")
+            .or_else(|| {
+                std::env::var("LOCALAPPDATA")
+                    .ok()
+                    .map(|l| format!("{}\\pnpm\\store", l))
+            })
+            .unwrap_or_else(|| "$env:LOCALAPPDATA\\pnpm\\store".to_string());
+        let home = dirs::home_dir()
+            .map(|h| h.to_string_lossy().into_owned())
+            .ok_or_else(|| "home dir not available".to_string())?;
+        let ps_quote = |s: &str| format!("'{}'", s.replace('\'', "''"));
+        let inner = format!(
+            "$ErrorActionPreference='Stop'; \
+             Add-MpPreference -ExclusionPath @({}, {}, {}); \
+             Add-MpPreference -ExclusionProcess @('node.exe','bun.exe','bunx.exe','pnpm.exe','claude.exe','codex.exe','txuy-studio.exe'); \
+             exit 0",
+            ps_quote(&store),
+            ps_quote(&format!("{}\\.bun", home)),
+            ps_quote(&format!("{}\\.cargo", home)),
+        );
+        // -EncodedCommand 要求 UTF-16LE 的 base64。**不要补结尾 NUL**——解码后 NUL 会
+        // 成为脚本里的多余 token 直接 ParserError(干跑实测);纯 UTF-16LE 即可。
+        let utf16: Vec<u8> = inner.encode_utf16().flat_map(|w| w.to_le_bytes()).collect();
+        use base64::Engine as _;
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&utf16);
+        // 外层(不提权):请求 UAC 启动提权 powershell 跑内层脚本。base64 标准字母表
+        // 含 +/=,在 PowerShell 单引号字符串里均安全。
+        let outer = format!(
+            "Start-Process powershell -Verb RunAs -ArgumentList @('-NoProfile','-WindowStyle','Hidden','-EncodedCommand','{}')",
+            encoded
+        );
+        let out = command_no_window("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &outer])
+            .output()
+            .map_err(|e| format!("spawn powershell: {e}"))?;
+        if out.status.success() {
+            Ok(true)
+        } else {
+            // UAC 取消时 Start-Process 抛异常 → 外层非零退出。
+            Err("UAC declined or Defender unavailable".to_string())
+        }
+    })
+    .await
+    .map_err(|e| format!("join fix task: {e}"))?
 }
 
 use sysinfo::{ProcessesToUpdate, System};

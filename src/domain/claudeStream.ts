@@ -157,6 +157,11 @@ export type ClaudeMessage = {
    *  多轮之和;glm 流式 usage 恒 {0,0} 只能靠它回填),当前上下文须与前一轮累计差分;
    *  undefined = 流式 assistant 快照(本轮值,直接用)。 */
   usageCumulative?: boolean;
+  /** true = 流式全 0 轮经 diffCumulativeUsage 差分回填的本轮值(纯全 0 代理场景)。
+   *  值本身是本轮口径(ctx/Σ 可直接用),但**不算流式快照**——diffCumulativeUsage 的
+   *  混合域判定(序列是否出现过真流式快照)须排除它,否则纯全 0 域第 2 轮起会因
+   *  自己的回填被误判混合域而停止差分,ctx 冻结在首轮。 */
+  usageDiffed?: boolean;
   /** 本轮耗时(result 事件回填,assistant 末行显示 ⏱ 时长)。 */
   durationMs?: number;
 };
@@ -426,6 +431,11 @@ export function applyEvent(state: ClaudeStreamState, payload: ClaudeEventPayload
           model: msg.model ?? oldMsg.model,
           streaming: true,
           usage: hasUsage(msg.usage) ? msg.usage : (oldMsg.usage ?? msg.usage),
+          // usage 取旧值(resume 重放全 0 流式)时,口径标记须随旧值一起保留——
+          // 否则 result 回填的累计值丢标记后被当流式快照直接用,ctx 显示成「拉总的」;
+          // 差分回填(usageDiffed)同理,丢了会污染混合域判定。
+          usageCumulative: hasUsage(msg.usage) ? undefined : oldMsg.usageCumulative,
+          usageDiffed: hasUsage(msg.usage) ? undefined : oldMsg.usageDiffed,
         };
       } else {
         next.messages.push({
@@ -615,9 +625,11 @@ export function applyEvent(state: ClaudeStreamState, payload: ClaudeEventPayload
       // message.id),只置末条会让前面消息的 ThinkingBlock 永显「思考中」不落「已思考」
       // (与上方 finalizePendingTools 全量扫同因同修)。**usage 优先保留流式快照**:
       // claude code 的 result.usage 官方语义是**会话累计**(多轮之和),而流式 assistant 事件
-      // 的 usage 是本轮快照(jsonl 实测 98% 带真实值,互斥语义)——用累计值覆盖会让 ctx/行尾
-      // token 显示成「会话累计」(长会话轻松超 1m,模型真实窗口不可能超限,显示必错)。
-      // 仅当流式恒全 0(旧版 glm)时才退回 result 值兜底(hasUsage 判定)。
+      // 的 usage 是本轮快照(jsonl 实测 98% 带真实值,互斥语义)——累计值直接回填会把
+      // ctx/行尾 token 显示成「拉总的」(长会话累计轻松 3m,超模型真实窗口,显示必错)。
+      // 流式全 0 轮(旧版 glm/偶发抽风)**仅纯全 0 代理场景**才用 diffCumulativeUsage 差分
+      // 回填;混合域(序列已有流式快照)一律不回填——差分 Σ 缺一轮就虚高几 m,ctx 直接取
+      // 最近真实快照(「根据当前会话,绝不瞎统计」),成本显示另有 totalCostUsd 权威兜底。
       // 引用保持:非 streaming 消息不换对象,避免每轮结束整树 reconcile(长会话大帧)。
       let finalizedLast = false;
       for (let i = next.messages.length - 1; i >= 0; i--) {
@@ -625,13 +637,20 @@ export function applyEvent(state: ClaudeStreamState, payload: ClaudeEventPayload
         if (prev.role !== "assistant") continue;
         if (!finalizedLast) {
           const usedStream = hasUsage(prev.usage);
+          const backfill =
+            !usedStream && payload.usage && hasUsage(payload.usage)
+              ? diffCumulativeUsage(next.messages, i, payload.usage)
+              : null;
           next.messages[i] = {
             ...prev,
             streaming: false,
-            usage: usedStream ? prev.usage : (payload.usage ?? prev.usage),
-            // 累计口径标记(见 ClaudeMessage.usageCumulative):result 回填的值是会话累计,
-            // ctx 显示须差分;流式快照(usedStream)保持 undefined。
-            usageCumulative: usedStream ? undefined : (payload.usage ? true : undefined),
+            usage: usedStream ? prev.usage : (backfill ?? prev.usage),
+            // 差分回填已是本轮口径(与流式快照同语义),不再产生累计标记;
+            // usageCumulative 仅作为历史存量兼容(computeContextInfo 兜底路径)。
+            usageCumulative: undefined,
+            // 标记差分回填(非真流式快照):供 diffCumulativeUsage 混合域判定区分,防纯全 0
+            // 域被自己的回填误判混合域而冻结(见 ClaudeMessage.usageDiffed)。
+            usageDiffed: usedStream ? undefined : (backfill ? true : undefined),
             // 回填本轮耗时(assistant 末行显示 ⏱)。durationMs 仅 result 有,流式中不显示。
             durationMs: payload.durationMs ?? prev.durationMs,
           };
@@ -960,12 +979,79 @@ export function inferContextWindow(model?: string): number {
 }
 
 /**
+ * result 累计 usage 差分回本轮真实值(仅**纯全 0 代理**场景使用)。
+ * 数学:turn_N = cum_N - cum_K - Σ_{K<i<N} turn_i——K 为最近一次累计回填锚点,中间的
+ * 流式快照/已差分回填消息均为本轮口径直接求和(claude 计费累计跨 compact 单调连续,
+ * 故跨 boundary 扫描;历史回放消息的 jsonl 快照同为本轮口径,一并入 Σ)。
+ * glm 同轮常拆多条 assistant 消息且携带**相同**快照,相邻(跳过非 assistant 消息)
+ * 同值只计一次,防一轮被重复扣减。
+ *
+ * **混合域(序列已有任何流式快照)一律放弃差分**:差分正确性依赖 Σ 完整覆盖中间所有轮,
+ * 混合域里 Σ 缺一轮(回放 jsonl 快照本身全 0 的轮、快照丢失等)缺失部分就直接变成
+ * turn 的虚高——几 m 的「拉总的」混进快照序列,ctx 又显示 3m/1m(实测复现)。全 0 轮
+ * 的 ctx 由 computeContextInfo 取最近一条真实快照兜底(上轮真实上下文,差一轮增量,
+ * 远好于任何形式的累计)。任一字段差为负(计费域断裂)或单轮 input 超 2m(真实单轮
+ * 实测峰值 ~1.07m,超界必是累计混入)同样返回 null——宁可没有,不可瞎统计。
+ */
+function diffCumulativeUsage(
+  messages: ClaudeMessage[],
+  endIndex: number,
+  cum: ClaudeUsage,
+): ClaudeUsage | null {
+  const KEYS = [
+    "input_tokens",
+    "cache_creation_input_tokens",
+    "cache_read_input_tokens",
+    "output_tokens",
+  ] as const;
+  let base: ClaudeUsage | undefined; // 最近累计锚点 cum_K(找到即停,更早的已含在 base 内)
+  const sum: ClaudeUsage = {}; // 锚点之后本轮口径快照之和(真流式 + 差分回填都算)
+  let prevSnapshot: ClaudeUsage | undefined; // 相邻同值去重参照
+  let anySnapshot = false; // 是否出现过**真**流式快照(混合域判定;差分回填不算)
+  for (let i = endIndex - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m.role !== "assistant") continue;
+    const u = m.usage;
+    if (m.usageCumulative) {
+      if (hasUsage(u)) base = u;
+      break;
+    }
+    if (!hasUsage(u)) continue;
+    if (!m.usageDiffed) anySnapshot = true;
+    // hasUsage 已保证 u 非空(非对象或全 0 均返回 false),此处安全非空。
+    if (prevSnapshot && KEYS.every((k) => (u![k] ?? 0) === (prevSnapshot![k] ?? 0))) continue;
+    prevSnapshot = u;
+    for (const k of KEYS) sum[k] = (sum[k] ?? 0) + (u![k] ?? 0);
+  }
+  // 混合域:已有流式快照就不再从累计倒推(见函数头注释),ctx 走最近快照。
+  if (anySnapshot) return null;
+  const turn: ClaudeUsage = {};
+  let anyPositive = false;
+  for (const k of KEYS) {
+    const v = (cum[k] ?? 0) - (base?.[k] ?? 0) - (sum[k] ?? 0);
+    if (v < 0) return null;
+    if (v > 0) anyPositive = true;
+    turn[k] = v;
+  }
+  if (!anyPositive) return null;
+  // 保险丝:真实单轮输入实测峰值 ~1.07m,超 2m 必是计费域断裂后的累计混入——丢弃。
+  const turnInput =
+    (turn.input_tokens ?? 0) +
+    (turn.cache_creation_input_tokens ?? 0) +
+    (turn.cache_read_input_tokens ?? 0);
+  if (turnInput > 2_000_000) return null;
+  return turn;
+}
+
+/**
  * 当前上下文用量(公共口径,ctx 显示/占用%共用;曾双份实现漂移后收敛于此):
- * 取最近一次 compact boundary 后、最近一条**有真实用量**的 assistant message 的 usage。
- * - 流式快照(usageCumulative undefined,官方语义)= 本轮值,直接用;
- * - result 回填的**会话累计**(usageCumulative=true;glm 流式恒 {0,0} 只能靠它)→ 与前一条
- *   累计回填差分得本轮(≈ 当前上下文);无前一条(会话首轮)= 累计本身;差分非正
- *   (回放数据混入口径异常)回退累计值(宁可高估不误 0)。
+ * **根据当前会话,不拉总**——优先取最近一次 compact boundary 后、最近一条**流式快照口径**
+ * (usageCumulative undefined)的 assistant usage,它就是本轮完整输入 ≈ 当前上下文;
+ * 流式全 0 的轮(glm 偶发)自动跳过,ctx 落到上一轮真实快照(差一轮增量)。
+ * 混入的累计回填消息(历史存量 usageCumulative=true)不直接采用(长会话累计轻松超窗口,
+ * 显示成 3m/1m 必错);段内只剩累计回填时(旧存量兼容)与**前一条累计跨 boundary 差分**
+ * (claude 计费累计跨 compact 单调连续,compact 后首轮 = cum_after - cum_before 恰是
+ * 压缩后的真实输入),差不出正值返回 null——累计本身绝不上屏(宁可没有,不可瞎统计)。
  * totalInputTokens 兼容互斥/重叠网关语义;glm 全 0 流式 usage 由 hasUsage 过滤。
  * window:meta.contextWindow(result.modelUsage 权威值)优先不抬升;兜底 infer + ctx 峰值
  * 动态抬升(liftContextWindow;boundary 停扫保证不跨 compact 累计)。
@@ -976,37 +1062,40 @@ export function computeContextInfo(
 ): { ctx: number; window: number; pct: number } | null {
   const used = (u: ClaudeUsage) =>
     totalInputTokens(u.input_tokens ?? 0, u.cache_creation_input_tokens ?? 0, u.cache_read_input_tokens ?? 0);
-  // 最近一条有真实用量的 assistant(boundary 停扫:快照口径下压缩前的旧快照不代表当前
-  // 上下文,段内无 usage 即无数据)。
+  // 倒序扫(boundary 停扫:快照口径下压缩前的旧快照不代表当前上下文):
+  // 首个流式快照即答案;顺路记段内最近一条累计回填(全 0 代理的差分兜底素材)。
   let last: ClaudeMessage | undefined;
+  let lastCum: ClaudeMessage | undefined;
   for (let i = state.messages.length - 1; i >= 0; i--) {
     const m = state.messages[i];
     if (m.role === "compact" && m.compactKind === "boundary") break;
-    if (m.role === "assistant" && hasUsage(m.usage)) {
+    if (m.role !== "assistant" || !hasUsage(m.usage)) continue;
+    if (!m.usageCumulative) {
       last = m;
       break;
     }
+    if (!lastCum) lastCum = m;
   }
-  if (!last) return null;
-  const lastUsed = used(last.usage!);
-  let ctx = lastUsed;
-  if (last.usageCumulative) {
-    // 累计口径差分:锚点 = 前一条累计回填(**跨 boundary 找**——claude 计费的累计值序列
-    // 跨 compact 单调连续,compact 后首轮 = cum_after - cum_before 恰是压缩后的真实输入;
-    // 若被 boundary 切断,compact 后段内首条会退回全程累计高估)。锚点非累计(回放注入的
-    // 快照等口径混入)时放弃差分,回退累计值(宁可高估不误 0)。
+  if (!last && !lastCum) return null;
+  let ctx: number;
+  if (last) {
+    ctx = used(last.usage!);
+  } else {
+    // 段内只剩累计回填(旧存量兼容;新回填已就地差分为本轮口径标 undefined,不走此分支):
+    // 与前一条累计差分,差不出正值就返回 null——**累计本身绝不上屏**(宁可没有,不可瞎统计)。
+    const lastUsed = used(lastCum!.usage!);
     let prev: ClaudeMessage | undefined;
-    for (let i = state.messages.indexOf(last) - 1; i >= 0; i--) {
+    for (let i = state.messages.indexOf(lastCum!) - 1; i >= 0; i--) {
       const m = state.messages[i];
       if (m.role === "assistant" && m.usageCumulative && hasUsage(m.usage)) {
         prev = m;
         break;
       }
     }
-    if (prev) {
-      const diff = lastUsed - used(prev.usage!);
-      if (diff > 0) ctx = diff;
-    }
+    if (!prev) return null;
+    const diff = lastUsed - used(prev.usage!);
+    if (diff <= 0) return null;
+    ctx = diff;
   }
   if (ctx <= 0) return null;
   const window = state.meta?.contextWindow ?? liftContextWindow(fallbackWindow, ctx);
