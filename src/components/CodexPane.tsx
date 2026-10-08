@@ -31,6 +31,7 @@ import { ContextMeter } from "./ui/ContextMeter";
 import { Button } from "./ui/Button";
 import { CopyButton } from "./ui/CopyButton";
 import { PaneExpandButton } from "./ui/PaneExpandButton";
+import { PaneToolsMenu, TOOL_SIDEBAR_MIN_PANE_W, type PaneToolsMenuGroup } from "./ui/PaneToolsMenu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/Tooltip";
 import { SessionHeader } from "./chat/SessionHeader";
 import { ChatUserBubble } from "./chat/ChatUserBubble";
@@ -41,9 +42,6 @@ import { Tabs, TabsList, TabsTrigger } from "./ui/Tabs";
 const MdPreviewLazy = lazy(() =>
   import("./MdPreview").then((m) => ({ default: m.MdPreview })),
 );
-
-/** 统一 slash 命令形状(前端 FALLBACK 集,codex exec 模式后端无 slash_commands 透传)。 */
-type SlashCmd = { name: string; description?: string };
 
 /** 相对时间格式化(↻ 弹窗「恢复上一次」用),与 ClaudePane.relativeTime 同实现。 */
 function relativeTime(iso: string | null, locale: string): string {
@@ -62,29 +60,6 @@ function relativeTime(iso: string | null, locale: string): string {
   if (Math.abs(hr) < 24) return rtf.format(hr, "hour");
   return rtf.format(day, "day");
 }
-
-/**
- * codex 原生 slash 命令集(从 codex.exe 二进制精确验证 + 真实 history.jsonl 佐证)。
- *
- * codex exec 非交互模式**不支持** slash 命令(TUI 专属),故本面板把命令映射为前端动作
- * (触发选择器/清会话/开文件/跑 git diff),其余提示「在终端使用 codex CLI」。
- * 与 claude 的命令集完全不同(codex 无 /effort 而是 /reasoning;开新会话是 /new 非 /clear)。
- */
-const FALLBACK_SLASH_CMDS: SlashCmd[] = [
-  { name: "agent", description: "查看与管理 Agent 配置" },
-  { name: "auth", description: "管理 codex 登录凭据" },
-  { name: "diff", description: "查看工作区改动(git diff)" },
-  { name: "exit", description: "退出当前会话并关闭 tab" },
-  { name: "help", description: "查看可用命令与帮助" },
-  { name: "init", description: "打开项目 AGENTS.md 指令文件" },
-  { name: "mcp", description: "查看 MCP 服务器配置" },
-  { name: "model", description: "查看或切换模型" },
-  { name: "new", description: "开启新会话(不续接历史)" },
-  { name: "reasoning", description: "切换推理强度" },
-  { name: "resume", description: "恢复历史会话" },
-  { name: "status", description: "查看会话状态与用量" },
-  { name: "usage", description: "查看用量统计" },
-];
 
 /**
  * codex sandbox 策略(codex exec -s),状态栏可切换 + Shift+Tab 循环。
@@ -362,14 +337,7 @@ export function CodexPane(props: CodexPaneProps) {
     setShowScrollBottom(false);
   }, []);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
-  const highlightRef = useRef<HTMLDivElement | null>(null);
 
-  // -- slash 命令面板状态(codex exec 无后端 slash_commands,只用前端 FALLBACK 集) --
-  const [slashOpen, setSlashOpen] = useState(false);
-  const [slashIndex, setSlashIndex] = useState(0);
-  const [commandQuery, setCommandQuery] = useState("");
-  const slashPositionRef = useRef(-1);
-  const queryTimerRef = useRef<number | null>(null);
   // -- @ 文件引用面板(与 ClaudePane 同,通用能力) --
   const [atOpen, setAtOpen] = useState(false);
   const [atIndex, setAtIndex] = useState(0);
@@ -382,6 +350,27 @@ export function CodexPane(props: CodexPaneProps) {
   /** /mcp 弹窗:~/.codex/config.toml 的 [mcp_servers.*] 段解析(null=加载中/失败空)。 */
   const [mcpOpen, setMcpOpen] = useState(false);
   const [mcpServers, setMcpServers] = useState<{ name: string; brief: string }[] | null>(null);
+  /** Plugins 弹窗:~/.codex/plugins/cache 下的子目录名(null=加载中)。 */
+  const [pluginsOpen, setPluginsOpen] = useState(false);
+  const [codexPlugins, setCodexPlugins] = useState<string[] | null>(null);
+  // —— 宽度自适应工具侧栏(ClaudePane 同款):宽 pane 右侧常驻 MCP/Plugins,窄 pane 回落弹窗 ——
+  /** 侧栏当前面板(null=未开)。宽 pane 首次自动开 mcp。 */
+  const [toolPanel, setToolPanel] = useState<"mcp" | "plugins" | null>(null);
+  /** 缩小态:侧栏收成悬浮在右侧边缘的小竖条(点击展开),非关闭——保留恢复入口。 */
+  const [toolCollapsed, setToolCollapsed] = useState(false);
+  /** pane 内容区宽度 ≥ 阈值(TOOL_SIDEBAR_MIN_PANE_W)。 */
+  const [paneWide, setPaneWide] = useState(false);
+  const paneBoxRef = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    const el = paneBoxRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => {
+      const wide = el.clientWidth >= TOOL_SIDEBAR_MIN_PANE_W;
+      setPaneWide((prev) => (prev === wide ? prev : wide));
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
   const [unsupportedMsg, setUnsupportedMsg] = useState<string | null>(null);
   /** 模型目录(list_codex_models 实时拉取 cc-switch catalog;打开选择器时刷新)。 */
   const [availableModels, setAvailableModels] = useState<CodexModelInfo[]>([]);
@@ -418,12 +407,6 @@ export function CodexPane(props: CodexPaneProps) {
       });
     return () => {
       alive = false;
-    };
-  }, []);
-
-  useEffect(() => {
-    return () => {
-      if (queryTimerRef.current !== null) window.clearTimeout(queryTimerRef.current);
     };
   }, []);
 
@@ -480,57 +463,6 @@ export function CodexPane(props: CodexPaneProps) {
     return () => ro.disconnect();
   }, [activeTabId, hasMessages]);
 
-  // -- slash 面板:基于防抖后的 commandQuery 过滤 FALLBACK 集 --
-  const slashMatches = useMemo<SlashCmd[]>(() => {
-    if (!slashOpen) return [];
-    const all = [...FALLBACK_SLASH_CMDS].sort((a, b) => a.name.localeCompare(b.name));
-    const q = commandQuery.trim().toLowerCase();
-    if (!q) return all;
-    const namePrefix = all.filter((c) => c.name.toLowerCase().startsWith(q));
-    if (namePrefix.length > 0) return namePrefix;
-    return all.filter(
-      (c) => c.name.toLowerCase().includes(q) || (c.description?.toLowerCase().includes(q) ?? false),
-    );
-  }, [slashOpen, commandQuery]);
-
-  /** 已知 slash 命令名集合(输入高亮用)。 */
-  const knownCmdNames = useMemo(() => {
-    const set = new Set<string>();
-    for (const fb of FALLBACK_SLASH_CMDS) set.add(fb.name);
-    return set;
-  }, []);
-
-  /** 渲染输入框高亮层(命令 token 套 chip 背景色)。与 ClaudePane 同实现。 */
-  const renderHighlighted = useCallback(
-    (text: string): ReactNode => {
-      const nodes: ReactNode[] = [];
-      const regex = /(^|\s)(\/(\S+))/g;
-      let lastIndex = 0;
-      let m: RegExpExecArray | null;
-      let key = 0;
-      while ((m = regex.exec(text)) !== null) {
-        const prefix = m[1];
-        const fullToken = m[2];
-        const name = m[3];
-        const tokenStart = m.index + prefix.length;
-        if (tokenStart > lastIndex) nodes.push(text.slice(lastIndex, tokenStart));
-        if (knownCmdNames.has(name)) {
-          nodes.push(
-            <span key={key++} className="rounded-[3px] bg-[var(--mx-selected-bg)] text-transparent">
-              {fullToken}
-            </span>,
-          );
-        } else {
-          nodes.push(fullToken);
-        }
-        lastIndex = tokenStart + fullToken.length;
-      }
-      if (lastIndex < text.length) nodes.push(text.slice(lastIndex));
-      return nodes;
-    },
-    [knownCmdNames],
-  );
-
   // @ 文件引用:fuzzy 过滤(路径含 query),限 50 条。
   const atMatches = useMemo(() => {
     if (!atOpen) return [];
@@ -541,9 +473,6 @@ export function CodexPane(props: CodexPaneProps) {
   useEffect(() => {
     setAtIndex(0);
   }, [atMatches.length]);
-  useEffect(() => {
-    setSlashIndex(0);
-  }, [slashMatches.length]);
 
   const handleInputChange = useCallback(
     (e: React.ChangeEvent<HTMLTextAreaElement>) => {
@@ -553,9 +482,7 @@ export function CodexPane(props: CodexPaneProps) {
 
       const backticksBefore = (v.slice(0, cursorPos).match(/```/g) || []).length;
       if (backticksBefore % 2 === 1) {
-        setSlashOpen(false);
         setAtOpen(false);
-        slashPositionRef.current = -1;
         atPositionRef.current = -1;
         return;
       }
@@ -568,8 +495,6 @@ export function CodexPane(props: CodexPaneProps) {
         setAtOpen(true);
         setAtIndex(0);
         setAtQuery(atMatch[1]);
-        setSlashOpen(false);
-        slashPositionRef.current = -1;
         const cwd = sessions.find((s) => s.id === activeTabId)?.cwd;
         if (cwd && atLoadedCwdRef.current !== cwd) {
           atLoadedCwdRef.current = cwd;
@@ -581,20 +506,6 @@ export function CodexPane(props: CodexPaneProps) {
       }
       setAtOpen(false);
       atPositionRef.current = -1;
-
-      const match = textBeforeCursor.match(/(?:^|\s)(\/\S*)$/);
-      if (!match) {
-        setSlashOpen(false);
-        slashPositionRef.current = -1;
-        return;
-      }
-      const slashPos = (match.index ?? 0) + (match[0].length - match[1].length);
-      const query = match[1].slice(1);
-      slashPositionRef.current = slashPos;
-      setSlashOpen(true);
-      setSlashIndex(-1);
-      if (queryTimerRef.current !== null) window.clearTimeout(queryTimerRef.current);
-      window.setTimeout(() => setCommandQuery(query), 150);
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [sessions, activeTabId],
@@ -610,110 +521,109 @@ export function CodexPane(props: CodexPaneProps) {
     [t],
   );
 
-  const applySlashCommand = useCallback(
-    (cmd: SlashCmd) => {
-      const ta = inputRef.current;
-      // 触发式:/ 指令选中即执行(清掉触发的 /token,关面板,按命令分发)。
-      const slashPos = slashPositionRef.current >= 0 ? slashPositionRef.current : (ta?.selectionStart ?? input.length);
-      const before = input.slice(0, slashPos);
-      const afterSlash = input.slice(slashPos);
-      const spaceIdx = afterSlash.indexOf(" ");
-      const after = spaceIdx !== -1 ? afterSlash.slice(spaceIdx).trimStart() : "";
-      const rest = `${before} ${after}`.replace(/\s+/g, " ").trim();
-      setInput(rest);
-      setSlashOpen(false);
-      slashPositionRef.current = -1;
-      requestAnimationFrame(() => ta?.focus());
+  /** 拉 MCP 服务器列表(config.toml [mcp_servers.*] 段;弹窗与工具侧栏共用)。 */
+  const loadMcp = useCallback(() => {
+    void homeDir()
+      .then((home) =>
+        invoke<{ content: string | null; binary: boolean }>("read_file", { path: `${home}/.codex/config.toml` }),
+      )
+      .then((res) => setMcpServers(res.content && !res.binary ? parseMcpServers(res.content) : []))
+      .catch(() => setMcpServers([]));
+  }, []);
 
-      const transport = getCodexTransportRef.current(activeTabId);
-      switch (cmd.name) {
-        case "new":
-          // 开新会话:清前端 state + 下轮 send 不带 resume(后端清 live id)。
-          transport.newSession();
-          break;
-        case "exit":
-          onCloseTab?.(paneId, activeTabId);
-          break;
-        case "model":
-          setMenuMode("model");
-          break;
-        case "reasoning":
-          setMenuMode("reasoning");
-          break;
-        case "status":
-        case "usage":
-          setCostOpen(true);
-          break;
-        case "help":
-          setHelpOpen(true);
-          break;
-        case "resume":
-          setResumeOpen(true);
-          break;
-        case "diff": {
-          // 查看工作区改动:走 `!` 命令内联跑 git diff。
-          const shellTransport = getShellRunTransportRef.current(activeTabId);
-          const cwd = sessions.find((s) => s.id === activeTabId)?.cwd;
-          void shellTransport.run("git diff", cwd);
-          break;
-        }
-        case "init": {
-          // 资源管理器定位项目 AGENTS.md(codex 的项目指令文件,非 CLAUDE.md)。
-          const cwd = sessions.find((s) => s.id === activeTabId)?.cwd;
-          if (cwd) void invoke("reveal_in_folder", { path: `${cwd}/AGENTS.md`, cwd }).catch(() => {});
-          else setUnsupportedMsg(t("codexpane.unsupportedNoCwd"));
-          break;
-        }
-        case "auth":
-          openCodexHomeFile("auth.json");
-          break;
-        case "mcp": {
-          // 查看 MCP 服务器(与 codex TUI /mcp 对齐):弹窗列 config.toml 的 [mcp_servers.*] 段,
-          // 每次打开重读(改完配置即刷新);「定位 config.toml」降级为弹窗内次要按钮(原直接开资源管理器)。
-          setMcpOpen(true);
-          void homeDir()
-            .then((home) =>
-              invoke<{ content: string | null; binary: boolean }>("read_file", { path: `${home}/.codex/config.toml` }),
-            )
-            .then((res) => setMcpServers(res.content && !res.binary ? parseMcpServers(res.content) : []))
-            .catch(() => setMcpServers([]));
-          break;
-        }
-        case "agent":
-          openCodexHomeFile("AGENTS.md");
-          break;
-        default:
-          setUnsupportedMsg(t("codexpane.unsupported", { cmd: `/${cmd.name}` }));
-      }
-    },
-    [input, activeTabId, paneId, onCloseTab, sessions, t, openCodexHomeFile],
-  );
+  /** 打开 MCP 弹窗(⋯ 工具菜单,窄 pane):每次打开重读(改完配置即刷新)。 */
+  const openMcpDialog = useCallback(() => {
+    setMcpOpen(true);
+    loadMcp();
+  }, [loadMcp]);
 
-  /** Tab 补全:把触发的 /token 替换为 `/<name> `(带尾空格),不执行。与 ClaudePane 同。 */
-  const completeSlashCommand = useCallback(
-    (cmd: SlashCmd) => {
-      const ta = inputRef.current;
-      const slashPos = slashPositionRef.current >= 0 ? slashPositionRef.current : (ta?.selectionStart ?? input.length);
-      const cursorPos = ta?.selectionStart ?? input.length;
-      const before = input.slice(0, slashPos);
-      const afterToken = input.slice(cursorPos);
-      const replacement = `/${cmd.name} `;
-      const next = `${before}${replacement}${afterToken}`;
-      setInput(next);
-      setSlashOpen(false);
-      slashPositionRef.current = -1;
-      if (queryTimerRef.current !== null) {
-        window.clearTimeout(queryTimerRef.current);
-        queryTimerRef.current = null;
-      }
-      setCommandQuery("");
-      requestAnimationFrame(() => {
-        ta?.focus();
-        const pos = (before + replacement).length;
-        ta?.setSelectionRange(pos, pos);
-      });
-    },
-    [input],
+  /** 拉 Plugins 列表(~/.codex/plugins/cache 子目录;弹窗与侧栏共用,目录缺失按空处理)。 */
+  const loadPlugins = useCallback(() => {
+    setCodexPlugins(null);
+    void homeDir()
+      .then((home) =>
+        invoke<{ name: string; kind: string }[]>("list_dir", { path: `${home}/.codex/plugins/cache` }),
+      )
+      .then((entries) => setCodexPlugins(entries.filter((e) => e.kind === "dir").map((e) => e.name)))
+      .catch(() => setCodexPlugins([]));
+  }, []);
+
+  /** 打开 Plugins 弹窗(窄 pane):每次打开重读。 */
+  const openPluginsDialog = useCallback(() => {
+    setPluginsOpen(true);
+    loadPlugins();
+  }, [loadPlugins]);
+
+  // 宽 pane 首次达标 → 自动开侧栏(codex 默认 mcp);缩小态是用户意图,不自动展开。
+  useEffect(() => {
+    if (paneWide && toolPanel === null) setToolPanel("mcp");
+  }, [paneWide, toolPanel]);
+  // 侧栏面板切换/出现时拉数据(与弹窗打开同源,每次重读)。
+  useEffect(() => {
+    if (!toolPanel || !paneWide) return;
+    if (toolPanel === "mcp") loadMcp();
+    else loadPlugins();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [toolPanel, paneWide]);
+
+  /** ⋯ 菜单/侧栏共用的面板切换(宽 pane):展开侧栏并切 panel。 */
+  const showToolPanel = useCallback((p: "mcp" | "plugins") => {
+    setToolCollapsed(false);
+    setToolPanel(p);
+  }, []);
+
+  /** ⋯ 工具菜单分组:资源(mcp/plugins/AGENTS.md/auth)+ 会话动作(模型/推理/用量/帮助/恢复/git diff)
+   *  + 定位(打开项目文件夹)。承接原 / 面板能力入口(codex exec 非交互不支持 slash,动作均为前端映射)。 */
+  const toolsMenuGroups = useMemo<PaneToolsMenuGroup[]>(
+    () => [
+      {
+        label: t("codexpane.toolsGroupResources"),
+        tone: "violet",
+        items: [
+          { label: t("codexpane.toolsMcp"), glyph: "⬡", onClick: paneWide ? () => showToolPanel("mcp") : openMcpDialog },
+          { label: t("codexpane.toolsPlugins"), glyph: "⊞", onClick: paneWide ? () => showToolPanel("plugins") : openPluginsDialog },
+          { label: t("codexpane.toolsAgentFile"), glyph: "◈", onClick: () => openCodexHomeFile("AGENTS.md") },
+          { label: t("codexpane.toolsAuthFile"), glyph: "◎", onClick: () => openCodexHomeFile("auth.json") },
+        ],
+      },
+      {
+        label: t("codexpane.toolsGroupSession"),
+        tone: "accent",
+        items: [
+          { label: t("codexpane.toolsModel"), glyph: "▣", onClick: () => setMenuMode("model") },
+          { label: t("codexpane.toolsReasoning"), glyph: "◔", onClick: () => setMenuMode("reasoning") },
+          { label: t("codexpane.toolsCost"), glyph: "◷", onClick: () => setCostOpen(true) },
+          { label: t("codexpane.toolsHelp"), glyph: "?", onClick: () => setHelpOpen(true) },
+          { label: t("codexpane.toolsResume"), glyph: "↻", onClick: () => setResumeOpen(true) },
+          {
+            label: t("codexpane.toolsDiff"),
+            glyph: "±",
+            // 查看工作区改动:走 `!` 命令内联跑 git diff。
+            onClick: () => {
+              const shellTransport = getShellRunTransportRef.current(activeTabId);
+              const cwd = sessions.find((s) => s.id === activeTabId)?.cwd;
+              void shellTransport.run("git diff", cwd);
+            },
+          },
+        ],
+      },
+      {
+        label: t("codexpane.toolsGroupLocate"),
+        tone: "muted",
+        items: [
+          {
+            label: t("codexpane.toolsOpenFolder"),
+            glyph: "▤",
+            // 项目根目录在资源管理器中打开(cwd 为目录 → explorer 直接打开)。
+            onClick: () => {
+              const cwd = sessions.find((s) => s.id === activeTabId)?.cwd;
+              if (cwd) void invoke("reveal_in_folder", { path: cwd }).catch(() => {});
+            },
+          },
+        ],
+      },
+    ],
+    [t, openMcpDialog, openPluginsDialog, paneWide, showToolPanel, openCodexHomeFile, activeTabId, sessions],
   );
 
   /** @ 文件引用:选中文件 -> 替换 @token 为 `@<path> `。 */
@@ -828,7 +738,6 @@ export function CodexPane(props: CodexPaneProps) {
       if (shellRunning) return;
       const cmd = text.slice(1).trim();
       setInput("");
-      setSlashOpen(false);
       if (cmd) {
         const shellTransport = getShellRunTransportRef.current(activeTabId);
         const cwd = sessions.find((s) => s.id === activeTabId)?.cwd;
@@ -839,14 +748,12 @@ export function CodexPane(props: CodexPaneProps) {
     // /new:开新会话(清 state + 下轮不带 resume)。
     if (text === "/new" || text === "/clear") {
       setInput("");
-      setSlashOpen(false);
       transport.newSession();
       return;
     }
     // /exit:关闭 tab。
     if (text === "/exit") {
       setInput("");
-      setSlashOpen(false);
       onCloseTab?.(paneId, activeTabId);
       return;
     }
@@ -855,7 +762,6 @@ export function CodexPane(props: CodexPaneProps) {
       await transport.interrupt();
     }
     setInput("");
-    setSlashOpen(false);
     // 发送前立即贴底(与 ClaudePane 对齐):用户手动发消息后若已上滚看历史,强制滚到底
     // 看到自己的消息与回复,避免留在原视口(乐观插入 + transport.send 异步的时序抖动)。
     scrollToBottom();
@@ -942,8 +848,6 @@ export function CodexPane(props: CodexPaneProps) {
 
   // -- 双击 Esc 中断(对齐 claude code/codex 交互) --
   const lastEscRef = useRef(0);
-  const slashOpenRef = useRef(slashOpen);
-  slashOpenRef.current = slashOpen;
   const busyRef = useRef(busy);
   busyRef.current = busy;
   const handleInterruptRef = useRef(handleInterrupt);
@@ -968,7 +872,6 @@ export function CodexPane(props: CodexPaneProps) {
     if (!focused) return;
     const handler = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
-      if (slashOpenRef.current) return;
       const now = Date.now();
       if (now - lastEscRef.current < 400) {
         lastEscRef.current = 0;
@@ -1072,6 +975,7 @@ export function CodexPane(props: CodexPaneProps) {
 
   return (
     <article
+      ref={paneBoxRef}
       className={`grid h-full min-h-0 min-w-0 grid-rows-[length:var(--mx-paneheader-h)_1fr] overflow-hidden bg-[var(--mx-editor-bg)] ${className ?? ""}`}
       onMouseDown={() => onFocusPane?.(paneId)}
     >
@@ -1097,6 +1001,8 @@ export function CodexPane(props: CodexPaneProps) {
           </TabsList>
         </Tabs>
         <div className="flex shrink-0 items-center gap-1 text-[var(--mx-muted)]">
+          {/* ⋯ 工具菜单:mcp/plugins 等资源查看 + 会话动作(模型/推理/恢复等,承接原 / 面板入口)。 */}
+          <PaneToolsMenu groups={toolsMenuGroups} tooltip={t("codexpane.toolsTooltip")} />
           {/* ◱ 展开/还原所在分屏比例(主体 pane 占大头;单 pane 项目 AppShell no-op)。
               展开态图标/文案切换(◱ 展开 / ◫ 还原),状态真身在 AppShell 展开记忆。 */}
           {onToggleExpand && <PaneExpandButton expanded={expanded} onToggle={onToggleExpand} t={t} />}
@@ -1227,8 +1133,10 @@ export function CodexPane(props: CodexPaneProps) {
         </div>
       </header>
 
-      {/* 主体:消息流 + 底部浮动输入区。 */}
-      <div className="grid min-h-0 min-w-0 grid-rows-[1fr_auto]">
+      {/* 主体行:对话区(flex-1:消息流 + 输入区)+ 宽 pane 工具侧栏(MCP/Plugins 常驻)。
+          relative 供缩小态悬浮小竖条定位。 */}
+      <div className="relative flex min-h-0 min-w-0 flex-1">
+      <div className="grid min-h-0 min-w-0 flex-1 grid-rows-[1fr_auto]">
         <div ref={scrollRef} onScroll={handleScroll} className="mx-scroll-pretty relative min-h-0 overflow-y-auto px-4 py-4" style={{ fontSize }}>
           {state && (state.messages.length > 0 || (shellState?.messages.length ?? 0) > 0) ? (
             <div ref={contentRef} className="mx-auto w-full max-w-[54.25rem] space-y-1">
@@ -1273,7 +1181,7 @@ export function CodexPane(props: CodexPaneProps) {
             <div className="grid h-full place-items-center">
               {state ? (
                 <div className="flex flex-col items-center gap-2.5 py-10">
-                  <span aria-hidden className="grid h-10 w-10 place-items-center rounded-xl bg-[var(--mx-accent)] text-sm font-extrabold text-[var(--mx-accent-contrast)] shadow-lg">
+                  <span aria-hidden className="grid h-10 w-10 place-items-center rounded-full bg-[var(--mx-accent)] text-sm font-extrabold text-[var(--mx-accent-contrast)] shadow-lg">
                     X
                   </span>
                   <span className="text-xs text-[var(--mx-muted)]">
@@ -1306,13 +1214,13 @@ export function CodexPane(props: CodexPaneProps) {
         {/* 底部浮动输入区:状态行 + textarea + 发送/中断按钮。 */}
         <div className="shrink-0 px-4 pb-3 pt-1">
           <div className="mx-auto w-full max-w-[54.25rem]">
-            {/* 会话状态指示行:思考中(紫)> 执行中(蓝,带当前 running 工具名)。
-                busy 全程可见 -- 与 ClaudePane 对等,长命令运行中用户也能察觉会话仍在进行。 */}
+            {/* 会话状态指示行:思考中 > 执行中(带当前 running 工具名)。
+                busy 全程可见 -- 与 ClaudePane 对等,长命令运行中用户也能察觉会话仍在进行。
+                文字一律 muted(高饱和品牌色整行显示:深主题刺眼/亮主题对比不足看不清),
+                色彩语义由 ThinkingDots 呼吸点承载。 */}
             {busy && (
               <div
-                className={`mb-1.5 flex items-center gap-2 px-1 ${
-                  thinkingNow ? "text-[var(--mx-violet)]" : "text-[var(--mx-accent)]"
-                }`}
+                className="mb-1.5 flex items-center gap-2 px-1 text-[var(--mx-muted)]"
                 style={{ fontSize: statusFontPx }}
               >
                 <ThinkingDots />
@@ -1357,28 +1265,17 @@ export function CodexPane(props: CodexPaneProps) {
                 </Button>
               </div>
             ) : (
-              <Popover open={(slashOpen && slashMatches.length > 0) || (atOpen && atMatches.length > 0)}>
+              <Popover open={atOpen && atMatches.length > 0}>
                 <PopoverAnchor asChild>
-                  <div className="mx-chip flex flex-col border border-[var(--mx-border)] bg-[var(--mx-card-bg)] px-3 py-2 shadow-lg focus-within:border-[var(--mx-accent)]">
+                  <div className="mx-chip flex flex-col rounded-[var(--mx-radius-lg)] border border-[var(--mx-border)] bg-[var(--mx-card-bg)] px-3 py-2 shadow-lg focus-within:border-[var(--mx-accent)]">
                     <div className="flex items-end gap-2">
                     <div className="relative min-w-0 flex-1">
-                      <div
-                        ref={highlightRef}
-                        aria-hidden
-                        className="pointer-events-none absolute inset-0 overflow-hidden whitespace-pre-wrap p-0 font-mono text-transparent"
-                        style={{ fontSize, lineHeight: "1.5" }}
-                      >
-                        {input ? renderHighlighted(input) : null}
-                      </div>
                       <textarea
                         ref={inputRef}
                         value={input}
                         onChange={handleInputChange}
-                        onScroll={(e) => {
-                          if (highlightRef.current) highlightRef.current.scrollTop = e.currentTarget.scrollTop;
-                        }}
                         onKeyDown={(e) => {
-                          // Alt+Enter 恒为换行(优先于 @/slash 面板选中与发送;
+                          // Alt+Enter 恒为换行(优先于 @ 面板选中与发送;
                           // Windows Chromium textarea 对带 Alt 的 Enter 默认不插换行,故手动补)。
                           if (e.key === "Enter" && e.altKey && !e.nativeEvent.isComposing) {
                             e.preventDefault();
@@ -1393,7 +1290,7 @@ export function CodexPane(props: CodexPaneProps) {
                             return;
                           }
                           // ↑/↓ 浏览输入历史。
-                          if (!slashOpen && !atOpen && !e.nativeEvent.isComposing && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
+                          if (!atOpen && !e.nativeEvent.isComposing && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
                             const ta = inputRef.current;
                             const pos = ta?.selectionStart ?? input.length;
                             const before = input.slice(0, pos);
@@ -1432,34 +1329,6 @@ export function CodexPane(props: CodexPaneProps) {
                               return;
                             }
                           }
-                          // slash 面板键位。
-                          if (slashOpen) {
-                            if (e.key === "ArrowDown" && slashMatches.length > 0) {
-                              e.preventDefault();
-                              setSlashIndex((i) => (i < slashMatches.length - 1 ? i + 1 : 0));
-                              return;
-                            }
-                            if (e.key === "ArrowUp" && slashMatches.length > 0) {
-                              e.preventDefault();
-                              setSlashIndex((i) => (i > 0 ? i - 1 : slashMatches.length - 1));
-                              return;
-                            }
-                            if (e.key === "Tab" && !e.shiftKey && !e.nativeEvent.isComposing && slashMatches.length > 0) {
-                              e.preventDefault();
-                              completeSlashCommand(slashMatches[slashIndex >= 0 ? slashIndex : 0] ?? slashMatches[0]);
-                              return;
-                            }
-                            if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing && slashMatches.length > 0) {
-                              e.preventDefault();
-                              applySlashCommand(slashMatches[slashIndex >= 0 ? slashIndex : 0] ?? slashMatches[0]);
-                              return;
-                            }
-                            if (e.key === "Escape") {
-                              e.preventDefault();
-                              setSlashOpen(false);
-                              return;
-                            }
-                          }
                           // Shift+Tab 循环切换 sandbox 策略。
                           if (e.key === "Tab" && e.shiftKey) {
                             e.preventDefault();
@@ -1473,7 +1342,7 @@ export function CodexPane(props: CodexPaneProps) {
                           }
                         }}
                         rows={2}
-                        placeholder={t("codexpane.slashHint")}
+                        placeholder={t("codexpane.inputHint")}
                         /* field-sizing-content:随内容在 min-h~max-h 间自动长高,超高才内部滚动(滚轮仍可滚);
                            滚动条隐藏而非美化:占宽会让 textarea 换行窄于覆盖层,造成视觉错位。 */
                         className="relative max-h-[160px] min-h-[36px] w-full field-sizing-content resize-none bg-transparent p-0 font-mono caret-[var(--mx-text)] text-[var(--mx-text)] outline-none placeholder:text-[var(--mx-faint)] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
@@ -1486,7 +1355,7 @@ export function CodexPane(props: CodexPaneProps) {
                         aria-label={t("codexpane.interrupt")}
                         onClick={handleInterrupt}
                         onMouseDown={(e) => e.stopPropagation()}
-                        className="mb-0.5 grid h-9 w-9 shrink-0 place-items-center rounded-lg text-[var(--mx-danger-bright)] transition-colors hover:bg-[var(--mx-danger-bg)] hover:text-[var(--mx-danger)]"
+                        className="mb-0.5 grid h-9 w-9 shrink-0 place-items-center rounded-full text-[var(--mx-danger-bright)] transition-colors hover:bg-[var(--mx-danger-bg)] hover:text-[var(--mx-danger)]"
                       >
                         <IconStop />
                       </button>
@@ -1497,7 +1366,7 @@ export function CodexPane(props: CodexPaneProps) {
                         onClick={handleSend}
                         disabled={!canSend}
                         onMouseDown={(e) => e.stopPropagation()}
-                        className="mb-0.5 grid h-9 w-9 shrink-0 place-items-center rounded-lg text-[var(--mx-muted)] transition-colors hover:bg-[var(--mx-accent-soft)] hover:text-[var(--mx-accent)] disabled:cursor-not-allowed disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-[var(--mx-muted)]"
+                        className="mb-0.5 grid h-9 w-9 shrink-0 place-items-center rounded-full text-[var(--mx-muted)] transition-colors hover:bg-[var(--mx-accent-soft)] hover:text-[var(--mx-accent)] disabled:cursor-not-allowed disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-[var(--mx-muted)]"
                       >
                         <IconSend />
                       </button>
@@ -1723,30 +1592,19 @@ export function CodexPane(props: CodexPaneProps) {
                   className="mx-menu w-[360px] max-w-[calc(100vw-2rem)] overflow-hidden border border-[var(--mx-border)] bg-[var(--mx-surface)] p-1.5 shadow-xl"
                 >
                   <div className="mx-scroll-pretty max-h-[min(50vh,420px)] overflow-y-auto p-0.5">
-                  {atOpen
-                    ? atMatches.map((f, i) => (
-                        <button
-                          key={f.path}
-                          type="button"
-                          onMouseDown={(e) => e.stopPropagation()}
-                          onClick={() => applyAtFile(f)}
-                          onMouseEnter={() => setAtIndex(i)}
-                          className={`flex w-full items-center gap-2 rounded px-2 py-1 text-left transition-colors ${i === atIndex ? "bg-[var(--mx-selected-bg)]" : "hover:bg-[var(--mx-hover-bg)]"}`}
-                        >
-                          <span className="shrink-0 text-[10px] text-[var(--mx-faint)]">@</span>
-                          <span className="truncate font-mono text-[11px] text-[var(--mx-text)]" title={f.path}>{f.path}</span>
-                        </button>
-                      ))
-                    : slashMatches.map((cmd, i) => (
-                        <CommandItem
-                          key={cmd.name}
-                          cmd={cmd}
-                          index={i}
-                          selected={i === slashIndex}
-                          onSelect={applySlashCommand}
-                          onHover={setSlashIndex}
-                        />
-                      ))}
+                  {atMatches.map((f, i) => (
+                    <button
+                      key={f.path}
+                      type="button"
+                      onMouseDown={(e) => e.stopPropagation()}
+                      onClick={() => applyAtFile(f)}
+                      onMouseEnter={() => setAtIndex(i)}
+                      className={`flex w-full items-center gap-2 rounded px-2 py-1 text-left transition-colors ${i === atIndex ? "bg-[var(--mx-selected-bg)]" : "hover:bg-[var(--mx-hover-bg)]"}`}
+                    >
+                      <span className="shrink-0 text-[10px] text-[var(--mx-faint)]">@</span>
+                      <span className="truncate font-mono text-[11px] text-[var(--mx-text)]" title={f.path}>{f.path}</span>
+                    </button>
+                  ))}
                   </div>
                 </PopoverContent>
               </Popover>
@@ -1754,7 +1612,120 @@ export function CodexPane(props: CodexPaneProps) {
           </div>
         </div>
       </div>
-            {/* slash 命令触发的弹窗 + 不支持命令的底部 toast。 */}
+      {/* 宽 pane 工具侧栏(悬浮卡片式,同输入卡质感):MCP/Plugins 常驻列表;
+          缩小态收成右侧边缘悬浮小竖条(点击展开),窄 pane 整体回落弹窗。 */}
+      {toolPanel && paneWide && !toolCollapsed && (
+        <aside className="my-2 mr-2 flex w-[248px] shrink-0 flex-col overflow-hidden rounded-[var(--mx-radius-lg)] border border-[var(--mx-border)] bg-[var(--mx-card-bg)] shadow-md">
+          {/* 面板切换:纯文字 mini tab(10px,极细竖线分隔,active=亮色 medium,无图标,
+              视觉重量最小)+ 缩小按钮(收成边缘悬浮图标块,非关闭)。 */}
+          <div className="flex shrink-0 items-center gap-2.5 border-b border-[var(--mx-border)] px-3 py-1.5">
+            {([["mcp", "MCP"], ["plugins", "Plugins"]] as const).map(([p, label], i) => {
+              const active = toolPanel === p;
+              return (
+                <Fragment key={p}>
+                  {i > 0 && <span aria-hidden className="h-[9px] w-px shrink-0 bg-[var(--mx-border)]" />}
+                  <button
+                    type="button"
+                    onClick={() => setToolPanel(p)}
+                    className={`cursor-pointer text-[10px] transition-colors ${
+                      active
+                        ? "font-medium text-[var(--mx-text)]"
+                        : "text-[var(--mx-faint)] hover:text-[var(--mx-text)]"
+                    }`}
+                  >
+                    {label}
+                  </button>
+                </Fragment>
+              );
+            })}
+            <button
+              type="button"
+              aria-label="collapse"
+              onClick={() => setToolCollapsed(true)}
+              onMouseDown={(e) => e.stopPropagation()}
+              className="ml-auto grid h-4 w-4 shrink-0 cursor-pointer place-items-center rounded text-[11px] text-[var(--mx-faint)] transition-colors hover:bg-[var(--mx-hover-bg)] hover:text-[var(--mx-text)]"
+            >
+              »
+            </button>
+          </div>
+          {/* 列表(行样式与弹窗一致)。 */}
+          <div className="mx-scroll-pretty min-h-0 flex-1 overflow-y-auto p-2">
+            {toolPanel === "mcp" &&
+              (mcpServers === null ? (
+                <div className="grid place-items-center py-8 text-[11px] text-[var(--mx-faint)]">{t("common.loading")}</div>
+              ) : mcpServers.length === 0 ? (
+                <div className="grid place-items-center px-4 py-8 text-center text-[11px] text-[var(--mx-faint)]">{t("codexpane.mcpEmpty")}</div>
+              ) : (
+                mcpServers.map((s) => (
+                  <div key={s.name} className="flex min-w-0 items-center gap-2 rounded-md px-2 py-[5px] hover:bg-[var(--mx-hover-bg)]">
+                    <span aria-hidden className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--mx-success)]" />
+                    <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-[var(--mx-text)]">{s.name}</span>
+                    {s.brief && (
+                      <span className="max-w-[90px] shrink-0 truncate text-right font-mono text-[10px] text-[var(--mx-faint)]" title={s.brief}>
+                        {s.brief}
+                      </span>
+                    )}
+                  </div>
+                ))
+              )
+            )}
+            {toolPanel === "mcp" && mcpServers !== null && mcpServers.length > 0 && (
+              <div className="px-1.5 pt-2 text-[10px] text-[var(--mx-faint)]">{t("codexpane.mcpPluginNote")}</div>
+            )}
+            {toolPanel === "plugins" &&
+              (codexPlugins === null ? (
+                <div className="grid place-items-center py-8 text-[11px] text-[var(--mx-faint)]">{t("common.loading")}</div>
+              ) : codexPlugins.length === 0 ? (
+                <div className="grid place-items-center px-4 py-8 text-center text-[11px] text-[var(--mx-faint)]">{t("codexpane.pluginsEmpty")}</div>
+              ) : (
+                codexPlugins.map((name) => (
+                  <div key={name} className="flex min-w-0 items-center gap-2 rounded-md px-2 py-[5px] hover:bg-[var(--mx-hover-bg)]">
+                    <span aria-hidden className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--mx-violet)]" />
+                    <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-[var(--mx-text)]">{name}</span>
+                  </div>
+                ))
+              )
+            )}
+          </div>
+          {/* footer:在资源管理器定位当前面板对应目录/文件(轻量文字链接式,非按钮)。 */}
+          <div className="shrink-0 border-t border-[var(--mx-border)] px-3 py-1.5">
+            <button
+              type="button"
+              onClick={() => {
+                if (toolPanel === "mcp") {
+                  openCodexHomeFile("config.toml");
+                } else {
+                  void homeDir()
+                    .then((home) => void invoke("reveal_in_folder", { path: `${home}/.codex/plugins` }).catch(() => {}))
+                    .catch(() => {});
+                }
+              }}
+              className="cursor-pointer text-[10px] text-[var(--mx-faint)] transition-colors hover:text-[var(--mx-accent)]"
+            >
+              ↗ {toolPanel === "mcp" ? t("codexpane.mcpReveal") : t("codexpane.pluginsReveal")}
+            </button>
+          </div>
+        </aside>
+      )}
+      {/* 缩小态:悬浮在右侧偏顶部的小图标块(当前面板 glyph;点击展开;窄 pane 隐藏)。 */}
+      {toolPanel && paneWide && toolCollapsed && (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <button
+              type="button"
+              aria-label="expand tools"
+              onClick={() => setToolCollapsed(false)}
+              onMouseDown={(e) => e.stopPropagation()}
+              className="mx-icon-tile absolute right-1 top-3 z-10 grid h-7 w-7 cursor-pointer place-items-center border border-[var(--mx-border)] bg-[var(--mx-card-bg)] text-[13px] font-bold text-[var(--mx-muted)] shadow-md transition-colors hover:border-[var(--mx-accent)] hover:text-[var(--mx-accent)]"
+            >
+              {toolPanel === "mcp" ? "⬡" : "⊞"}
+            </button>
+          </TooltipTrigger>
+          <TooltipContent>{t("codexpane.toolsTooltip")}</TooltipContent>
+        </Tooltip>
+      )}
+      </div>
+            {/* ⋯ 工具菜单触发的弹窗 + 定位失败的底部 toast。 */}
             <DialogLike open={helpOpen} onClose={() => setHelpOpen(false)} title={t("codexpane.helpTitle")}>
               <div className="mt-3 space-y-1.5 text-[11px] text-[var(--mx-muted)]">
                 <div><kbd className="rounded bg-[var(--mx-hover-bg)] px-1 font-mono text-[10px]">Enter</kbd> 发送 · <kbd className="rounded bg-[var(--mx-hover-bg)] px-1 font-mono text-[10px]">Shift+Enter</kbd> 换行</div>
@@ -1774,35 +1745,73 @@ export function CodexPane(props: CodexPaneProps) {
                 <div>耗时<span className="ml-2 text-[var(--mx-text)]"><ElapsedText start={sessionStart} /></span></div>
               </div>
             </DialogLike>
-            {/* /mcp:MCP 服务器列表(config.toml [mcp_servers.*] 段);插件型 MCP 由 codex 自动加载。 */}
+            {/* /mcp:MCP 服务器列表(config.toml [mcp_servers.*] 段,⋯ 工具菜单打开);插件型 MCP 由 codex 自动加载。 */}
             <DialogLike open={mcpOpen} onClose={() => setMcpOpen(false)} title={t("codexpane.mcpTitle")}>
-              <div className="mt-3 space-y-1.5 text-[11px] text-[var(--mx-muted)]">
+              <div className="mx-scroll-pretty mt-2 max-h-[55vh] overflow-y-auto">
                 {mcpServers === null ? (
-                  <div>{t("common.loading")}</div>
+                  <div className="grid place-items-center py-8 text-[11px] text-[var(--mx-faint)]">{t("common.loading")}</div>
                 ) : mcpServers.length === 0 ? (
-                  <div>{t("codexpane.mcpEmpty")}</div>
+                  <div className="grid place-items-center px-6 py-8 text-center text-[11px] text-[var(--mx-faint)]">
+                    {t("codexpane.mcpEmpty")}
+                  </div>
                 ) : (
                   mcpServers.map((s) => (
-                    <div key={s.name} className="flex min-w-0 items-center gap-2">
+                    <div key={s.name} className="flex min-w-0 items-center gap-2 rounded-md px-2 py-[5px] hover:bg-[var(--mx-hover-bg)]">
                       <span aria-hidden className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--mx-success)]" />
-                      <span className="shrink-0 font-mono text-[var(--mx-text)]">{s.name}</span>
+                      <span className="shrink-0 font-mono text-[11px] text-[var(--mx-text)]">{s.name}</span>
                       {s.brief && (
-                        <span className="min-w-0 flex-1 truncate font-mono text-[10px] text-[var(--mx-faint)]" title={s.brief}>
+                        <span className="min-w-0 flex-1 truncate text-right font-mono text-[10px] text-[var(--mx-faint)]" title={s.brief}>
                           {s.brief}
                         </span>
                       )}
                     </div>
                   ))
                 )}
-                <div className="pt-1 text-[10px] text-[var(--mx-faint)]">{t("codexpane.mcpPluginNote")}</div>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  className="self-start text-[10px] text-[var(--mx-muted)] hover:text-[var(--mx-text)]"
-                  onClick={() => openCodexHomeFile("config.toml")}
-                >
-                  {t("codexpane.mcpReveal")}
-                </Button>
+                <div className="px-1.5 pt-2 text-[10px] text-[var(--mx-faint)]">{t("codexpane.mcpPluginNote")}</div>
+                <div className="mt-2 border-t border-[var(--mx-border)] pt-2">
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="text-[10px] text-[var(--mx-muted)] hover:text-[var(--mx-text)]"
+                    onClick={() => openCodexHomeFile("config.toml")}
+                  >
+                    {t("codexpane.mcpReveal")}
+                  </Button>
+                </div>
+              </div>
+            </DialogLike>
+            {/* Plugins 列表(~/.codex/plugins/cache 下的子目录;⋯ 工具菜单打开)。 */}
+            <DialogLike open={pluginsOpen} onClose={() => setPluginsOpen(false)} title={t("codexpane.pluginsTitle")}>
+              <div className="mx-scroll-pretty mt-2 max-h-[55vh] overflow-y-auto">
+                {codexPlugins === null ? (
+                  <div className="grid place-items-center py-8 text-[11px] text-[var(--mx-faint)]">{t("common.loading")}</div>
+                ) : codexPlugins.length === 0 ? (
+                  <div className="grid place-items-center px-6 py-8 text-center text-[11px] text-[var(--mx-faint)]">
+                    {t("codexpane.pluginsEmpty")}
+                  </div>
+                ) : (
+                  codexPlugins.map((name) => (
+                    <div key={name} className="flex min-w-0 items-center gap-2 rounded-md px-2 py-[5px] hover:bg-[var(--mx-hover-bg)]">
+                      <span aria-hidden className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--mx-violet)]" />
+                      <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-[var(--mx-text)]">{name}</span>
+                    </div>
+                  ))
+                )}
+                <div className="px-1.5 pt-2 text-[10px] text-[var(--mx-faint)]">{t("codexpane.mcpPluginNote")}</div>
+                <div className="mt-2 border-t border-[var(--mx-border)] pt-2">
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="text-[10px] text-[var(--mx-muted)] hover:text-[var(--mx-text)]"
+                    onClick={() => {
+                      void homeDir()
+                        .then((home) => invoke("reveal_in_folder", { path: `${home}/.codex/plugins` }).catch(() => {}))
+                        .catch(() => {});
+                    }}
+                  >
+                    {t("codexpane.pluginsReveal")}
+                  </Button>
+                </div>
               </div>
             </DialogLike>
             {unsupportedMsg && (
@@ -1879,10 +1888,10 @@ const MessageRow = memo(function MessageRow({
     <div className="group/message flex items-start gap-1.5">
       {/* A1 角色徽标:assistant 品牌块(青 X),置于气泡左侧。 */}
       <span aria-hidden className="flex h-[1.625em] shrink-0 items-center">
-        <span className="grid h-[18px] w-[18px] place-items-center rounded-md bg-[var(--mx-accent)] text-[10px] font-extrabold text-[var(--mx-accent-contrast)]">X</span>
+        <span className="grid h-[18px] w-[18px] place-items-center rounded-full bg-[var(--mx-accent)] text-[10px] font-extrabold text-[var(--mx-accent-contrast)]">X</span>
       </span>
       <div className="group min-w-0 flex-1">
-        <div className="flex flex-col gap-2 rounded-lg rounded-bl-[4px] bg-[var(--mx-card-bg)] px-3 py-1.5">
+        <div className="flex flex-col gap-2 rounded-2xl rounded-bl-[6px] bg-[var(--mx-card-bg)] px-3 py-1.5">
           {message.blocks.map((b, i) => (
             <BlockView key={i} block={b} t={t} />
           ))}
@@ -2476,84 +2485,5 @@ function IconWarn() {
       <path d="M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z" />
       <path d="M12 9v4M12 17h.01" />
     </svg>
-  );
-}
-
-function IconSlash() {
-  return (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" aria-hidden>
-      <path d="M7 8l-3 4 3 4" />
-      <path d="M17 8l3 4-3 4" />
-      <path d="M14 4l-4 16" />
-    </svg>
-  );
-}
-
-/**
- * slash 命令面板单条候选(选中项 scrollIntoView 跟随)。与 ClaudePane 的 CommandItem 同实现。
- */
-function CommandItem({
-  cmd,
-  index,
-  selected,
-  onSelect,
-  onHover,
-}: {
-  cmd: SlashCmd;
-  index: number;
-  selected: boolean;
-  onSelect: (cmd: SlashCmd) => void;
-  onHover: (index: number) => void;
-}) {
-  const ref = useRef<HTMLButtonElement | null>(null);
-  useEffect(() => {
-    if (selected && ref.current) {
-      ref.current.scrollIntoView({ block: "nearest" });
-    }
-  }, [selected]);
-  return (
-    <button
-      ref={ref}
-      type="button"
-      onMouseDown={(e) => e.stopPropagation()}
-      onMouseEnter={() => onHover(index)}
-      onClick={() => onSelect(cmd)}
-      className={`group relative mb-1 flex w-full cursor-pointer items-start gap-2 rounded border px-2.5 py-2 text-left transition-all ${
-        selected
-          ? "border-[var(--mx-selected-border)] bg-[var(--mx-selected-bg)]"
-          : "border-transparent hover:border-[var(--mx-border)] hover:bg-[var(--mx-hover-bg)]"
-      }`}
-    >
-      {selected && (
-        <span className="absolute bottom-1.5 left-1.5 top-1.5 w-0.5 rounded-full bg-[var(--mx-accent)]" />
-      )}
-      <span
-        className={`mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-md border ${
-          selected
-            ? "border-[var(--mx-selected-border)] bg-[var(--mx-selected-bg)] text-[var(--mx-accent)]"
-            : "border-[var(--mx-border)] bg-[var(--mx-border-soft)] text-[var(--mx-muted)]"
-        }`}
-      >
-        <IconSlash />
-      </span>
-      <div className="min-w-0 flex-1 pr-1">
-        <span className="block min-w-0 truncate font-mono text-[13px] font-semibold text-[var(--mx-text)]">
-          /{cmd.name}
-        </span>
-        {cmd.description && (
-          <span className="block truncate text-[12px] leading-4 text-[var(--mx-faint)]">
-            {cmd.description}
-          </span>
-        )}
-      </div>
-      {selected && (
-        <span className="mt-1 flex h-6 w-6 shrink-0 items-center justify-center rounded border border-[var(--mx-selected-border)] bg-[var(--mx-accent-soft)] text-[var(--mx-accent)]">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" aria-hidden>
-            <path d="M9 10l-5 3 5 3" />
-            <path d="M4 13h13a4 4 0 0 1 0 8h-1" />
-          </svg>
-        </span>
-      )}
-    </button>
   );
 }

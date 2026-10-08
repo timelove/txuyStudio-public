@@ -19,7 +19,7 @@ const muxyRustTree: PaneNode = {
     {
       type: "pane",
       id: "muxy-ps-1",
-      tabs: [{ id: "muxy-ps-1", shellKind: "shell", title: "PowerShell" }],
+      tabs: [{ id: "muxy-ps-1", shellKind: "shell", title: "shellkind.terminal" }],
       activeTabId: "muxy-ps-1",
     },
     {
@@ -52,7 +52,7 @@ export const mockProjects: AppSnapshot = {
           {
             id: "muxy-ps-1",
             paneId: "muxy-ps-1",
-            name: "PowerShell",
+            name: "shellkind.terminal",
             kind: "shell",
             command: "shell",
             cwd: "D:\\work\\rust\\muxy_rust",
@@ -109,7 +109,7 @@ export const mockProjects: AppSnapshot = {
           {
             id: "web-ps-1",
             paneId: "web-ps-1",
-            name: "PowerShell",
+            name: "shellkind.terminal",
             kind: "shell",
             command: "shell",
             cwd: "D:\\work\\web\\muxy_web",

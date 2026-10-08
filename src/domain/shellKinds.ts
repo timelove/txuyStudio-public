@@ -26,7 +26,9 @@ export const SHELL_KIND_META: Record<
   // 与 codex(旧 xterm TUI)同色同字,作为唯一「Codex」新建入口;codex 退居兼容存量 tab,
   // 移出 NEW_SHELL_GROUPS 不再作为新建入口(同 claude->claudepane 迁移)。详见 plan: CodexPane。
   codexpane: { accent: "#22d3ee", glyph: "X", label: "Codex", defaultTitle: "Codex" },
-  shell: { accent: "#94a3b8", glyph: ">", label: "PowerShell", defaultTitle: "PowerShell" },
+  // shell:通用终端 pane——实际 spawn pwsh.exe(PowerShell 7)优先、回退 powershell.exe
+  // (见 pty::commands::pick_shell),名字特指 PowerShell 不准确且未来可换 shell,中性化为「终端」。
+  shell: { accent: "#94a3b8", glyph: ">", label: "shellkind.terminal", defaultTitle: "shellkind.terminal" },
   test: { accent: "#22c55e", glyph: "T", label: "Tests", defaultTitle: "Tests" },
   // TUI 工具:在 PTY 里启动对应 CLI,退出后回到 PowerShell(见 launch_command_for)。
   // 配色与既有 shell accent 拉开:lazygit 青、yazi 琥珀、fresh 紫。

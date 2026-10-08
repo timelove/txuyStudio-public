@@ -66,6 +66,8 @@ type TabTerminal = {
   disposeScrollback: { dispose: () => void };
   /** DECSCUSR 拦截器 dispose(锁定光标形状为 bar)。null=注册失败兜底。 */
   disposeCursorLock: { dispose: () => void } | null;
+  /** 取消待发的防抖 PTY resize(关 tab 时清,防 dispose 后 invoke)。 */
+  cancelPtyResize: () => void;
   /** buffer 切换(normal↔alternate)订阅取消:TUI 进出时按 buffer 类型 refit 切换 margin。 */
   disposeBufferChange: { dispose: () => void };
 };
@@ -315,10 +317,21 @@ export function TerminalPane({
       void transport.write(tabId, data);
     });
 
+    // PTY 尺寸通知防抖句柄:拖拽中 ResizeObserver 每帧触发,若每帧都 invoke resize_pty,
+    // ConPTY 会按每个中间宽度反复重绘屏幕、重绘字节流全部追加进 xterm buffer——
+    // 「ls 后拖拽窗口内容重复/错乱」的来源。xterm 自身 fit 保持每帧即时(视觉网格与
+    // reflow 连续),PTY 只在拖拽停顿 150ms 后收最终尺寸,ConPTY 按最终宽度重绘一次。
+    let ptyResizeTimer = 0;
     const observer = new ResizeObserver(() => {
       // 隐藏 tab 的容器尺寸为 0,fit 会算错;仅在 tab 可见时 fit + resize。
       if (container.offsetParent === null) return;
-      refit(terminal, fitAddon, fontSize, (cols, rows) => void transport.resize(tabId, cols, rows));
+      fitWithMargin(terminal, fitAddon, fontSize);
+      terminal.refresh(0, terminal.rows - 1);
+      if (ptyResizeTimer) window.clearTimeout(ptyResizeTimer);
+      ptyResizeTimer = window.setTimeout(() => {
+        ptyResizeTimer = 0;
+        void transport.resize(tabId, terminal.cols, terminal.rows);
+      }, 150);
       // 上报 pane 整体尺寸(分屏方向自适应)。各 tab 共用同一 pane 尺寸,任一可见 tab 上报即可。
       const el = paneRef.current;
       const measure = onMeasurePaneRef.current;
@@ -374,6 +387,10 @@ export function TerminalPane({
       disposeScrollback,
       disposeCursorLock,
       disposeBufferChange,
+      cancelPtyResize: () => {
+        if (ptyResizeTimer) window.clearTimeout(ptyResizeTimer);
+        ptyResizeTimer = 0;
+      },
     });
 
     // 启动后端会话(先 listen 后 spawn 由 transport 内部保证)。
@@ -388,6 +405,7 @@ export function TerminalPane({
   const disposeTerminal = (tabId: string) => {
     const t = terminalsRef.current.get(tabId);
     if (!t) return;
+    t.cancelPtyResize();
     t.unsubscribe();
     t.disposeOnData.dispose();
     t.disposeCursorMove.dispose();

@@ -1,5 +1,6 @@
-import { Fragment, lazy, memo, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Fragment, lazy, memo, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { homeDir } from "@tauri-apps/api/path";
 import { selectEnclosingPre } from "../lib/selectEnclosingPre";
 import { SettingsModal } from "./SettingsModal";
 import { Dialog, DialogContent, DialogTitle } from "./ui/Dialog";
@@ -33,6 +34,7 @@ import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from "./ui/Pop
 import { Button } from "./ui/Button";
 import { CopyButton } from "./ui/CopyButton";
 import { PaneExpandButton } from "./ui/PaneExpandButton";
+import { PaneToolsMenu, TOOL_SIDEBAR_MIN_PANE_W, type PaneToolsMenuGroup } from "./ui/PaneToolsMenu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/Tooltip";
 import { SessionHeader } from "./chat/SessionHeader";
 import { ChatUserBubble } from "./chat/ChatUserBubble";
@@ -44,24 +46,6 @@ import { Tabs, TabsList, TabsTrigger } from "./ui/Tabs";
 const MdPreviewLazy = lazy(() =>
   import("./MdPreview").then((m) => ({ default: m.MdPreview })),
 );
-
-/** 统一 slash 命令形状(后端给 string[],兜底给带描述对象,归一成 SlashCmd)。 */
-type SlashCmd = { name: string; description?: string };
-
-/** 去掉命令名前导 /(claude init 的 slash_commands 可能是 "/clear" 或 "clear" 两种形态)。 */
-function normalizeSlashCmds(raw: unknown): SlashCmd[] {
-  if (!Array.isArray(raw)) return [];
-  return raw
-    .map((c) => {
-      if (typeof c === "string") return { name: c.replace(/^\//, "") };
-      if (typeof c === "object" && c && "name" in c) {
-        const obj = c as SlashCmd;
-        return { name: obj.name.replace(/^\//, ""), description: obj.description };
-      }
-      return null;
-    })
-    .filter((c): c is SlashCmd => c !== null);
-}
 
 /**
  * 相对时间格式化(↻ 弹窗「恢复上一次」用)。与 SessionBrowserPane.relativeTime 同语义,
@@ -83,46 +67,6 @@ function relativeTime(iso: string | null, locale: string): string {
   if (Math.abs(hr) < 24) return rtf.format(hr, "hour");
   return rtf.format(day, "day");
 }
-
-/**
- * claude CLI 原生 slash 命令完整集(带描述)。
- *
- * 后端 init 透传的 slash_commands 在 headless 模式下往往不全(rewind/skills/agents 等原生命令
- * 不返回),故前端维护一份完整原生集作兜底,与后端返回的合并去重(后端真实优先,描述缺则补)。
- * 后端额外返回的(skill 自定义命令等)也会被合并保留。
- *
- * 描述暂硬编码中文(命令面板提示文案);后续按需抽 i18n key。
- */
-const FALLBACK_SLASH_CMDS: SlashCmd[] = [
-  { name: "add-dir", description: "添加工作目录到上下文" },
-  { name: "agents", description: "查看与管理子代理" },
-  { name: "bug", description: "报告 bug 或问题" },
-  { name: "clear", description: "清空对话上下文" },
-  { name: "compact", description: "压缩对话历史以节省 token" },
-  { name: "config", description: "查看与修改配置" },
-  { name: "cost", description: "显示当前会话 token 用量与花费" },
-  { name: "doctor", description: "诊断 Claude CLI 环境" },
-  { name: "exit", description: "退出当前会话并关闭 tab" },
-  { name: "export", description: "导出当前对话" },
-  { name: "help", description: "查看可用命令与帮助" },
-  { name: "init", description: "为当前项目初始化 CLAUDE.md" },
-  { name: "login", description: "登录 Claude 账号" },
-  { name: "logout", description: "退出 Claude 账号" },
-  { name: "mcp", description: "查看与管理 MCP 服务器" },
-  { name: "memory", description: "查看与编辑记忆文件" },
-  { name: "model", description: "查看或切换模型" },
-  { name: "permissions", description: "查看与修改工具权限" },
-  { name: "privacy-settings", description: "查看隐私设置" },
-  { name: "release-notes", description: "查看版本发布说明" },
-  { name: "resume", description: "恢复指定会话" },
-  { name: "review", description: "请求 Claude 复审代码" },
-  { name: "rewind", description: "回溯到之前的对话状态" },
-  { name: "skills", description: "查看与管理可用 Skills" },
-  { name: "status", description: "查看 Claude CLI 状态" },
-  { name: "terminal-setup", description: "配置终端集成(Shift+Enter 等)" },
-  { name: "usage", description: "查看用量统计" },
-  { name: "vim", description: "切换 vim 编辑模式" },
-];
 
 /**
  * claude 权限模式(--permission-mode),状态栏可切换 + Shift+Tab 循环。
@@ -455,7 +399,7 @@ function QuickResumeLast({
  * claude 自渲染对话面板(stream-json wrapper),Cursor 式行内流 UI。
  *
  * 不走 PTY/不渲染 claude TUI,而是消费后端 `claude-event` 事件流,用 React 自渲染对话流
- * + 行内可折叠工具卡片 + 底部圆角浮动输入区(slash 命令面板 / 发送 / 中断)。输入走原生
+ * + 行内可折叠工具卡片 + 底部圆角浮动输入区(⋯ 工具菜单 / 发送 / 中断)。输入走原生
  * textarea → IME 候选框天然跟随(根治 xterm + TUI 下中文输入法候选框错位)。
  *
  * 数据流:`getClaudeTransport(tabId)` 取池化的 ClaudeTransport → `onEvents(setState)` 订阅
@@ -581,22 +525,8 @@ export function ClaudePane(props: ClaudePaneProps) {
     setShowScrollBottom(false);
   }, []);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
-  /** 高亮层 div ref:同步 textarea 滚动(内容超 2 行时高亮跟随)。 */
-  const highlightRef = useRef<HTMLDivElement | null>(null);
-  // composing 不再用 state:textarea 始终可见文字(见下方 className),高亮层只画命令背景(文字透明),
-  // 消除「透明 textarea + 高亮层文字」重叠导致的抗锯齿叠加发亮(IME 候选框弹出时色值变高亮的根因)。
-  // textarea 始终可见也保证 IME 候选框/组合文字正常显示,无需在 compositionStart/End 切换样式。
 
-  // —— slash 命令面板状态(对齐 claudecodeui useSlashCommands)——
-  const slashCommands = state?.meta?.slashCommands ?? [];
-  const [slashOpen, setSlashOpen] = useState(false);
-  const [slashIndex, setSlashIndex] = useState(0);
-  /** 防抖后的查询词(去掉前导 /)。input 变化后 150ms 才更新,避免每次按键都过滤。 */
-  const [commandQuery, setCommandQuery] = useState("");
-  /** 当前触发命令面板的 `/` token 在 input 中的起始位置(插入替换用)。 */
-  const slashPositionRef = useRef(-1);
-  const queryTimerRef = useRef<number | null>(null);
-  // —— @ 文件引用面板(复用 slash 触发模式:@ token → list_files → fuzzy → 选中插入 @path)——
+  // —— @ 文件引用面板(@ token → list_files → fuzzy → 选中插入 @path)——
   const [atOpen, setAtOpen] = useState(false);
   const [atIndex, setAtIndex] = useState(0);
   const [atQuery, setAtQuery] = useState("");
@@ -604,7 +534,7 @@ export function ClaudePane(props: ClaudePaneProps) {
   const atPositionRef = useRef(-1);
   /** 已加载文件列表的 cwd(避免重复 list_files;cwd 变化时重载)。 */
   const atLoadedCwdRef = useRef<string | null>(null);
-  // slash 命令逐个触发的弹窗状态(/config /help /cost)+ 不支持命令的内联提示。
+  // 工具栏菜单弹窗状态(原 /config /help /cost /mcp 等 slash 触发,现由 ⋯ 菜单打开)。
   const [configOpen, setConfigOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
   /** /mcp 弹窗:~/.claude.json 解析的 MCP 服务器(全局 + 本项目;null=加载中)。 */
@@ -612,8 +542,32 @@ export function ClaudePane(props: ClaudePaneProps) {
   const [mcpEntries, setMcpEntries] = useState<
     { scope: "global" | "project"; name: string; brief: string }[] | null
   >(null);
+  /** Skills 弹窗:全局 ~/.claude/skills + 项目 <cwd>/.claude/skills 下的子目录名(null=加载中)。 */
+  const [skillsOpen, setSkillsOpen] = useState(false);
+  const [skillEntries, setSkillEntries] = useState<{ scope: "global" | "project"; name: string; path: string }[] | null>(null);
+  /** Plugins 弹窗:~/.claude/plugins/installed_plugins.json 宽松解析(按来源分组;null=加载中)。 */
+  const [pluginsOpen, setPluginsOpen] = useState(false);
+  const [pluginGroups, setPluginGroups] = useState<{ source: string; names: string[] }[] | null>(null);
   const [costOpen, setCostOpen] = useState(false);
-  const [unsupportedMsg, setUnsupportedMsg] = useState<string | null>(null);
+  // —— 宽度自适应工具侧栏:pane 足够宽时右侧常驻 Skills/MCP/Plugins(与弹窗同源数据),
+  //    窄 pane 侧栏隐藏回落弹窗模式;⋯ 菜单点击在宽 pane 下也切到侧栏 ——
+  /** 侧栏当前面板(null=未开)。宽 pane 首次自动开 skills(默认)。 */
+  const [toolPanel, setToolPanel] = useState<"skills" | "mcp" | "plugins" | null>(null);
+  /** 缩小态:侧栏收成悬浮在右侧边缘的小竖条(点击展开),非关闭——保留恢复入口。 */
+  const [toolCollapsed, setToolCollapsed] = useState(false);
+  /** pane 内容区宽度 ≥ 阈值(对话区仍留 ~700px 可读 + 侧栏 248px)。 */
+  const [paneWide, setPaneWide] = useState(false);
+  const paneBoxRef = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    const el = paneBoxRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => {
+      const wide = el.clientWidth >= TOOL_SIDEBAR_MIN_PANE_W;
+      setPaneWide((prev) => (prev === wide ? prev : wide));
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
   /** API 重试用尽 toast:重试序列从有(retry≠null)变无(null)且最终 status=error 时弹一次。
    *  边沿检测(不常驻):避免 error 期间一直浮着;一次提示即 self-clear。 */
   const [retryFailedMsg, setRetryFailedMsg] = useState<string | null>(null);
@@ -696,13 +650,6 @@ export function ClaudePane(props: ClaudePaneProps) {
       });
     return () => {
       alive = false;
-    };
-  }, []);
-
-  // unmount 时清理 slash 防抖 timer。
-  useEffect(() => {
-    return () => {
-      if (queryTimerRef.current !== null) window.clearTimeout(queryTimerRef.current);
     };
   }, []);
 
@@ -812,73 +759,6 @@ export function ClaudePane(props: ClaudePaneProps) {
     return () => ro.disconnect();
   }, [activeTabId, hasMessages]);
 
-  // —— slash 面板:基于防抖后的 commandQuery 过滤候选(对齐 claudecodeui filterSlashCommands)——
-  const slashMatches = useMemo<SlashCmd[]>(() => {
-    if (!slashOpen) return [];
-    // 合并后端真实 slash_commands ∪ FALLBACK 原生集,后端优先(描述缺则用 FALLBACK 补),去重。
-    // headless 下后端返回的往往不全(rewind/skills/agents 等原生不返回),合并保证全量。
-    const backend = normalizeSlashCmds(slashCommands);
-    const byName = new Map<string, SlashCmd>();
-    for (const fb of FALLBACK_SLASH_CMDS) byName.set(fb.name, fb);
-    for (const b of backend) {
-      const exist = byName.get(b.name);
-      byName.set(b.name, exist && !exist.description ? { ...exist, description: b.description } : b);
-    }
-    const all = Array.from(byName.values()).sort((a, b) => a.name.localeCompare(b.name));
-    // commandQuery 已去前导 /(handleInputChange 里 strip)。空 query 显示全部。
-    const q = commandQuery.trim().toLowerCase();
-    if (!q) return all;
-    // 前缀匹配优先(更符合直觉),不足时回退子串/描述包含。
-    const namePrefix = all.filter((c) => c.name.toLowerCase().startsWith(q));
-    if (namePrefix.length > 0) return namePrefix;
-    return all.filter(
-      (c) => c.name.toLowerCase().includes(q) || (c.description?.toLowerCase().includes(q) ?? false),
-    );
-  }, [slashOpen, commandQuery, slashCommands]);
-
-  /** 已知 slash 命令名集合(后端真实 ∪ FALLBACK),用于判定输入框中哪些 /xxx token 是命令名(高亮)vs 路径参数(不高亮)。 */
-  const knownCmdNames = useMemo(() => {
-    const set = new Set<string>();
-    for (const fb of FALLBACK_SLASH_CMDS) set.add(fb.name);
-    for (const c of normalizeSlashCmds(slashCommands)) set.add(c.name);
-    return set;
-  }, [slashCommands]);
-
-  /**
-   * 渲染输入框高亮层:命令 token(行首/空格后的 /xxx 且 xxx 是已知命令)套 chip 背景色,与后续参数文字区分。
-   * 纯背景色 + 圆角,不加 padding/border/margin--否则 token 渲染宽度变化,与透明 textarea 文字逐字错位。
-   * 非已知命令的 /xxx(如路径参数 /abs/path)不高亮,避免误判。
-   */
-  const renderHighlighted = useCallback(
-    (text: string): ReactNode => {
-      const nodes: ReactNode[] = [];
-      const regex = /(^|\s)(\/(\S+))/g;
-      let lastIndex = 0;
-      let m: RegExpExecArray | null;
-      let key = 0;
-      while ((m = regex.exec(text)) !== null) {
-        const prefix = m[1];
-        const fullToken = m[2];
-        const name = m[3];
-        const tokenStart = m.index + prefix.length;
-        if (tokenStart > lastIndex) nodes.push(text.slice(lastIndex, tokenStart));
-        if (knownCmdNames.has(name)) {
-          nodes.push(
-            <span key={key++} className="rounded-[3px] bg-[var(--mx-selected-bg)] text-transparent">
-              {fullToken}
-            </span>,
-          );
-        } else {
-          nodes.push(fullToken);
-        }
-        lastIndex = tokenStart + fullToken.length;
-      }
-      if (lastIndex < text.length) nodes.push(text.slice(lastIndex));
-      return nodes;
-    },
-    [knownCmdNames],
-  );
-
   // @ 文件引用:fuzzy 过滤(路径含 query),限 50 条防巨列表卡。
   const atMatches = useMemo(() => {
     if (!atOpen) return [];
@@ -890,23 +770,16 @@ export function ClaudePane(props: ClaudePaneProps) {
     setAtIndex(0);
   }, [atMatches.length]);
 
-  // 候选变化时重置选中索引。
-  useEffect(() => {
-    setSlashIndex(0);
-  }, [slashMatches.length]);
-
   const handleInputChange = useCallback(
     (e: React.ChangeEvent<HTMLTextAreaElement>) => {
       const v = e.target.value;
       const cursorPos = e.target.selectionStart ?? v.length;
       setInput(v);
 
-      // 代码块内(``` 计数为奇数)不触发命令/@面板,避免写代码时干扰。
+      // 代码块内(``` 计数为奇数)不触发 @ 面板,避免写代码时干扰。
       const backticksBefore = (v.slice(0, cursorPos).match(/```/g) || []).length;
       if (backticksBefore % 2 === 1) {
-        setSlashOpen(false);
         setAtOpen(false);
-        slashPositionRef.current = -1;
         atPositionRef.current = -1;
         return;
       }
@@ -920,8 +793,6 @@ export function ClaudePane(props: ClaudePaneProps) {
         setAtOpen(true);
         setAtIndex(0);
         setAtQuery(atMatch[1]);
-        setSlashOpen(false);
-        slashPositionRef.current = -1;
         const cwd = state?.meta?.cwd;
         if (cwd && atLoadedCwdRef.current !== cwd) {
           atLoadedCwdRef.current = cwd;
@@ -933,139 +804,209 @@ export function ClaudePane(props: ClaudePaneProps) {
       }
       setAtOpen(false);
       atPositionRef.current = -1;
-
-      // 匹配「光标前以 / 开头的 token」(行首或空格后),支持文中触发,不限输入框开头。
-      const match = textBeforeCursor.match(/(?:^|\s)(\/\S*)$/);
-      if (!match) {
-        setSlashOpen(false);
-        slashPositionRef.current = -1;
-        return;
-      }
-      // / 在全文中的实际位置。
-      const slashPos = (match.index ?? 0) + (match[0].length - match[1].length);
-      const query = match[1].slice(1); // 去前导 /
-      slashPositionRef.current = slashPos;
-      setSlashOpen(true);
-      setSlashIndex(-1);
-
-      // 防抖 150ms 更新 query(避免每次按键都过滤 + 重渲染)。
-      if (queryTimerRef.current !== null) window.clearTimeout(queryTimerRef.current);
-      queryTimerRef.current = window.setTimeout(() => setCommandQuery(query), 150);
     },
     [state],
   );
 
-  const applySlashCommand = useCallback(
-    (cmd: SlashCmd) => {
-      const ta = inputRef.current;
-      // 触发式:/ 指令选中即执行(不把命令文本插入输入框——/ 指令是「触发」不是「输入」)。
-      // 先清掉触发的 /token(保留 token 之外的其余输入),关面板,再按命令分发:
-      //   /clear → 清空会话;/exit → 关闭 tab;其他 → 作为消息发给 claude(选中即触发)。
-      const slashPos = slashPositionRef.current >= 0 ? slashPositionRef.current : (ta?.selectionStart ?? input.length);
-      const before = input.slice(0, slashPos);
-      const afterSlash = input.slice(slashPos);
-      const spaceIdx = afterSlash.indexOf(" ");
-      const after = spaceIdx !== -1 ? afterSlash.slice(spaceIdx).trimStart() : "";
-      const rest = `${before} ${after}`.replace(/\s+/g, " ").trim();
-      setInput(rest);
-      setSlashOpen(false);
-      slashPositionRef.current = -1;
-      requestAnimationFrame(() => ta?.focus());
-
-      const transport = getClaudeTransportRef.current(activeTabId);
-      // 逐个触发:/ 指令不再作为消息发给 claude(headless 下无效),按命令名 dispatch 到对应前端能力。
-      switch (cmd.name) {
-        case "clear":
-          void transport.clear();
-          break;
-        case "exit":
-          onCloseTab?.(paneId, activeTabId);
-          break;
-        case "config":
-        case "permissions":
-          setConfigOpen(true);
-          break;
-        case "help":
-          setHelpOpen(true);
-          break;
-        case "cost":
-        case "usage":
-        case "status":
-          setCostOpen(true);
-          break;
-        case "agents":
-        case "skills": {
-          // 在资源管理器定位 ~/.claude/<agents|skills> 目录(目录型管理仍走定位)。
-          invoke<string>("get_claude_config_path", { target: cmd.name })
-            .then((p) => void invoke("reveal_in_folder", { path: p }).catch(() => {}))
-            .catch(() => setUnsupportedMsg(t("claudepane.unsupported", { cmd: `/${cmd.name}` })));
-          break;
+  /** 拉 MCP 服务器列表(弹窗与工具侧栏共用):~/.claude.json(user/local scope:顶层
+   *  mcpServers + projects[cwd].mcpServers)+ 项目根 .mcp.json(project scope,
+   *  `claude mcp add -s project` 的写入位置,并入"本项目"组)。 */
+  const loadMcp = useCallback(() => {
+    const cwd = sessions.find((s) => s.id === activeTabId)?.cwd;
+    void invoke<string>("get_claude_config_path", { target: "mcp" })
+      .then((p) => invoke<{ content: string | null; binary: boolean }>("read_file", { path: p }))
+      .then((res) => {
+        const entries = parseClaudeMcpServers(res.content ?? "", cwd);
+        if (!cwd) {
+          setMcpEntries(entries);
+          return;
         }
-        case "mcp": {
-          // 查看 MCP 服务器(对齐 claude CLI /mcp 语义):弹窗列 ~/.claude.json 的全局
-          // mcpServers + 本项目 projects[cwd].mcpServers,每次打开重读;
-          // 原「定位 .claude.json」降级为弹窗内次要按钮。
-          setMcpOpen(true);
+        void invoke<{ content: string | null; binary: boolean }>("read_file", { path: `${cwd}/.mcp.json` })
+          .then((r2) => {
+            const extra = r2.content && !r2.binary ? parseProjectMcpJson(r2.content) : [];
+            setMcpEntries([...entries, ...extra]);
+          })
+          .catch(() => setMcpEntries(entries));
+      })
+      .catch(() => setMcpEntries([]));
+  }, [sessions, activeTabId]);
+
+  /** 打开 MCP 弹窗(⋯ 工具菜单,窄 pane):对齐 claude CLI /mcp 语义,每次打开重读。 */
+  const openMcpDialog = useCallback(() => {
+    setMcpOpen(true);
+    loadMcp();
+  }, [loadMcp]);
+
+  /** 拉 Skills 列表(全局 ~/.claude/skills + 项目 <cwd>/.claude/skills 子目录;弹窗与侧栏共用)。 */
+  const loadSkills = useCallback(() => {
+    setSkillEntries(null);
+    void invoke<string>("get_claude_config_path", { target: "skills" })
+      .then((dir) =>
+        invoke<{ id: string; name: string; kind: string }[]>("list_dir", { path: dir }).then((entries) => {
+          const global = entries
+            .filter((e) => e.kind === "dir")
+            .map((e) => ({ scope: "global" as const, name: e.name, path: e.id }));
           const cwd = sessions.find((s) => s.id === activeTabId)?.cwd;
-          void invoke<string>("get_claude_config_path", { target: "mcp" })
-            .then((p) => invoke<{ content: string | null; binary: boolean }>("read_file", { path: p }))
-            .then((res) => setMcpEntries(parseClaudeMcpServers(res.content ?? "", cwd)))
-            .catch(() => setMcpEntries([]));
-          break;
-        }
-        case "compact": {
-          // 真 compact:写 stdin /compact(local command),后端长进程执行,产出 compact_status/
-          // compact_boundary 事件 → applyEvent 归并成 boundary/summary 消息。不 kill 进程、
-          // 不前端模拟。GLM 代理 compact 约 60-70s,compact_status{compacting} 即驱动「正在压缩…」指示。
-          void transport.send("/compact");
-          break;
-        }
-        case "rewind":
-          // 历史消息选择器:选一条 user 消息 → clear(重置 session)+ 回填输入框,基于它重开。
-          setRewindOpen(true);
-          break;
-        case "memory": {
-          // 资源管理器定位项目 CLAUDE.md;无 cwd 则提示。
-          const cwd = state?.meta?.cwd;
-          if (cwd) void invoke("reveal_in_folder", { path: `${cwd}/CLAUDE.md`, cwd }).catch(() => {});
-          else setUnsupportedMsg(t("claudepane.unsupportedNoCwd"));
-          break;
-        }
-        default:
-          setUnsupportedMsg(t("claudepane.unsupported", { cmd: `/${cmd.name}` }));
-      }
-    },
-    [input, activeTabId, paneId, onCloseTab, state, t],
-  );
+          if (!cwd) {
+            setSkillEntries(global);
+            return;
+          }
+          void invoke<{ id: string; name: string; kind: string }[]>("list_dir", { path: `${cwd}/.claude/skills` })
+            .then((pe) => {
+              const project = pe
+                .filter((e) => e.kind === "dir")
+                .map((e) => ({ scope: "project" as const, name: e.name, path: e.id }));
+              setSkillEntries([...global, ...project]);
+            })
+            .catch(() => setSkillEntries(global));
+        }),
+      )
+      .catch(() => setSkillEntries([]));
+  }, [sessions, activeTabId]);
 
-  /** Tab 补全:把触发的 /token 替换为 `/<name> `(带尾空格),关面板,不执行--
-   *  让用户继续输入命令参数,回车再发送(对齐 claude code CLI:Tab 补全、Enter 发送)。
-   *  带参数命令(如 /add-dir <path>、/resume <id>)由此可用:Tab 补全命令名 -> 输参数 -> Enter 走 handleSend send。 */
-  const completeSlashCommand = useCallback(
-    (cmd: SlashCmd) => {
-      const ta = inputRef.current;
-      const slashPos = slashPositionRef.current >= 0 ? slashPositionRef.current : (ta?.selectionStart ?? input.length);
-      const cursorPos = ta?.selectionStart ?? input.length;
-      const before = input.slice(0, slashPos);
-      const afterToken = input.slice(cursorPos);
-      const replacement = `/${cmd.name} `;
-      const next = `${before}${replacement}${afterToken}`;
-      setInput(next);
-      setSlashOpen(false);
-      slashPositionRef.current = -1;
-      // 清防抖 query + 计时器,避免残留旧值污染下次面板过滤。
-      if (queryTimerRef.current !== null) {
-        window.clearTimeout(queryTimerRef.current);
-        queryTimerRef.current = null;
-      }
-      setCommandQuery("");
-      requestAnimationFrame(() => {
-        ta?.focus();
-        const pos = (before + replacement).length;
-        ta?.setSelectionRange(pos, pos);
-      });
-    },
-    [input],
+  /** 打开 Skills 弹窗(窄 pane):每次打开重读。 */
+  const openSkillsDialog = useCallback(() => {
+    setSkillsOpen(true);
+    loadSkills();
+  }, [loadSkills]);
+
+  /** 拉 Plugins 列表(installed_plugins.json 宽松解析 + marketplaces 回退;弹窗与侧栏共用)。 */
+  const loadPlugins = useCallback(() => {
+    setPluginGroups(null);
+    void homeDir()
+      .then((home) => {
+        const root = `${home}/.claude/plugins`;
+        void invoke<{ content: string | null; binary: boolean }>("read_file", { path: `${root}/installed_plugins.json` })
+          .then((res) => {
+            const groups: { source: string; names: string[] }[] = [];
+            if (res.content && !res.binary) {
+              try {
+                const parsed: unknown = JSON.parse(res.content);
+                if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+                  for (const [source, value] of Object.entries(parsed as Record<string, unknown>)) {
+                    let names: string[] = [];
+                    if (Array.isArray(value)) {
+                      names = value.filter((v): v is string => typeof v === "string");
+                    } else if (value && typeof value === "object") {
+                      names = Object.keys(value as Record<string, unknown>);
+                    }
+                    if (names.length > 0) {
+                      groups.push({ source, names: names.map((n) => n.split("@")[0]) });
+                    }
+                  }
+                }
+              } catch {
+                // 非 JSON/损坏:走 marketplaces 回退。
+              }
+            }
+            if (groups.length > 0) {
+              setPluginGroups(groups);
+              return;
+            }
+            void invoke<{ name: string; kind: string }[]>("list_dir", { path: `${root}/marketplaces` })
+              .then((entries) =>
+                setPluginGroups([
+                  { source: "marketplaces", names: entries.filter((e) => e.kind === "dir").map((e) => e.name) },
+                ]),
+              )
+              .catch(() => setPluginGroups([]));
+          })
+          .catch(() => setPluginGroups([]));
+      })
+      .catch(() => setPluginGroups([]));
+  }, []);
+
+  /** 打开 Plugins 弹窗(窄 pane):每次打开重读。 */
+  const openPluginsDialog = useCallback(() => {
+    setPluginsOpen(true);
+    loadPlugins();
+  }, [loadPlugins]);
+
+  // 宽 pane 首次达标 → 自动开侧栏(默认 skills);缩小态是用户意图,不自动展开。
+  useEffect(() => {
+    if (paneWide && toolPanel === null) setToolPanel("skills");
+  }, [paneWide, toolPanel]);
+  // 侧栏面板切换/出现时拉数据(与弹窗打开同源,每次重读)。
+  useEffect(() => {
+    if (!toolPanel || !paneWide) return;
+    if (toolPanel === "skills") loadSkills();
+    else if (toolPanel === "mcp") loadMcp();
+    else loadPlugins();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [toolPanel, paneWide]);
+
+  /** ⋯ 菜单/侧栏共用的面板切换(宽 pane):展开侧栏并切 panel。 */
+  const showToolPanel = useCallback((p: "skills" | "mcp" | "plugins") => {
+    setToolCollapsed(false);
+    setToolPanel(p);
+  }, []);
+
+  /** ⋯ 工具菜单分组:资源查看(skills/mcp/plugins/agents)+ 会话动作(compact/rewind/config/
+   *  help/cost)+ 定位(CLAUDE.md/打开项目文件夹)。承接原 / 面板的全部能力入口(slash 面板已移除);
+   *  宽 pane 下 Skills/MCP/Plugins 点击切工具侧栏(常驻展示),窄 pane 开弹窗。 */
+  const toolsMenuGroups = useMemo<PaneToolsMenuGroup[]>(
+    () => [
+      {
+        label: t("claudepane.toolsGroupResources"),
+        tone: "violet",
+        items: [
+          { label: t("claudepane.toolsSkills"), glyph: "✦", onClick: paneWide ? () => showToolPanel("skills") : openSkillsDialog },
+          { label: t("claudepane.toolsMcp"), glyph: "⬡", onClick: paneWide ? () => showToolPanel("mcp") : openMcpDialog },
+          { label: t("claudepane.toolsPlugins"), glyph: "⊞", onClick: paneWide ? () => showToolPanel("plugins") : openPluginsDialog },
+          {
+            label: t("claudepane.toolsAgents"),
+            glyph: "◈",
+            onClick: () => {
+              invoke<string>("get_claude_config_path", { target: "agents" })
+                .then((p) => void invoke("reveal_in_folder", { path: p }).catch(() => {}))
+                .catch(() => {});
+            },
+          },
+        ],
+      },
+      {
+        label: t("claudepane.toolsGroupSession"),
+        tone: "accent",
+        items: [
+          {
+            label: t("claudepane.toolsCompact"),
+            glyph: "⁝",
+            hint: "/compact",
+            // 真 compact:写 stdin /compact(local command),后端长进程执行,产出 compact_status/
+            // compact_boundary 事件 → applyEvent 归并成 boundary/summary 消息。
+            onClick: () => void getClaudeTransportRef.current(activeTabId)?.send("/compact"),
+          },
+          { label: t("claudepane.toolsRewind"), glyph: "↺", onClick: () => setRewindOpen(true) },
+          { label: t("claudepane.toolsConfig"), glyph: "⚙", onClick: () => setConfigOpen(true) },
+          { label: t("claudepane.toolsHelp"), glyph: "?", onClick: () => setHelpOpen(true) },
+          { label: t("claudepane.toolsCost"), glyph: "◷", onClick: () => setCostOpen(true) },
+        ],
+      },
+      {
+        label: t("claudepane.toolsGroupLocate"),
+        tone: "muted",
+        items: [
+          {
+            label: t("claudepane.toolsMemory"),
+            glyph: "⌖",
+            onClick: () => {
+              const cwd = state?.meta?.cwd;
+              if (cwd) void invoke("reveal_in_folder", { path: `${cwd}/CLAUDE.md`, cwd }).catch(() => {});
+            },
+          },
+          {
+            label: t("claudepane.toolsOpenFolder"),
+            glyph: "▤",
+            // 项目根目录在资源管理器中打开(cwd 为目录 → explorer 直接打开)。
+            onClick: () => {
+              const cwd = state?.meta?.cwd;
+              if (cwd) void invoke("reveal_in_folder", { path: cwd }).catch(() => {});
+            },
+          },
+        ],
+      },
+    ],
+    [t, openSkillsDialog, openMcpDialog, openPluginsDialog, paneWide, showToolPanel, activeTabId, state?.meta?.cwd],
   );
 
   /** @ 文件引用:选中文件 → 替换 @token 为 `@<path> `(光标置末尾)。 */
@@ -1203,7 +1144,6 @@ export function ClaudePane(props: ClaudePaneProps) {
       if (shellRunning) return;
       const cmd = text.slice(1).trim();
       setInput("");
-      setSlashOpen(false);
       if (cmd) {
         const shellTransport = getShellRunTransportRef.current(activeTabId);
         const cwd = state?.meta?.cwd ?? sessions.find((s) => s.id === activeTabId)?.cwd;
@@ -1215,14 +1155,12 @@ export function ClaudePane(props: ClaudePaneProps) {
     // session(下次 spawn 不带 --resume → 全新会话)。其他 slash 命令仍走 send。
     if (text === "/clear") {
       setInput("");
-      setSlashOpen(false);
       await transport.clear();
       return;
     }
-    // /exit:同 /clear 走触发式(面板选中即关 tab);这里防御用户直接打字发送。
+    // /exit:同 /clear 走触发式(菜单选中即关 tab);这里防御用户直接打字发送。
     if (text === "/exit") {
       setInput("");
-      setSlashOpen(false);
       onCloseTab?.(paneId, activeTabId);
       return;
     }
@@ -1234,7 +1172,6 @@ export function ClaudePane(props: ClaudePaneProps) {
       await transport.interrupt();
     }
     setInput("");
-    setSlashOpen(false);
     // 发送前立即贴底:用户手动发消息后若已上滚看历史,此时仍强制滚到底,
     // 避免用户消息插入后还留在原视口(optimistic 插入 + transport.send 异步,时序抖动),
     // 也与 stickRef 在 send 后已为 true 的 useLayoutEffect 行为一致。
@@ -1453,11 +1390,9 @@ export function ClaudePane(props: ClaudePaneProps) {
   }, [focused]);
 
   // —— 双击 Esc 中断快捷键(对齐 claude code)——
-  // pane focused 时监听 window keydown:slash 面板打开时单击 Esc 只关面板(由 textarea 处理,这里跳过);
-  // 面板关闭状态下,400ms 内连续两次 Esc → 中断当前轮。用 ref 镜像避免 stale closure。
+  // pane focused 时监听 window keydown;面板关闭状态下,400ms 内连续两次 Esc → 中断当前轮。
+  // 用 ref 镜像避免 stale closure。
   const lastEscRef = useRef(0);
-  const slashOpenRef = useRef(slashOpen);
-  slashOpenRef.current = slashOpen;
   const busyRef = useRef(busy);
   busyRef.current = busy;
   const handleInterruptRef = useRef(handleInterrupt);
@@ -1466,7 +1401,6 @@ export function ClaudePane(props: ClaudePaneProps) {
     if (!focused) return;
     const handler = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
-      if (slashOpenRef.current) return; // 面板开着:让 textarea 关面板,不中断
       const now = Date.now();
       if (now - lastEscRef.current < 400) {
         lastEscRef.current = 0;
@@ -1500,35 +1434,23 @@ export function ClaudePane(props: ClaudePaneProps) {
     prevBusyRef.current = busy;
   }, [busy]);
 
-  // 本次会话累计 token(计费口径)。两种 usage 来源语义不同:
-  // - 流式快照(官方):各轮本轮值 → Σ 求和;
-  // - result 回填的会话累计(glm 流式恒 {0,0};claude code result.usage 本身就是多轮之和)
-  //   → Σ 会变「累计的累计」(天文数字),正确值 = 最近一条累计本身。
-  const sessionTokens = useMemo(() => {
+  // 底部 ↑↓ / 用量弹窗的 token 数字(产品决策 2026-10-08:计费累计不再上屏——长会话
+  // 轻松超窗口,对用户是「瞎统计」)。只取最近一条**真实用量的 assistant**的本轮值
+  // (流式快照/差分回填均本轮口径;cumulative 存量跳过;compact boundary 停扫——压缩前
+  // 的旧快照不代表当前):↑ = 本轮完整输入(≈当前上下文)、↓ = 本轮输出。成本权威值
+  // 在 result.totalCostUsd,与 token 显示解耦。
+  const turnTokens = useMemo(() => {
     if (!state) return { input: 0, output: 0 };
     const used = (u: ClaudeUsage) =>
       totalInputTokens(u.input_tokens ?? 0, u.cache_creation_input_tokens ?? 0, u.cache_read_input_tokens ?? 0);
-    // 段内最近一条有真实用量的 assistant(倒序找第一条)。
-    let last: ClaudeMessage | undefined;
     for (let i = state.messages.length - 1; i >= 0; i--) {
       const m = state.messages[i];
-      if (m.role === "assistant" && hasUsage(m.usage)) {
-        last = m;
-        break;
+      if (m.role === "compact" && m.compactKind === "boundary") break;
+      if (m.role === "assistant" && !m.usageCumulative && hasUsage(m.usage)) {
+        return { input: used(m.usage!), output: m.usage!.output_tokens ?? 0 };
       }
     }
-    if (last?.usageCumulative && last.usage) {
-      return { input: used(last.usage), output: last.usage.output_tokens ?? 0 };
-    }
-    let input = 0;
-    let output = 0;
-    for (const m of state.messages) {
-      if (m.role === "assistant" && m.usage) {
-        input += used(m.usage);
-        output += m.usage.output_tokens ?? 0;
-      }
-    }
-    return { input, output };
+    return { input: 0, output: 0 };
   }, [state]);
 
   // 状态栏 model:优先用 meta.model(当前会话设定:init 回填 + setModel 乐观更新 + 每轮真实
@@ -1683,15 +1605,9 @@ export function ClaudePane(props: ClaudePaneProps) {
     }
   }, [busy, hasPendingPlan, hasPendingApproval, t]);
 
-  // 不支持的 slash 命令提示,3s 自动消失。
-  useEffect(() => {
-    if (!unsupportedMsg) return;
-    const id = window.setTimeout(() => setUnsupportedMsg(null), 3000);
-    return () => window.clearTimeout(id);
-  }, [unsupportedMsg]);
-
   return (
     <article
+      ref={paneBoxRef}
       className={`grid h-full min-h-0 min-w-0 grid-rows-[length:var(--mx-paneheader-h)_1fr] overflow-hidden bg-[var(--mx-editor-bg)] ${className ?? ""}`}
       onMouseDown={() => onFocusPane?.(paneId)}
     >
@@ -1722,6 +1638,8 @@ export function ClaudePane(props: ClaudePaneProps) {
           </TabsList>
         </Tabs>
         <div className="flex shrink-0 items-center gap-1 text-[var(--mx-muted)]">
+          {/* ⋯ 工具菜单:skills/mcp/plugins 等资源查看 + 会话动作(compact/rewind 等,承接原 / 面板入口)。 */}
+          <PaneToolsMenu groups={toolsMenuGroups} tooltip={t("claudepane.toolsTooltip")} />
           {/* ◱ 展开/还原所在分屏比例(主体 pane 占大头;单 pane 项目 AppShell no-op)。
               展开态图标/文案切换(◱ 展开 / ◫ 还原),状态真身在 AppShell 展开记忆。 */}
           {onToggleExpand && <PaneExpandButton expanded={expanded} onToggle={onToggleExpand} t={t} />}
@@ -1853,8 +1771,11 @@ export function ClaudePane(props: ClaudePaneProps) {
         </div>
       </header>
 
-      {/* 主体:消息流(上,flex-1 滚动) + 底部浮动输入区(下)。 */}
-      <div className="grid min-h-0 min-w-0 grid-rows-[1fr_auto]">
+      {/* 主体行:对话区(flex-1:消息流 + 输入区)+ 宽 pane 工具侧栏(Skills/MCP/Plugins 常驻)。
+          relative 供缩小态悬浮小竖条定位。 */}
+      <div className="relative flex min-h-0 min-w-0 flex-1">
+      {/* 对话区:消息流(上,flex-1 滚动) + 底部浮动输入区(下)。 */}
+      <div className="grid min-h-0 min-w-0 flex-1 grid-rows-[1fr_auto]">
         <div ref={scrollRef} onScroll={handleScroll} className="mx-scroll-pretty relative min-h-0 overflow-y-auto px-4 py-4" style={{ fontSize }}>
           {state && (state.messages.length > 0 || (shellState?.messages.length ?? 0) > 0) ? (
             <div ref={contentRef} className="mx-auto w-full max-w-[54.25rem] space-y-1">
@@ -1917,7 +1838,7 @@ export function ClaudePane(props: ClaudePaneProps) {
             <div className="grid h-full place-items-center">
               {state ? (
                 <div className="flex flex-col items-center gap-2.5 py-10">
-                  <span aria-hidden className="grid h-10 w-10 place-items-center rounded-xl bg-[var(--mx-violet)] text-sm font-extrabold text-white shadow-lg">
+                  <span aria-hidden className="grid h-10 w-10 place-items-center rounded-full bg-[var(--mx-violet)] text-sm font-extrabold text-white shadow-lg">
                     C
                   </span>
                   <span className="text-xs text-[var(--mx-muted)]">
@@ -1952,18 +1873,16 @@ export function ClaudePane(props: ClaudePaneProps) {
         {/* 底部浮动输入区:状态行 + textarea + 发送/中断按钮。 */}
         <div className="shrink-0 px-4 pb-3 pt-1">
           <div className="mx-auto w-full max-w-[54.25rem]">
-            {/* 会话状态指示行:retrying(API error 自动重试,最高优先,橙色)> compactRunning(紫)>
-                thinkingNow 思考中(紫)> busy 执行中(蓝,不显示具体工具名,只显「执行中…」)。悬浮在输入框上方,
+            {/* 会话状态指示行:retrying(API error 自动重试,最高优先,橙色告警)> compactRunning >
+                thinkingNow 思考中 > busy 执行中(不显示具体工具名,只显「执行中…」)。悬浮在输入框上方,
                 busy 全程可见 -- 此前仅思考阶段显示,长工具运行中用户无从察觉会话仍在进行。
-                retrying 期间 status 被覆写 running 维持 busy,中断按钮可用;idle → 此条消失。 */}
+                retrying 期间 status 被覆写 running 维持 busy,中断按钮可用;idle → 此条消失。
+                文字一律 muted(高饱和品牌色整行显示:深主题刺眼/亮主题对比不足看不清),
+                色彩语义由 ThinkingDots 呼吸点承载;仅 retrying 保留 warning 橙(短暂告警态)。 */}
             {(retrying || busy || compactRunning) && !hasPendingPlan && !hasPendingApproval && (
               <div
                 className={`mb-1.5 flex items-center gap-2 px-1 ${
-                  retrying
-                    ? "text-[var(--mx-warning)]"
-                    : thinkingNow || compactRunning
-                      ? "text-[var(--mx-violet)]"
-                      : "text-[var(--mx-accent)]"
+                  retrying ? "text-[var(--mx-warning)]" : "text-[var(--mx-muted)]"
                 }`}
                 style={{ fontSize: statusFontPx }}
               >
@@ -1978,7 +1897,7 @@ export function ClaudePane(props: ClaudePaneProps) {
                         : t("claudepane.toolRunning")}
                 </span>
                 <span className="tabular-nums text-[var(--mx-faint)]">
-                  <ElapsedText start={turnStart} prefix="⏱ " />　↑{formatTokens(sessionTokens.input)} ↓{formatTokens(sessionTokens.output)}
+                  <ElapsedText start={turnStart} prefix="⏱ " />　↑{formatTokens(turnTokens.input)} ↓{formatTokens(turnTokens.output)}
                 </span>
                 {/* busy 期间的后台任务入口:琥珀徽标点开任务面板(主任务正显示在左侧,bgCount>0 才显)。
                     与非 busy 琥珀行共用 menuMode==="tasks" 与 TaskListContent(busy 与非 busy 互斥渲染,不冲突)。 */}
@@ -2069,28 +1988,15 @@ export function ClaudePane(props: ClaudePaneProps) {
                 </Button>
               </div>
             ) : (
-              <Popover open={(slashOpen && slashMatches.length > 0) || (atOpen && atMatches.length > 0)}>
+              <Popover open={atOpen && atMatches.length > 0}>
                 <PopoverAnchor asChild>
-                  <div className="mx-chip flex flex-col border border-[var(--mx-border)] bg-[var(--mx-card-bg)] px-3 py-2 shadow-lg focus-within:border-[var(--mx-accent)]">
+                  <div className="mx-chip flex flex-col rounded-[var(--mx-radius-lg)] border border-[var(--mx-border)] bg-[var(--mx-card-bg)] px-3 py-2 shadow-lg focus-within:border-[var(--mx-accent)]">
                     <div className="flex items-end gap-2">
                     <div className="relative min-w-0 flex-1">
-                      {/* 高亮层:与 textarea 同排版,命令 token(/xxx 已知命令)套 chip 背景色,与参数文字区分。
-                          pointer-events-none 不挡交互;透明 textarea 露光标,此层露高亮。纯背景无 padding/border 保逐字对齐。 */}
-                      <div
-                        ref={highlightRef}
-                        aria-hidden
-                        className="pointer-events-none absolute inset-0 overflow-hidden whitespace-pre-wrap p-0 font-mono text-transparent"
-                        style={{ fontSize, lineHeight: "1.5" }}
-                      >
-                        {input ? renderHighlighted(input) : null}
-                      </div>
                       <textarea
                       ref={inputRef}
                       value={input}
                       onChange={handleInputChange}
-                      onScroll={(e) => {
-                        if (highlightRef.current) highlightRef.current.scrollTop = e.currentTarget.scrollTop;
-                      }}
                       onKeyDown={(e) => {
                         // Alt+Enter 恒为换行(优先于 @/slash 面板选中与发送;
                         // Windows Chromium textarea 对带 Alt 的 Enter 默认不插换行,故手动补)。
@@ -2112,7 +2018,6 @@ export function ClaudePane(props: ClaudePaneProps) {
                         if (
                           activeApprovalId !== null &&
                           !input.trim() &&
-                          !slashOpen &&
                           !atOpen &&
                           !e.nativeEvent.isComposing
                         ) {
@@ -2127,9 +2032,9 @@ export function ClaudePane(props: ClaudePaneProps) {
                             return;
                           }
                         }
-                        // ↑/↓ 浏览输入历史(类 shell 命令历史):slash 面板关闭 + 非 IME 组合输入时;
+                        // ↑/↓ 浏览输入历史(类 shell 命令历史):@ 面板关闭 + 非 IME 组合输入时;
                         // 仅当光标在首行拦 ↑、末行拦 ↓(否则放行让光标在多行文本里正常上下移动)。
-                        if (!slashOpen && !atOpen && !e.nativeEvent.isComposing && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
+                        if (!atOpen && !e.nativeEvent.isComposing && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
                           const ta = inputRef.current;
                           const pos = ta?.selectionStart ?? input.length;
                           const before = input.slice(0, pos);
@@ -2145,7 +2050,7 @@ export function ClaudePane(props: ClaudePaneProps) {
                             return;
                           }
                         }
-                        // @ 文件引用面板:↑↓ 导航 + Enter/Tab 选中插入 + Esc 关(对齐 slash 面板键位)。
+                        // @ 文件引用面板:↑↓ 导航 + Enter/Tab 选中插入 + Esc 关。
                         if (atOpen) {
                           if (e.key === "ArrowDown" && atMatches.length > 0) {
                             e.preventDefault();
@@ -2168,37 +2073,6 @@ export function ClaudePane(props: ClaudePaneProps) {
                             return;
                           }
                         }
-                        // slash 面板打开时拦截导航键(对齐 claudecodeui handleCommandMenuKeyDown)。
-                        if (slashOpen) {
-                          if (e.key === "ArrowDown" && slashMatches.length > 0) {
-                            e.preventDefault();
-                            setSlashIndex((i) => (i < slashMatches.length - 1 ? i + 1 : 0));
-                            return;
-                          }
-                          if (e.key === "ArrowUp" && slashMatches.length > 0) {
-                            e.preventDefault();
-                            setSlashIndex((i) => (i > 0 ? i - 1 : slashMatches.length - 1));
-                            return;
-                          }
-                          // Tab 补全:把选中命令名插入输入框(带尾空格),不执行--留待输入参数后回车发送
-                          // (对齐 claude code CLI:Tab 补全 / Enter 发送)。带参数命令(如 /add-dir)由此可用。
-                          if (e.key === "Tab" && !e.shiftKey && !e.nativeEvent.isComposing && slashMatches.length > 0) {
-                            e.preventDefault();
-                            completeSlashCommand(slashMatches[slashIndex >= 0 ? slashIndex : 0] ?? slashMatches[0]);
-                            return;
-                          }
-                          // Enter 选中即执行(原行为:无参数命令直接 dispatch,如 /clear /help /compact)。
-                          if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing && slashMatches.length > 0) {
-                            e.preventDefault();
-                            applySlashCommand(slashMatches[slashIndex >= 0 ? slashIndex : 0] ?? slashMatches[0]);
-                            return;
-                          }
-                          if (e.key === "Escape") {
-                            e.preventDefault();
-                            setSlashOpen(false);
-                            return;
-                          }
-                        }
                         // Shift+Tab 循环切换权限模式(acceptEdits/plan/manual/bypassPermissions)。
                         if (e.key === "Tab" && e.shiftKey) {
                           e.preventDefault();
@@ -2216,7 +2090,7 @@ export function ClaudePane(props: ClaudePaneProps) {
                         }
                       }}
                       rows={2}
-                      placeholder={t("claudepane.slashHint")}
+                      placeholder={t("claudepane.inputHint")}
                       /* field-sizing-content:随内容在 min-h~max-h 间自动长高,超高才内部滚动(滚轮仍可滚);
                          滚动条隐藏而非美化:占宽会让 textarea 换行窄于 inset-0 高亮层,chip 背景与文字错行。 */
                       className="relative max-h-[160px] min-h-[36px] w-full field-sizing-content resize-none bg-transparent p-0 font-mono caret-[var(--mx-text)] text-[var(--mx-text)] outline-none placeholder:text-[var(--mx-faint)] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
@@ -2230,7 +2104,7 @@ export function ClaudePane(props: ClaudePaneProps) {
                         aria-label={t("claudepane.interrupt")}
                         onClick={handleInterrupt}
                         onMouseDown={(e) => e.stopPropagation()}
-                        className="mb-0.5 grid h-9 w-9 shrink-0 place-items-center rounded-lg text-[var(--mx-danger-bright)] transition-colors hover:bg-[var(--mx-danger-bg)] hover:text-[var(--mx-danger)]"
+                        className="mb-0.5 grid h-9 w-9 shrink-0 place-items-center rounded-full text-[var(--mx-danger-bright)] transition-colors hover:bg-[var(--mx-danger-bg)] hover:text-[var(--mx-danger)]"
                       >
                         <IconStop />
                       </button>
@@ -2241,7 +2115,7 @@ export function ClaudePane(props: ClaudePaneProps) {
                         onClick={handleSend}
                         disabled={!canSend}
                         onMouseDown={(e) => e.stopPropagation()}
-                        className="mb-0.5 grid h-9 w-9 shrink-0 place-items-center rounded-lg text-[var(--mx-muted)] transition-colors hover:bg-[var(--mx-accent-soft)] hover:text-[var(--mx-accent)] disabled:cursor-not-allowed disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-[var(--mx-muted)]"
+                        className="mb-0.5 grid h-9 w-9 shrink-0 place-items-center rounded-full text-[var(--mx-muted)] transition-colors hover:bg-[var(--mx-accent-soft)] hover:text-[var(--mx-accent)] disabled:cursor-not-allowed disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-[var(--mx-muted)]"
                       >
                         <IconSend />
                       </button>
@@ -2453,7 +2327,7 @@ export function ClaudePane(props: ClaudePaneProps) {
                           hover 看剩余/百分比明细。全局 StatusBar 已移除 ctx,此为每 tab 唯一显示。 */}
                       {contextInfo && <ContextMeter used={contextInfo.ctx} window={contextInfo.window} />}
                       <span className="shrink-0">
-                        ↑{formatTokens(sessionTokens.input)} ↓{formatTokens(sessionTokens.output)}
+                        ↑{formatTokens(turnTokens.input)} ↓{formatTokens(turnTokens.output)}
                       </span>
                       <span className="shrink-0 whitespace-nowrap"><ElapsedText start={sessionStart} prefix="⏱ " /></span>
                       <span className="shrink-0 tabular-nums" title="本会话累计成本(估算)">{formatCost(state?.lastResult?.totalCostUsd)}</span>
@@ -2472,30 +2346,19 @@ export function ClaudePane(props: ClaudePaneProps) {
                   className="mx-menu w-[360px] max-w-[calc(100vw-2rem)] overflow-hidden border border-[var(--mx-border)] bg-[var(--mx-surface)] p-1.5 shadow-xl"
                 >
                   <div className="mx-scroll-pretty max-h-[min(50vh,420px)] overflow-y-auto p-0.5">
-                  {atOpen
-                    ? atMatches.map((f, i) => (
-                        <button
-                          key={f.path}
-                          type="button"
-                          onMouseDown={(e) => e.stopPropagation()}
-                          onClick={() => applyAtFile(f)}
-                          onMouseEnter={() => setAtIndex(i)}
-                          className={`flex w-full items-center gap-2 rounded px-2 py-1 text-left transition-colors ${i === atIndex ? "bg-[var(--mx-selected-bg)]" : "hover:bg-[var(--mx-hover-bg)]"}`}
-                        >
-                          <span className="shrink-0 text-[10px] text-[var(--mx-faint)]">@</span>
-                          <span className="truncate font-mono text-[11px] text-[var(--mx-text)]" title={f.path}>{f.path}</span>
-                        </button>
-                      ))
-                    : slashMatches.map((cmd, i) => (
-                        <CommandItem
-                          key={cmd.name}
-                          cmd={cmd}
-                          index={i}
-                          selected={i === slashIndex}
-                          onSelect={applySlashCommand}
-                          onHover={setSlashIndex}
-                        />
-                      ))}
+                  {atMatches.map((f, i) => (
+                    <button
+                      key={f.path}
+                      type="button"
+                      onMouseDown={(e) => e.stopPropagation()}
+                      onClick={() => applyAtFile(f)}
+                      onMouseEnter={() => setAtIndex(i)}
+                      className={`flex w-full items-center gap-2 rounded px-2 py-1 text-left transition-colors ${i === atIndex ? "bg-[var(--mx-selected-bg)]" : "hover:bg-[var(--mx-hover-bg)]"}`}
+                    >
+                      <span className="shrink-0 text-[10px] text-[var(--mx-faint)]">@</span>
+                      <span className="truncate font-mono text-[11px] text-[var(--mx-text)]" title={f.path}>{f.path}</span>
+                    </button>
+                  ))}
                   </div>
                 </PopoverContent>
               </Popover>
@@ -2503,7 +2366,172 @@ export function ClaudePane(props: ClaudePaneProps) {
           </div>
         </div>
       </div>
-            {/* slash 命令逐个触发的弹窗 + 不支持命令的底部 toast。 */}
+      {/* 宽 pane 工具侧栏(悬浮卡片式,同输入卡质感):Skills/MCP/Plugins 常驻列表;
+          缩小态收成右侧边缘悬浮小竖条(点击展开),窄 pane 整体回落弹窗。 */}
+      {toolPanel && paneWide && !toolCollapsed && (
+        <aside className="my-2 mr-2 flex w-[248px] shrink-0 flex-col overflow-hidden rounded-[var(--mx-radius-lg)] border border-[var(--mx-border)] bg-[var(--mx-card-bg)] shadow-md">
+          {/* 面板切换:纯文字 mini tab(10px,极细竖线分隔,active=亮色 medium,无图标,
+              视觉重量最小)+ 缩小按钮(收成边缘悬浮图标块,非关闭)。 */}
+          <div className="flex shrink-0 items-center gap-2.5 border-b border-[var(--mx-border)] px-3 py-1.5">
+            {([["skills", "Skills"], ["mcp", "MCP"], ["plugins", "Plugins"]] as const).map(([p, label], i) => {
+              const active = toolPanel === p;
+              return (
+                <Fragment key={p}>
+                  {i > 0 && <span aria-hidden className="h-[9px] w-px shrink-0 bg-[var(--mx-border)]" />}
+                  <button
+                    type="button"
+                    onClick={() => setToolPanel(p)}
+                    className={`cursor-pointer text-[10px] transition-colors ${
+                      active
+                        ? "font-medium text-[var(--mx-text)]"
+                        : "text-[var(--mx-faint)] hover:text-[var(--mx-text)]"
+                    }`}
+                  >
+                    {label}
+                  </button>
+                </Fragment>
+              );
+            })}
+            <button
+              type="button"
+              aria-label="collapse"
+              onClick={() => setToolCollapsed(true)}
+              onMouseDown={(e) => e.stopPropagation()}
+              className="ml-auto grid h-4 w-4 shrink-0 cursor-pointer place-items-center rounded text-[11px] text-[var(--mx-faint)] transition-colors hover:bg-[var(--mx-hover-bg)] hover:text-[var(--mx-text)]"
+            >
+              »
+            </button>
+          </div>
+          {/* 列表(行样式与弹窗一致:圆角 hover 行 + 语义色点 + 等宽名)。 */}
+          <div className="mx-scroll-pretty min-h-0 flex-1 overflow-y-auto p-2">
+            {toolPanel === "skills" &&
+              (skillEntries === null ? (
+                <div className="grid place-items-center py-8 text-[11px] text-[var(--mx-faint)]">{t("common.loading")}</div>
+              ) : skillEntries.length === 0 ? (
+                <div className="grid place-items-center px-4 py-8 text-center text-[11px] text-[var(--mx-faint)]">{t("claudepane.skillsEmpty")}</div>
+              ) : (
+                (["global", "project"] as const).map((scope) => {
+                  const items = skillEntries.filter((e) => e.scope === scope);
+                  if (items.length === 0) return null;
+                  return (
+                    <div key={scope}>
+                      <div className="flex items-center px-2 pb-0.5 pt-2 text-[10px] font-semibold uppercase tracking-wide text-[var(--mx-muted)]">
+                        <span>{scope === "global" ? t("claudepane.mcpGlobal") : t("claudepane.mcpProject")}</span>
+                        <span className="ml-auto tabular-nums text-[var(--mx-faint)]">{items.length}</span>
+                      </div>
+                      {items.map((e) => (
+                        <div
+                          key={`${scope}:${e.name}`}
+                          title={e.path}
+                          onClick={() => void invoke("reveal_in_folder", { path: e.path }).catch(() => {})}
+                          className="flex min-w-0 cursor-pointer items-center gap-2 rounded-md px-2 py-[5px] hover:bg-[var(--mx-hover-bg)]"
+                        >
+                          <span aria-hidden className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--mx-accent)]" />
+                          <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-[var(--mx-text)]">{e.name}</span>
+                        </div>
+                      ))}
+                    </div>
+                  );
+                })
+              ))}
+            {toolPanel === "mcp" &&
+              (mcpEntries === null ? (
+                <div className="grid place-items-center py-8 text-[11px] text-[var(--mx-faint)]">{t("common.loading")}</div>
+              ) : mcpEntries.length === 0 ? (
+                <div className="grid place-items-center px-4 py-8 text-center text-[11px] text-[var(--mx-faint)]">{t("claudepane.mcpEmpty")}</div>
+              ) : (
+                (["global", "project"] as const).map((scope) => {
+                  const items = mcpEntries.filter((e) => e.scope === scope);
+                  if (items.length === 0) return null;
+                  return (
+                    <div key={scope}>
+                      <div className="flex items-center px-2 pb-0.5 pt-2 text-[10px] font-semibold uppercase tracking-wide text-[var(--mx-muted)]">
+                        <span>{scope === "global" ? t("claudepane.mcpGlobal") : t("claudepane.mcpProject")}</span>
+                        <span className="ml-auto tabular-nums text-[var(--mx-faint)]">{items.length}</span>
+                      </div>
+                      {items.map((e) => (
+                        <div key={`${scope}:${e.name}`} className="flex min-w-0 items-center gap-2 rounded-md px-2 py-[5px] hover:bg-[var(--mx-hover-bg)]">
+                          <span aria-hidden className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--mx-success)]" />
+                          <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-[var(--mx-text)]">{e.name}</span>
+                          {e.brief && (
+                            <span className="max-w-[90px] shrink-0 truncate text-right font-mono text-[10px] text-[var(--mx-faint)]" title={e.brief}>
+                              {e.brief}
+                            </span>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  );
+                })
+              ))}
+            {toolPanel === "plugins" &&
+              (pluginGroups === null ? (
+                <div className="grid place-items-center py-8 text-[11px] text-[var(--mx-faint)]">{t("common.loading")}</div>
+              ) : pluginGroups.length === 0 ? (
+                <div className="grid place-items-center px-4 py-8 text-center text-[11px] text-[var(--mx-faint)]">{t("claudepane.pluginsEmpty")}</div>
+              ) : (
+                pluginGroups.map((g) => (
+                  <div key={g.source}>
+                    <div className="flex items-center px-2 pb-0.5 pt-2 text-[10px] font-semibold uppercase tracking-wide text-[var(--mx-muted)]">
+                      <span className="truncate">{g.source}</span>
+                      <span className="ml-auto shrink-0 tabular-nums text-[var(--mx-faint)]">{g.names.length}</span>
+                    </div>
+                    {g.names.map((n) => (
+                      <div key={n} className="flex min-w-0 items-center gap-2 rounded-md px-2 py-[5px] hover:bg-[var(--mx-hover-bg)]">
+                        <span aria-hidden className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--mx-violet)]" />
+                        <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-[var(--mx-text)]">{n}</span>
+                      </div>
+                    ))}
+                  </div>
+                ))
+              ))}
+          </div>
+          {/* footer:在资源管理器定位当前面板对应目录/文件(轻量文字链接式,非按钮)。 */}
+          <div className="shrink-0 border-t border-[var(--mx-border)] px-3 py-1.5">
+            <button
+              type="button"
+              onClick={() => {
+                if (toolPanel === "skills") {
+                  void invoke<string>("get_claude_config_path", { target: "skills" })
+                    .then((p) => void invoke("reveal_in_folder", { path: p }).catch(() => {}))
+                    .catch(() => {});
+                } else if (toolPanel === "mcp") {
+                  void invoke<string>("get_claude_config_path", { target: "mcp" })
+                    .then((p) => void invoke("reveal_in_folder", { path: p }).catch(() => {}))
+                    .catch(() => {});
+                } else {
+                  void homeDir()
+                    .then((home) => void invoke("reveal_in_folder", { path: `${home}/.claude/plugins` }).catch(() => {}))
+                    .catch(() => {});
+                }
+              }}
+              className="cursor-pointer text-[10px] text-[var(--mx-faint)] transition-colors hover:text-[var(--mx-accent)]"
+            >
+              ↗{" "}
+              {toolPanel === "skills" ? t("claudepane.skillsReveal") : toolPanel === "mcp" ? t("claudepane.mcpReveal") : t("claudepane.pluginsReveal")}
+            </button>
+          </div>
+        </aside>
+      )}
+      {/* 缩小态:悬浮在右侧偏顶部的小图标块(当前面板 glyph;点击展开;窄 pane 隐藏)。 */}
+      {toolPanel && paneWide && toolCollapsed && (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <button
+              type="button"
+              aria-label="expand tools"
+              onClick={() => setToolCollapsed(false)}
+              onMouseDown={(e) => e.stopPropagation()}
+              className="mx-icon-tile absolute right-1 top-3 z-10 grid h-7 w-7 cursor-pointer place-items-center border border-[var(--mx-border)] bg-[var(--mx-card-bg)] text-[13px] font-bold text-[var(--mx-muted)] shadow-md transition-colors hover:border-[var(--mx-accent)] hover:text-[var(--mx-accent)]"
+            >
+              {toolPanel === "skills" ? "✦" : toolPanel === "mcp" ? "⬡" : "⊞"}
+            </button>
+          </TooltipTrigger>
+          <TooltipContent>{t("claudepane.toolsTooltip")}</TooltipContent>
+        </Tooltip>
+      )}
+      </div>
+            {/* ⋯ 工具菜单触发的弹窗(config/rewind/cost/mcp/skills/plugins)+ 底部 toast。 */}
             <SettingsModal open={configOpen} onClose={() => setConfigOpen(false)} />
             <Dialog open={rewindOpen} onOpenChange={(o) => !o && setRewindOpen(false)}>
               <DialogContent className="w-[480px] max-w-[90vw] px-5 py-4">
@@ -2555,38 +2583,46 @@ export function ClaudePane(props: ClaudePaneProps) {
               <DialogContent className="w-[380px] max-w-[90vw] px-5 py-4">
                 <DialogTitle className="text-sm font-semibold text-[var(--mx-text)]">{t("claudepane.costTitle")}</DialogTitle>
                 <div className="mt-3 space-y-1.5 text-[11px] tabular-nums text-[var(--mx-muted)]">
-                  <div>↑ 输入<span className="ml-2 text-[var(--mx-text)]">{formatTokens(sessionTokens.input)}</span></div>
-                  <div>↓ 输出<span className="ml-2 text-[var(--mx-text)]">{formatTokens(sessionTokens.output)}</span></div>
+                  <div>↑ 输入<span className="ml-2 text-[var(--mx-text)]">{formatTokens(turnTokens.input)}</span></div>
+                  <div>↓ 输出<span className="ml-2 text-[var(--mx-text)]">{formatTokens(turnTokens.output)}</span></div>
                   <div>ctx 窗口<span className="ml-2 text-[var(--mx-text)]">{formatTokens(contextInfo?.window ?? inferContextWindow(model))}</span></div>
                   <div>累计成本<span className="ml-2 text-[var(--mx-text)]">{formatCost(state?.lastResult?.totalCostUsd)}</span></div>
                   <div>耗时<span className="ml-2 text-[var(--mx-text)]"><ElapsedText start={sessionStart} /></span></div>
                 </div>
               </DialogContent>
             </Dialog>
-            {/* /mcp:MCP 服务器列表(~/.claude.json 全局 mcpServers + 本项目 projects[cwd].mcpServers)。 */}
+            {/* /mcp:MCP 服务器列表(~/.claude.json 全局 mcpServers + 本项目 projects[cwd].mcpServers;⋯ 工具菜单打开)。 */}
             <Dialog open={mcpOpen} onOpenChange={(o) => !o && setMcpOpen(false)}>
-              <DialogContent className="w-[420px] max-w-[90vw] px-5 py-4">
-                <DialogTitle className="text-sm font-semibold text-[var(--mx-text)]">{t("claudepane.mcpTitle")}</DialogTitle>
-                <div className="mt-3 space-y-1.5 text-[11px] text-[var(--mx-muted)]">
+              <DialogContent className="w-[440px] max-w-[90vw] px-5 py-4">
+                <div className="flex items-baseline justify-between border-b border-[var(--mx-border)] pb-2">
+                  <DialogTitle className="text-sm font-semibold text-[var(--mx-text)]">{t("claudepane.mcpTitle")}</DialogTitle>
+                  {mcpEntries && mcpEntries.length > 0 && (
+                    <span className="shrink-0 tabular-nums text-[10px] text-[var(--mx-faint)]">{mcpEntries.length}</span>
+                  )}
+                </div>
+                <div className="mx-scroll-pretty mt-2 max-h-[55vh] overflow-y-auto">
                   {mcpEntries === null ? (
-                    <div>{t("common.loading")}</div>
+                    <div className="grid place-items-center py-8 text-[11px] text-[var(--mx-faint)]">{t("common.loading")}</div>
                   ) : mcpEntries.length === 0 ? (
-                    <div>{t("claudepane.mcpEmpty")}</div>
+                    <div className="grid place-items-center px-6 py-8 text-center text-[11px] text-[var(--mx-faint)]">
+                      {t("claudepane.mcpEmpty")}
+                    </div>
                   ) : (
                     (["global", "project"] as const).map((scope) => {
                       const items = mcpEntries.filter((e) => e.scope === scope);
                       if (items.length === 0) return null;
                       return (
                         <div key={scope}>
-                          <div className="pb-0.5 text-[10px] font-[600] text-[var(--mx-faint)]">
-                            {scope === "global" ? t("claudepane.mcpGlobal") : t("claudepane.mcpProject")}
+                          <div className="flex items-center px-2 pb-0.5 pt-2 text-[10px] font-semibold uppercase tracking-wide text-[var(--mx-muted)]">
+                            <span>{scope === "global" ? t("claudepane.mcpGlobal") : t("claudepane.mcpProject")}</span>
+                            <span className="ml-auto tabular-nums text-[var(--mx-faint)]">{items.length}</span>
                           </div>
                           {items.map((e) => (
-                            <div key={`${scope}:${e.name}`} className="flex min-w-0 items-center gap-2 py-0.5">
+                            <div key={`${scope}:${e.name}`} className="flex min-w-0 items-center gap-2 rounded-md px-2 py-[5px] hover:bg-[var(--mx-hover-bg)]">
                               <span aria-hidden className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--mx-success)]" />
-                              <span className="shrink-0 font-mono text-[var(--mx-text)]">{e.name}</span>
+                              <span className="shrink-0 font-mono text-[11px] text-[var(--mx-text)]">{e.name}</span>
                               {e.brief && (
-                                <span className="min-w-0 flex-1 truncate font-mono text-[10px] text-[var(--mx-faint)]" title={e.brief}>
+                                <span className="min-w-0 flex-1 truncate text-right font-mono text-[10px] text-[var(--mx-faint)]" title={e.brief}>
                                   {e.brief}
                                 </span>
                               )}
@@ -2596,25 +2632,130 @@ export function ClaudePane(props: ClaudePaneProps) {
                       );
                     })
                   )}
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    className="self-start text-[10px] text-[var(--mx-muted)] hover:text-[var(--mx-text)]"
-                    onClick={() => {
-                      void invoke<string>("get_claude_config_path", { target: "mcp" })
-                        .then((p) => void invoke("reveal_in_folder", { path: p }).catch(() => {}));
-                    }}
-                  >
-                    {t("claudepane.mcpReveal")}
-                  </Button>
+                  <div className="mt-2 border-t border-[var(--mx-border)] pt-2">
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="text-[10px] text-[var(--mx-muted)] hover:text-[var(--mx-text)]"
+                      onClick={() => {
+                        void invoke<string>("get_claude_config_path", { target: "mcp" })
+                          .then((p) => void invoke("reveal_in_folder", { path: p }).catch(() => {}));
+                      }}
+                    >
+                      {t("claudepane.mcpReveal")}
+                    </Button>
+                  </div>
                 </div>
               </DialogContent>
             </Dialog>
-            {unsupportedMsg && (
-              <BottomToast tone="warning" onClose={() => setUnsupportedMsg(null)}>
-                {unsupportedMsg}
-              </BottomToast>
-            )}
+            {/* Skills 列表(全局 ~/.claude/skills + 项目 <cwd>/.claude/skills;⋯ 工具菜单打开),点击定位该 skill 目录。 */}
+            <Dialog open={skillsOpen} onOpenChange={(o) => !o && setSkillsOpen(false)}>
+              <DialogContent className="w-[440px] max-w-[90vw] px-5 py-4">
+                <div className="flex items-baseline justify-between border-b border-[var(--mx-border)] pb-2">
+                  <DialogTitle className="text-sm font-semibold text-[var(--mx-text)]">{t("claudepane.skillsTitle")}</DialogTitle>
+                  {skillEntries && skillEntries.length > 0 && (
+                    <span className="shrink-0 tabular-nums text-[10px] text-[var(--mx-faint)]">{skillEntries.length}</span>
+                  )}
+                </div>
+                <div className="mx-scroll-pretty mt-2 max-h-[55vh] overflow-y-auto">
+                  {skillEntries === null ? (
+                    <div className="grid place-items-center py-8 text-[11px] text-[var(--mx-faint)]">{t("common.loading")}</div>
+                  ) : skillEntries.length === 0 ? (
+                    <div className="grid place-items-center px-6 py-8 text-center text-[11px] text-[var(--mx-faint)]">
+                      {t("claudepane.skillsEmpty")}
+                    </div>
+                  ) : (
+                    (["global", "project"] as const).map((scope) => {
+                      const items = skillEntries.filter((e) => e.scope === scope);
+                      if (items.length === 0) return null;
+                      return (
+                        <div key={scope}>
+                          <div className="flex items-center px-2 pb-0.5 pt-2 text-[10px] font-semibold uppercase tracking-wide text-[var(--mx-muted)]">
+                            <span>{scope === "global" ? t("claudepane.mcpGlobal") : t("claudepane.mcpProject")}</span>
+                            <span className="ml-auto tabular-nums text-[var(--mx-faint)]">{items.length}</span>
+                          </div>
+                          {items.map((e) => (
+                            <button
+                              key={`${scope}:${e.name}`}
+                              type="button"
+                              onClick={() => void invoke("reveal_in_folder", { path: e.path }).catch(() => {})}
+                              className="flex w-full cursor-pointer items-center gap-2 px-1.5 py-1 text-left hover:bg-[var(--mx-hover-bg)]"
+                            >
+                              <span aria-hidden className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--mx-accent)]" />
+                              <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-[var(--mx-text)]">{e.name}</span>
+                            </button>
+                          ))}
+                        </div>
+                      );
+                    })
+                  )}
+                  <div className="mt-2 border-t border-[var(--mx-border)] pt-2">
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="text-[10px] text-[var(--mx-muted)] hover:text-[var(--mx-text)]"
+                      onClick={() => {
+                        void invoke<string>("get_claude_config_path", { target: "skills" })
+                          .then((p) => void invoke("reveal_in_folder", { path: p }).catch(() => {}));
+                      }}
+                    >
+                      {t("claudepane.skillsReveal")}
+                    </Button>
+                  </div>
+                </div>
+              </DialogContent>
+            </Dialog>
+            {/* Plugins 列表(installed_plugins.json 按来源分组,解析失败/空回退列 marketplaces 目录;⋯ 工具菜单打开)。 */}
+            <Dialog open={pluginsOpen} onOpenChange={(o) => !o && setPluginsOpen(false)}>
+              <DialogContent className="w-[440px] max-w-[90vw] px-5 py-4">
+                <div className="flex items-baseline justify-between border-b border-[var(--mx-border)] pb-2">
+                  <DialogTitle className="text-sm font-semibold text-[var(--mx-text)]">{t("claudepane.pluginsTitle")}</DialogTitle>
+                  {pluginGroups && pluginGroups.some((g) => g.names.length > 0) && (
+                    <span className="shrink-0 tabular-nums text-[10px] text-[var(--mx-faint)]">
+                      {pluginGroups.reduce((n, g) => n + g.names.length, 0)}
+                    </span>
+                  )}
+                </div>
+                <div className="mx-scroll-pretty mt-2 max-h-[55vh] overflow-y-auto">
+                  {pluginGroups === null ? (
+                    <div className="grid place-items-center py-8 text-[11px] text-[var(--mx-faint)]">{t("common.loading")}</div>
+                  ) : pluginGroups.every((g) => g.names.length === 0) ? (
+                    <div className="grid place-items-center px-6 py-8 text-center text-[11px] text-[var(--mx-faint)]">
+                      {t("claudepane.pluginsEmpty")}
+                    </div>
+                  ) : (
+                    pluginGroups.map((g) => (
+                      <div key={g.source}>
+                        <div className="flex items-center px-2 pb-0.5 pt-2 text-[10px] font-semibold uppercase tracking-wide text-[var(--mx-muted)]">
+                          <span className="truncate">{g.source}</span>
+                          <span className="ml-auto shrink-0 tabular-nums text-[var(--mx-faint)]">{g.names.length}</span>
+                        </div>
+                        {g.names.map((n) => (
+                          <div key={`${g.source}:${n}`} className="flex min-w-0 items-center gap-2 rounded-md px-2 py-[5px] hover:bg-[var(--mx-hover-bg)]">
+                            <span aria-hidden className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--mx-violet)]" />
+                            <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-[var(--mx-text)]">{n}</span>
+                          </div>
+                        ))}
+                      </div>
+                    ))
+                  )}
+                  <div className="mt-2 border-t border-[var(--mx-border)] pt-2">
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="text-[10px] text-[var(--mx-muted)] hover:text-[var(--mx-text)]"
+                      onClick={() => {
+                        void homeDir()
+                          .then((home) => invoke("reveal_in_folder", { path: `${home}/.claude/plugins` }).catch(() => {}))
+                          .catch(() => {});
+                      }}
+                    >
+                      {t("claudepane.pluginsReveal")}
+                    </Button>
+                  </div>
+                </div>
+              </DialogContent>
+            </Dialog>
             {compactError && !compactErrorDismissed && (
               <BottomToast onClose={() => setCompactErrorDismissed(true)}>
                 {t("claudepane.compactFailed", { error: compactError })}
@@ -2804,10 +2945,10 @@ const MessageRow = memo(function MessageRow({
     <div className="group/message flex items-start gap-1.5">
       {/* A1 角色徽标:assistant 品牌块(紫 C),置于气泡左侧。 */}
       <span aria-hidden className="flex h-[1.625em] shrink-0 items-center">
-        <span className="grid h-[18px] w-[18px] place-items-center rounded-md bg-[var(--mx-violet)] text-[10px] font-extrabold text-white">C</span>
+        <span className="grid h-[18px] w-[18px] place-items-center rounded-full bg-[var(--mx-violet)] text-[10px] font-extrabold text-white">C</span>
       </span>
       <div className="group min-w-0 flex-1">
-        <div className="flex flex-col gap-2 rounded-lg rounded-bl-[4px] bg-[var(--mx-card-bg)] px-3 py-1.5">
+        <div className="flex flex-col gap-2 rounded-2xl rounded-bl-[6px] bg-[var(--mx-card-bg)] px-3 py-1.5">
           {message.blocks.map((b, i) => (
             <BlockView
               key={i}
@@ -4143,6 +4284,35 @@ function parseClaudeMcpServers(
   return out;
 }
 
+/**
+ * 解析项目根 .mcp.json(claude 官方 project scope,`claude mcp add -s project` 写入位置):
+ * 结构 `{ "mcpServers": { <name>: { command/url/args } } }`,全部并入"本项目"组。
+ * 不存在/损坏返回 [](read_file 对不存在文件本身 reject,由调用方 catch 兜底)。
+ */
+function parseProjectMcpJson(raw: string): { scope: "project"; name: string; brief: string }[] {
+  let cfg: unknown;
+  try {
+    cfg = JSON.parse(raw);
+  } catch {
+    return [];
+  }
+  if (!cfg || typeof cfg !== "object") return [];
+  const servers = (cfg as Record<string, unknown>).mcpServers;
+  if (!servers || typeof servers !== "object") return [];
+  const out: { scope: "project"; name: string; brief: string }[] = [];
+  for (const [name, v] of Object.entries(servers)) {
+    const s = (v && typeof v === "object" ? v : {}) as Record<string, unknown>;
+    const brief =
+      typeof s.url === "string" && s.url
+        ? `url: ${s.url}`
+        : typeof s.command === "string" && s.command
+          ? [s.command, ...(Array.isArray(s.args) ? s.args.slice(0, 2).map(String) : [])].join(" ")
+          : "";
+    out.push({ scope: "project", name, brief });
+  }
+  return out;
+}
+
 function formatInput(input: unknown): string {
   if (typeof input === "string") return input;
   try {
@@ -4178,88 +4348,3 @@ function IconWarn() {
   );
 }
 
-function IconSlash() {
-  return (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" aria-hidden>
-      <path d="M7 8l-3 4 3 4" />
-      <path d="M17 8l3 4-3 4" />
-      <path d="M14 4l-4 16" />
-    </svg>
-  );
-}
-
-/**
- * slash 命令面板单条候选。
- *
- * 选中项用 ref + scrollIntoView({block:"nearest"}) 滚动跟随:↑↓ 移动到列表可视区外的项时,
- * 列表容器自动滚动让其可见(对齐 claude code CLI / VSCode command palette 行为)。
- * 用「最近」对齐而非「居中」,避免列表抖动。
- */
-function CommandItem({
-  cmd,
-  index,
-  selected,
-  onSelect,
-  onHover,
-}: {
-  cmd: SlashCmd;
-  index: number;
-  selected: boolean;
-  onSelect: (cmd: SlashCmd) => void;
-  onHover: (index: number) => void;
-}) {
-  const ref = useRef<HTMLButtonElement | null>(null);
-  useEffect(() => {
-    if (selected && ref.current) {
-      ref.current.scrollIntoView({ block: "nearest" });
-    }
-  }, [selected]);
-  return (
-    <button
-      ref={ref}
-      type="button"
-      onMouseDown={(e) => e.stopPropagation()}
-      onMouseEnter={() => onHover(index)}
-      onClick={() => onSelect(cmd)}
-      className={`group relative mb-1 flex w-full cursor-pointer items-start gap-2 rounded border px-2.5 py-2 text-left transition-all ${
-        selected
-          ? "border-[var(--mx-selected-border)] bg-[var(--mx-selected-bg)]"
-          : "border-transparent hover:border-[var(--mx-border)] hover:bg-[var(--mx-hover-bg)]"
-      }`}
-    >
-      {/* 选中态左侧 accent 高亮条 */}
-      {selected && (
-        <span className="absolute bottom-1.5 left-1.5 top-1.5 w-0.5 rounded-full bg-[var(--mx-accent)]" />
-      )}
-      {/* 命令前缀图标方块 */}
-      <span
-        className={`mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-md border ${
-          selected
-            ? "border-[var(--mx-selected-border)] bg-[var(--mx-selected-bg)] text-[var(--mx-accent)]"
-            : "border-[var(--mx-border)] bg-[var(--mx-border-soft)] text-[var(--mx-muted)]"
-        }`}
-      >
-        <IconSlash />
-      </span>
-      <div className="min-w-0 flex-1 pr-1">
-        <span className="block min-w-0 truncate font-mono text-[13px] font-semibold text-[var(--mx-text)]">
-          /{cmd.name}
-        </span>
-        {cmd.description && (
-          <span className="block truncate text-[12px] leading-4 text-[var(--mx-faint)]">
-            {cmd.description}
-          </span>
-        )}
-      </div>
-      {/* 选中时右侧 ⏎ 回车提示 */}
-      {selected && (
-        <span className="mt-1 flex h-6 w-6 shrink-0 items-center justify-center rounded border border-[var(--mx-selected-border)] bg-[var(--mx-accent-soft)] text-[var(--mx-accent)]">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" aria-hidden>
-            <path d="M9 10l-5 3 5 3" />
-            <path d="M4 13h13a4 4 0 0 1 0 8h-1" />
-          </svg>
-        </span>
-      )}
-    </button>
-  );
-}

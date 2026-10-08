@@ -74,20 +74,20 @@ export function createTab(id: string, shellKind: ShellKind, title: string, cwd?:
   return { id, shellKind, title, ...(cwd ? { cwd } : {}) };
 }
 
-/** 默认 pane tree:单根 pane + 单 PowerShell tab。新项目 / 旧数据迁移用。 */
+/** 默认 pane tree:单根 pane + 单终端 tab。新项目 / 旧数据迁移用(title 存 i18n key,渲染层 t() 翻译)。 */
 export function defaultPaneTree(paneId = "ps-1", tabId = "ps-1"): PaneNode {
   return {
     type: "pane",
     id: paneId,
-    tabs: [createTab(tabId, "shell", "PowerShell")],
+    tabs: [createTab(tabId, "shell", "shellkind.terminal")],
     activeTabId: tabId,
   };
 }
 
 /** AI 主体 pane 的默认占比(与后端 default_pane_tree 的 ratio 对齐;◱ 还原无记忆时兜底)。 */
 export const MAIN_PANE_DEFAULT_SHARE = 0.55;
-/** ◱ 展开目标:主体 pane 占比提升到此值。 */
-export const EXPAND_PANE_SHARE = 0.78;
+/** ◱ 展开目标:主体 pane 占比提升到此值(右侧剩 1-0.6=40%)。 */
+export const EXPAND_PANE_SHARE = 0.6;
 
 /** split.ratio → 某 side pane 的实际占比(ratio 是第一子占比,第二侧取反)。 */
 export function ratioToPaneShare(ratio: number, paneIsFirst: boolean): number {

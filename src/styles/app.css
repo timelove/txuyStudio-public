@@ -1,5 +1,19 @@
 @import "tailwindcss";
 
+/* Inter Variable(仅 latin subset,手写 @font-face 精准控制产物):现代 AI 产品基准
+ * UI 字体(数字/英文/标签观感,tabular-nums 支持完好);中文与未覆盖字形按栈回落
+ * 雅黑/Segoe UI。woff2 随包内置(桌面端零网络成本)。 */
+@font-face {
+  font-family: "InterVariable";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 900;
+  src: url("@fontsource-variable/inter/files/inter-latin-wght-normal.woff2") format("woff2-variations");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC,
+    U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215,
+    U+FEFF, U+FFFD;
+}
+
 /* 统一等宽字体栈:让 Tailwind 的 font-mono class 引用 --mx-mono,
  * 与 xterm / Monaco 编辑器一致(避免 UI 代码块走系统 mono、终端走 Nerd Font 的割裂)。 */
 @theme {
@@ -14,7 +28,9 @@
 :root {
   color: #e2e8f0;
   background: #070a12;
-  font-family: Aptos, "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+  /* UI 字体栈:Inter Variable 优先(AI 产品观感,woff2 随包),中文回落雅黑;
+   * mono 栈见下方 --mx-mono(与终端/编辑器一致)。 */
+  font-family: InterVariable, "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", system-ui, sans-serif;
   /* 等宽字体栈(单一源:上方 @theme --font-mono;终端/编辑器/markdown code/UI font-mono 共用)。
      首选 CaskaydiaCoveNF(@font-face 加载,笔画细 + Nerd Font 图标),MesloLGM NF(本机)降为后备--
      Meslo 笔画偏粗;再退 Cascadia Code/Mono(Windows Terminal 默认),最后 Consolas。
@@ -51,11 +67,14 @@
   --mx-selected-bg: rgba(34, 211, 238, 0.18);
   --mx-selected-border: rgba(34, 211, 238, 0.55);
   --mx-hover-bg: rgba(148, 163, 184, 0.10);
-  /* 圆角 token(全项目统一真源):sm 小图标容器/kbd,md 按钮/菜单项/chip,lg 卡片/浮层容器,full 小装饰色点。
-   * 配套语义 class(.mx-card/.mx-menu/.mx-chip/.mx-icon-tile)收口散落 rounded-none,见文件底部。 */
-  --mx-radius-sm: 4px;
-  --mx-radius-md: 6px;
-  --mx-radius-lg: 8px;
+  /* 圆角 token(全项目统一真源)——**双层圆角策略**(2026-10-08 定稿):
+   * 「结构层」(chrome:按钮/菜单/chip/浮层)贴着多 pane 多 tab 的窗口化网格走,圆角收敛
+   * 保持工具感(太圆会与锐利的分屏/tab 结构割裂);「对话层」(AI pane 内容:气泡 16px/
+   * 圆形徽标/圆形发送按钮)保留 AI 产品柔和感——见 ClaudePane/CodexPane 的显式 rounded。
+   *   sm 小图标容器/kbd = 6px · md 按钮/菜单/chip = 8px · lg 卡片/弹窗/输入卡 = 10px */
+  --mx-radius-sm: 6px;
+  --mx-radius-md: 8px;
+  --mx-radius-lg: 10px;
   --mx-radius-full: 9999px;
   /* risk 模式:guarded cyan(安全),permissive 琥珀(更高风险提醒)。 */
   --mx-guarded: #22d3ee;
@@ -356,10 +375,12 @@ button {
 /* ============================================================
  * 圆角语义 class:把散落在各组件的 rounded-none 按用途收口到 radius token,
  * 一处改全局生效。挂到对应元素上替代手写的 rounded-none 原子类。
- *   .mx-card      — 卡片/浮层容器(modal、popover/dialog content):radius-lg(8px)
- *   .mx-menu      — 下拉/菜单/右键菜单容器:radius-md(6px)
- *   .mx-chip      — 项目 chip / dock 按钮 / 色条等胶囊态:radius-md(6px)
- *   .mx-icon-tile — 图标徽章/glyph 背板/kbd 键帽等小方块:radius-sm(4px)
+ *   .mx-card      — 卡片/浮层容器(modal、popover/dialog content):radius-lg
+ *   .mx-menu      — 下拉/菜单/右键菜单容器:radius-md
+ *   .mx-chip      — 项目 chip / dock 按钮 / 色条等胶囊态:radius-md
+ *   .mx-icon-tile — 图标徽章/glyph 背板/kbd 键帽等小方块:radius-sm
+ * (档位值见 :root --mx-radius-*;双层圆角策略:结构层收敛 6/8/10,对话层组件另显式
+ *  16px/圆形——与窗口化网格的锐利结构不割裂,AI 柔和感留在对话内容区。)
  * 例外:装饰性小色点(h-1.5 w-1.5)直接用 rounded-full(圆形语义);分屏
  * gap-px 缝隙的结构性边角(PaneSurface 空态/TerminalPane 容器)保持直角。
  * ============================================================ */
