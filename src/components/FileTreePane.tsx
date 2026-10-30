@@ -18,6 +18,7 @@ import { MdPreview } from "./MdPreview";
 import type * as monaco from "monaco-editor";
 import { useSettings } from "../settings/SettingsProvider";
 import type { UnlistenFn } from "@tauri-apps/api/event";
+import { TabCloseIcon } from "./icons";
 
 type FileTreePaneProps = {
   paneId: string;
@@ -548,8 +549,6 @@ export function FileTreePane({
           {sessions.map((s) => {
             const isActive = s.id === activeTabId;
             return (
-              <Tooltip>
-              <TooltipTrigger asChild>
               <TabsTrigger asChild value={s.id}>
               <div
                 key={s.id}
@@ -573,7 +572,7 @@ export function FileTreePane({
                     }}
                     onClick={(e) => e.stopPropagation()}
                   >
-                    ×
+                    <TabCloseIcon className="h-2 w-2" />
                   </Button>
                   </TooltipTrigger>
                   <TooltipContent>{t("shell.tab.close")}</TooltipContent>
@@ -581,9 +580,6 @@ export function FileTreePane({
                 )}
               </div>
               </TabsTrigger>
-              </TooltipTrigger>
-              <TooltipContent>{t(s.name)}</TooltipContent>
-              </Tooltip>
             );
           })}
         </TabsList>

@@ -13,6 +13,11 @@ import {
 import { RETRY_DELAYS_MS, RETRY_MAX_ATTEMPTS, isRetryableApiError } from "./claudeRetry";
 import { claudeStatusRegistry } from "./claudeStatusRegistry";
 import { summarize } from "./claudeStream";
+import { fetchAiCliSessions, mostRecentSessionInCwd } from "./aiCliSessions";
+
+/** 默认恢复已认领的 session id(app 生命周期级):多个恢复的 claude tab 各自认领不同历史会话,
+ * 避免两条 claude 进程 --resume 同一 session 导致上下文互相分支。 */
+const autoResumedSessionIds = new Set<string>();
 
 /**
  * claude 自渲染对话的 transport(仿 `TauriPtyTransport` 但不实现 `TerminalTransport` 接口)。
@@ -76,6 +81,12 @@ export class ClaudeTransport {
   /** 长进程实际跑的 effort。effort 变更不立刻重启;send 前若 effort!==activeEffort 才
    *  kill+start(--resume)换 effort(同 mode 语义:下轮生效,不打断当前轮)。 */
   private activeEffort: string | undefined = undefined;
+  /** 追加工作目录(claude --add-dir),per tab 跟 transport 走。[/add-dir 快捷指令集成]。
+   *  --add-dir 是启动 flag,运行中进程无法热加(stdin local command 不可靠,同 --model)。
+   *  空 = 无。 */
+  private addDirs: string[] = [];
+  /** 长进程实际启动时带的 addDirs 快照。与 this.addDirs 不一致时 ensureStarted 检测到 -> 重启。 */
+  private activeAddDirs: string[] = [];
   /** 长进程是否在跑(start_claude_session 成功 + 未 terminated)。 */
   private started = false;
   /** 进程已死(terminated eof/interrupted),下次 send 需 ensureStarted 重启。 */
@@ -98,6 +109,12 @@ export class ClaudeTransport {
   private starting = false;
   /** 当前轮 prompt(API error 重试时重发用)。send/approveTool 记录,clear 清 null。 */
   private lastPrompt: string | null = null;
+
+  /** 软中断在途标志:interrupt() 已发 control_request interrupt,等 CLI 回 result。
+   * handleEvent 收 result 时据此拦截——CLI 的软中断 result 是 error_during_execution
+   * (is_error=true、error=null),不拦会进重试分流且 isRetryableApiError(null)=true →
+   * **自动重发被中断的 prompt**(spike 实测 2026-10-21)。 */
+  private softInterrupting = false;
   /** API error 自动重试状态。非 null=重试中。核心不变量:「timer 已武装(等待期)」与
    *  「sendingPromise 在途(重发中)」必居其一——否则 status 被覆写 running 会 busy 死锁。 */
   private retryState: {
@@ -120,6 +137,10 @@ export class ClaudeTransport {
    *  仅首启生效:startSession 传给后端 start_claude_session 的 resume_session_id,成功后清空
    *  (重启走 registry 的 live claude_session_id,不再传)。 */
   private resumeSessionId: string | null = null;
+
+  /** 首启默认恢复「本 cwd 最近一条历史会话」(AppShell 对 hydrate 恢复的 tab 启用;用户本会话
+   *  手动新建的 tab 不启用,保持全新会话)。首启消费一次即清;拉取失败/无历史则全新启动。 */
+  private autoResumeLatest = false;
 
   constructor(projectId: string, tabId: string, cwd?: string | null, registryKey = "") {
     this.projectId = projectId;
@@ -144,6 +165,12 @@ export class ClaudeTransport {
    *  仅首启生效:startSession 消费后清空。 */
   setResumeSessionId(sessionId: string): void {
     this.resumeSessionId = sessionId;
+  }
+
+  /** 启用「默认恢复最近会话」:首启时若未注入显式 resume id,自动拉本 cwd 最近一条历史会话接续
+   *  (AppShell 对 hydrate 恢复的 tab 调;与 setResumeSessionId 互斥,显式注入优先)。 */
+  enableAutoResumeLatest(): void {
+    this.autoResumeLatest = true;
   }
 
   /**
@@ -344,7 +371,10 @@ export class ClaudeTransport {
     if (
       this.started &&
       !this.dead &&
-      (this.mode !== this.activeMode || this.effort !== this.activeEffort || this.model !== this.activeModel)
+      (this.mode !== this.activeMode ||
+        this.effort !== this.activeEffort ||
+        this.model !== this.activeModel ||
+        this.addDirsChanged())
     ) {
       await this.restart(allowedTools);
       return;
@@ -375,7 +405,26 @@ export class ClaudeTransport {
     // 仅当无 persisted/live id 时生效。消费即清空(重启走 registry live id,不再传);消费时先
     // 回填历史(glm 代理 --resume 不重放历史,读 jsonl 注入消息流,见 backfillHistory)——必须
     // 在 spawn 前完成,保证历史先落、init/新轮事件全部 append 在后(顺序稳定)。
-    const resumeSessionId = this.resumeSessionId;
+    let resumeSessionId = this.resumeSessionId;
+    // 默认恢复:无显式注入时拉本 cwd 最近一条(排除已被其它 tab 认领的)。拉取在 spawn 前完成
+    // (与 backfill 同序),失败/无历史降级全新启动,不阻塞启动链。仅首启消费一次。
+    if (!resumeSessionId && this.autoResumeLatest) {
+      this.autoResumeLatest = false;
+      try {
+        const list = await fetchAiCliSessions(this.cwd ?? "", "claude");
+        const top = mostRecentSessionInCwd(list, this.cwd, autoResumedSessionIds);
+        if (top?.sessionId) {
+          autoResumedSessionIds.add(top.sessionId);
+          resumeSessionId = top.sessionId;
+          console.log("[ClaudeTransport] auto-resume latest session on first start", {
+            tabId: this.tabId,
+            sessionId: top.sessionId,
+          });
+        }
+      } catch (err) {
+        console.warn("[ClaudeTransport] auto-resume latest failed, start fresh:", err);
+      }
+    }
     if (resumeSessionId) {
       this.resumeSessionId = null;
       await this.backfillHistory(resumeSessionId);
@@ -389,12 +438,22 @@ export class ClaudeTransport {
       resumeSessionId: resumeSessionId ?? null,
       effort: this.effort ?? null,
       model: this.model ?? null,
+      addDirs: this.addDirs.length ? this.addDirs : null,
     });
     this.started = true;
     this.dead = false;
     this.activeMode = this.mode;
     this.activeEffort = this.effort;
     this.activeModel = this.model;
+    this.activeAddDirs = [...this.addDirs];
+  }
+
+  /** addDirs 与长进程实际启动快照是否不一致(顺序敏感;变更是重启信号)。 */
+  private addDirsChanged(): boolean {
+    return (
+      this.addDirs.length !== this.activeAddDirs.length ||
+      this.addDirs.some((d, i) => d !== this.activeAddDirs[i])
+    );
   }
 
   /**
@@ -631,11 +690,77 @@ export class ClaudeTransport {
     await this.sendToolResult(opts.toolUseId, result.output, result.isError);
   }
 
-  /** 中断当前轮(kill 整进程)。后端 kill 后 emit Terminated{reason:"interrupted"} → dead。
-   * 下次 send 自动 start(带 --resume,session 保留)续接。 */
+  /**
+   * 把工具写入项目 allowlist(「批准且不再问」):下次 spawn 带 `--allowedTools` 生效,
+   * 当前进程不重启。失败仅告警(allowlist 是体验优化,不该阻断当轮放行)。
+   */
+  persistAllowedTool(tool: string): void {
+    void invoke("add_claude_allowed_tool", { projectId: this.projectId, tool }).catch((err) => {
+      console.warn("[ClaudeTransport] add_claude_allowed_tool failed:", err);
+    });
+  }
+
+  /**
+   * 回应用户对 CLI 权限请求(can_use_tool)的决策 —— `--permission-prompt-tool stdio` 通道,
+   * 对齐 BaoCode:allow 后**CLI 自己执行该工具并续跑该轮**(不本地代执行、不注入 tool_result,
+   * 故不会出现「批准了还显示需手动批准 / 轮次不继续」);deny 时 message 作为拒绝结果交给模型,
+   * 模型换方式继续(不 kill、不重启)。
+   *
+   * 乐观移除本地 pending(卡片立即收起);后端写失败(CLI 已作废该请求/进程已退)仅告警。
+   */
+  async respondPermission(
+    requestId: string,
+    behavior: "allow" | "deny",
+    opts?: { input?: unknown; message?: string },
+  ): Promise<void> {
+    this.state = {
+      ...this.state,
+      pendingPermissions: this.state.pendingPermissions.filter((p) => p.requestId !== requestId),
+    };
+    this.scheduleEmit();
+    try {
+      await invoke("respond_claude_permission", {
+        projectId: this.projectId,
+        tabId: this.tabId,
+        requestId,
+        behavior,
+        updatedInput: opts?.input ?? null,
+        message: opts?.message ?? null,
+      });
+    } catch (err) {
+      console.warn("[ClaudeTransport] respond_claude_permission failed:", err);
+    }
+  }
+
+  /** 中断当前轮:**软中断优先**(stdin 写 control_request interrupt,CLI abort 当前轮回
+   * result,进程不死 → 下一条消息直接 stdin 续跑,免掉下轮 --resume 重启进程的秒级等待,
+   * 双 ESC/停止按钮卡顿的主治);~1.2s 未落定(旧 CLI 不认/卡死/compacting 子进程场景)或
+   * 进程已死 → 回退硬 kill(kill_claude:taskkill 进程树 + emit interrupted → dead,下次
+   * send --resume 重启续接)。 */
   async interrupt(): Promise<void> {
-    // 手动中断:先取消挂起的 API 重试(清定时器),再 kill。
+    // 手动中断:先取消挂起的 API 重试(清定时器),再中断。
     this.cancelRetry();
+    // 软路径:仅长进程活着且正在跑一轮时(compacting 是 spawn 的短命子进程,软中断写长
+    // 进程 stdin 无效,直接走硬 kill;重试等待期的 status="running" 残留覆写同理由超时兜底)。
+    if (this.started && !this.dead && this.state.status === "running") {
+      this.softInterrupting = true;
+      try {
+        await invoke("interrupt_claude_turn", {
+          projectId: this.projectId,
+          tabId: this.tabId,
+        });
+        // 轮询等 result 落定(spike 实测 interrupt→result ~1.1s,含 CLI abort + 流截断)。
+        // result 事件(handleEvent)把 status 置 done/idle 即离开循环,进程保留可续跑。
+        const deadline = Date.now() + 1200;
+        while (Date.now() < deadline && this.state.status === "running") {
+          await new Promise((r) => setTimeout(r, 80));
+        }
+        if (this.state.status !== "running") return; // 软中断成功,UI 已由 result 复位
+      } catch {
+        /* stdin 不可用(进程未启/已死):落硬 kill */
+      }
+      this.softInterrupting = false; // 未落定:清标志(防误吞后续 result),转硬 kill
+    }
     try {
       await invoke("kill_claude", {
         projectId: this.projectId,
@@ -830,6 +955,56 @@ export class ClaudeTransport {
     }
   }
 
+  /**
+   * 追加工作目录(claude --add-dir 启动 flag,重启进程生效)。/add-dir 快捷指令与 ⋯ 菜单
+   * 「添加工作目录」调此方法——headless(stream-json)下 stdin 写 `/add-dir` 只当文本不执行
+   * (同 /clear),且运行中进程无法热加,故与 --model 同方案:置标记 + idle 时立即 restart
+   * (--resume 保留 session,compact 不断裂);busy 时组件层已先 interrupt(进程死 → 跳过
+   * 立即重启),下次 send 的 ensureStarted 检测 addDirs 不一致重启生效。
+   * 重复路径幂等跳过;同时在消息流插 add_dir notice 作可视反馈(path 走 summary,文案
+   * ClaudePane 渲染时 i18n)。
+   */
+  async addDir(path: string): Promise<void> {
+    const p = path.trim().replace(/^["']|["']$/g, "");
+    if (!p || this.addDirs.includes(p)) return;
+    this.cancelRetry();
+    this.addDirs = [...this.addDirs, p];
+    // 可视反馈:add_dir notice(幂等 id;确定性,重启不重插)。
+    const noticeId = `notice:add_dir:${p}`;
+    if (!this.state.messageIndex.has(noticeId)) {
+      this.state = {
+        ...this.state,
+        messages: [
+          ...this.state.messages,
+          {
+            id: noticeId,
+            role: "notice",
+            notice: { kind: "add_dir", summary: p },
+            blocks: [],
+            timestamp: new Date().toISOString(),
+            streaming: false,
+          },
+        ],
+        messageIndex: new Map(this.state.messageIndex).set(noticeId, this.state.messages.length),
+      };
+      this.emit();
+    }
+    if (this.started && !this.dead) {
+      // 重启发的 init 是握手非对话轮:置 starting 让 handleEvent 把 init 后的 status 覆写 idle,
+      // 防误显 busy(同 setModel 语义)。
+      this.starting = true;
+      if (this.sendingPromise) {
+        await this.sendingPromise.catch(() => {});
+      }
+      this.sendingPromise = this.restart();
+      try {
+        await this.sendingPromise;
+      } finally {
+        this.sendingPromise = null;
+      }
+    }
+  }
+
   /** 关闭 transport:取消 listen。不 kill 后端会话(由 AppShell 关 tab/项目时统一 invoke kill_claude)。 */
   stop(): void {
     // 关 tab/项目:清重试定时器,防对已 kill 会话 invoke。
@@ -865,7 +1040,14 @@ export class ClaudeTransport {
       }
     } else if (payload.kind === "result") {
       // result 驱动重试:成功 → 取消(序列干净结束);失败 → scheduleRetry(内部四道闸判可重试/次数)。
-      if (payload.success) {
+      if (this.softInterrupting) {
+        // 软中断落定:CLI 的 error_during_execution result 是**预期行为**(用户主动中断),
+        // 不进重试分流(误进会被 isRetryableApiError(null)=true 判可重试而自动重发被中断的
+        // prompt);success 改写 true 让 status=done(非 error 样式),duration/usage 照常透传。
+        this.softInterrupting = false;
+        this.cancelRetry();
+        payload = { ...payload, success: true, error: null };
+      } else if (payload.success) {
         this.cancelRetry();
       } else {
         this.scheduleRetry(this.lastPrompt, payload.error ?? null);
@@ -897,6 +1079,29 @@ export class ClaudeTransport {
       this.state = { ...this.state, status: "running" };
     }
     this.scheduleEmit();
+    // P2(#137):init / result / compact_boundary 后向 CLI 拉一次权威上下文账本
+    // (request_claude_context_usage → CLI control_response → ContextUsage 事件回流,
+    // applyEvent 存 meta.contextUsage,computeContextInfo 优先用它)。fire-and-forget:
+    // 失败/不响应静默(前端估算兜底,baocode 同款容错);运行中也可查(后端不拦 busy)。
+    if (payload.kind === "init" || payload.kind === "result" || payload.kind === "compact_boundary") {
+      this.refreshContextUsage();
+    }
+  }
+
+  /** get_context_usage 拉取去重(一次一个 inflight;CLI 同账本重查无意义)。 */
+  private ctxUsageInflight = false;
+
+  /** 请求 CLI 权威上下文账本。响应异步回流(context_usage 事件),此处只发不接。 */
+  private refreshContextUsage(): void {
+    if (this.ctxUsageInflight || this.dead) return;
+    this.ctxUsageInflight = true;
+    invoke("request_claude_context_usage", { projectId: this.projectId, tabId: this.tabId })
+      .catch(() => {
+        /* 进程未启 / stdin 忙 / 旧 CLI 不认 subtype:静默,前端估算兜底 */
+      })
+      .finally(() => {
+        this.ctxUsageInflight = false;
+      });
   }
 
   /**

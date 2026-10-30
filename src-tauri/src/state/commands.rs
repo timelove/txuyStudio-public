@@ -402,10 +402,11 @@ pub async fn set_theme(
     Ok(snapshot)
 }
 
-/// 持久化主窗口大小/位置。
+/// 持久化主窗口大小/位置(#132 启用:前端 resize/移动防抖 350ms 调用)。
 ///
 /// 阶段2 仅存 main 窗口 bounds;`windowLabel` 非 "main" 时忽略,
-/// 预留给阶段4/5 的独立项目窗口。
+/// 预留给阶段4/5 的独立项目窗口。bounds 为逻辑像素;`width == 0` 是「仅标志」条目
+/// (最大化中):只原地更新 `maximized`,保留已存的 normal 态 x/y/w/h。
 #[tauri::command]
 pub async fn save_window_bounds(
     app: AppHandle,
@@ -419,7 +420,14 @@ pub async fn save_window_bounds(
 
     let snapshot = {
         let mut snap = state.inner.lock().map_err(|e| e.to_string())?;
-        snap.main_window_bounds = Some(bounds);
+        if bounds.width == 0 {
+            match snap.main_window_bounds.as_mut() {
+                Some(b) => b.maximized = bounds.maximized,
+                None => snap.main_window_bounds = Some(bounds),
+            }
+        } else {
+            snap.main_window_bounds = Some(bounds);
+        }
         snap.clone()
     };
 

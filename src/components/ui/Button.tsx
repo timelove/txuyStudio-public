@@ -99,7 +99,8 @@ export function Button({
       ref={buttonRef}
       type={type}
       className={cn(
-        "rounded-[var(--mx-radius-md)] cursor-pointer transition-colors select-none",
+        // 按压反馈:active 缩至 0.97,easeOutBack 回弹(anime.js 风格 spring 感,轻微过冲)。
+        "rounded-[var(--mx-radius-md)] cursor-pointer select-none transition-[color,background-color,border-color,box-shadow,transform] duration-150 ease-[cubic-bezier(0.34,1.56,0.64,1)] active:scale-[0.97]",
         SIZE[size],
         VARIANT[variant],
         className,

@@ -1,0 +1,13 @@
+[package]
+name = "txuy-core"
+version = "0.1.0"
+edition = "2024"
+description = "txuyStudio 业务核心(纯逻辑):状态持久化 / ConPTY 会话 / 进程与路径工具——Tauri 与 GPUI 两壳共用"
+
+[dependencies]
+log = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+portable-pty = "0.8"
+tokio = { version = "1", features = ["rt", "rt-multi-thread"] }
+uuid = { version = "1", features = ["v4"] }

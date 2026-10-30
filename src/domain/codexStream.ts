@@ -30,6 +30,7 @@ export type CodexEvent = {
 /** 分类后的事件。`kind` 标签是 snake_case(后端 `#[serde(tag="kind", rename_all="snake_case")]`)。 */
 export type CodexEventPayload =
   | { kind: "init"; sessionId: string }
+  | { kind: "user"; message: { id?: string; role?: string; content?: unknown } }
   | { kind: "item_started"; item: CodexItem }
   | { kind: "item_completed"; item: CodexItem }
   | { kind: "turn_started" }
@@ -307,6 +308,31 @@ export function applyEvent(state: CodexStreamState, payload: CodexEventPayload):
     case "init": {
       next.meta = { ...next.meta, sessionId: payload.sessionId || next.meta.sessionId };
       next.terminatedReason = null;
+      return next;
+    }
+    case "user": {
+      // 手机经中继发来的用户消息回显(codex 原生事件不回显输入)。桌面端自己发的在
+      // `appendUserMessage` 已本地插入,后端不回显 → 这里只会收到手机来源的。
+      const msg = payload.message;
+      const raw = msg.content;
+      const texts: string[] = Array.isArray(raw)
+        ? raw
+            .filter((b): b is { type: string; text?: string } => !!b && typeof b === "object" && (b as { type?: string }).type === "text")
+            .map((b) => b.text ?? "")
+        : typeof raw === "string"
+          ? [raw]
+          : [];
+      const text = texts.filter((t) => t.length > 0).join("\n");
+      if (!text) return next;
+      const id = msg.id ?? genId("user");
+      if (next.messages.some((m) => m.id === id)) return next;
+      next.messages.push({
+        id,
+        role: "user",
+        blocks: [{ type: "text", text }],
+        timestamp: new Date().toISOString(),
+        streaming: false,
+      });
       return next;
     }
     case "item_started": {

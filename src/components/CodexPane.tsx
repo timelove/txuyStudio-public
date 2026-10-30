@@ -1,6 +1,7 @@
 import { Fragment, lazy, memo, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { selectEnclosingPre } from "../lib/selectEnclosingPre";
+import { useMessageWindow } from "../lib/useMessageWindow";
 import { homeDir } from "@tauri-apps/api/path";
 import { useTranslation } from "react-i18next";
 import type { ShellKind, SplitDirection } from "../domain/paneTree";
@@ -37,6 +38,7 @@ import { SessionHeader } from "./chat/SessionHeader";
 import { ChatUserBubble } from "./chat/ChatUserBubble";
 import { MESSAGE_GAP_MS, TimeGapDivider, messageTimeMs } from "./chat/TimeGapDivider";
 import { Tabs, TabsList, TabsTrigger } from "./ui/Tabs";
+import { TabCloseIcon } from "./icons";
 
 /** MdPreview 懒加载(避免 codexpane 首屏就拉 marked/dompurify,与探针共用 md-render 分包)。 */
 const MdPreviewLazy = lazy(() =>
@@ -161,8 +163,6 @@ const CodexTabChip = memo(function CodexTabChip({
   const transport = session.kind === "codexpane" ? getCodexTransport(session.id) : undefined;
   const kind = useTabSummary(transport, shellRunning);
   return (
-    <Tooltip>
-      <TooltipTrigger asChild>
         <TabsTrigger asChild value={session.id}>
           <div
             className={`mx-tab-item group/tab flex h-[length:var(--mx-tab-h)] min-w-0 shrink cursor-pointer items-center gap-1 px-2 transition-colors ${
@@ -184,14 +184,11 @@ const CodexTabChip = memo(function CodexTabChip({
                 }}
                 onClick={(e) => e.stopPropagation()}
               >
-                ×
+                <TabCloseIcon className="h-2 w-2" />
               </Button>
             )}
           </div>
         </TabsTrigger>
-      </TooltipTrigger>
-      <TooltipContent>{t(session.name)}</TooltipContent>
-    </Tooltip>
   );
 });
 
@@ -941,6 +938,10 @@ export function CodexPane(props: CodexPaneProps) {
     [state?.messages, shellState?.messages],
   );
 
+  // 消息流窗口化(内存优化):只挂最近一批消息的 DOM,顶部哨兵上滚自动展开更早一批。
+  const { offset: msgOffset, sentinel: msgSentinel } = useMessageWindow(mergedMessages.length, scrollRef, activeTabId);
+  const visibleMessages = msgOffset > 0 ? mergedMessages.slice(msgOffset) : mergedMessages;
+
   // 当前可选 reasoning 档位:catalog 中当前 model 项的 supported_reasoning_levels,兜底预置。
   const reasoningLevels = useMemo(() => {
     const alias = getCodexTransportRef.current(activeTabId)?.getSelectedModelAlias();
@@ -1137,12 +1138,13 @@ export function CodexPane(props: CodexPaneProps) {
           relative 供缩小态悬浮小竖条定位。 */}
       <div className="relative flex min-h-0 min-w-0 flex-1">
       <div className="grid min-h-0 min-w-0 flex-1 grid-rows-[1fr_auto]">
-        <div ref={scrollRef} onScroll={handleScroll} className="mx-scroll-pretty relative min-h-0 overflow-y-auto px-4 py-4" style={{ fontSize }}>
+        <div ref={scrollRef} onScroll={handleScroll} className="mx-scroll-pretty relative min-h-0 overflow-x-hidden overflow-y-auto px-4 py-4" style={{ fontSize }}>
           {state && (state.messages.length > 0 || (shellState?.messages.length ?? 0) > 0) ? (
             <div ref={contentRef} className="mx-auto w-full max-w-[54.25rem] space-y-1">
               {/* C5 会话头:会话开端信息(品牌块 + 模型 + session 尾部 + 窗口),让会话有"开端感"。
-                  本分支已在 hasMessages 守卫内(mergedMessages 必非空),只需 meta 有模型/会话 id 其一。 */}
-              {state?.meta && (state.meta.model || state.meta.sessionId) && (
+                  本分支已在 hasMessages 守卫内(mergedMessages 必非空),只需 meta 有模型/会话 id 其一。
+                  窗口截断(msgOffset>0)时隐藏——它之上还有更早消息,不是"开端"。 */}
+              {msgOffset === 0 && state?.meta && (state.meta.model || state.meta.sessionId) && (
                 <SessionHeader
                   brandLetter="X"
                   brandClass="bg-[var(--mx-accent)] text-[var(--mx-accent-contrast)]"
@@ -1152,11 +1154,12 @@ export function CodexPane(props: CodexPaneProps) {
                   contextWindow={state.meta.contextWindow}
                 />
               )}
-              {mergedMessages.map((item, i) => {
+              {msgSentinel}
+              {visibleMessages.map((item, i) => {
                 // 相邻消息间隔超阈值(30 分钟)插时间分隔线:长会话的时间断层一眼可辨。
                 // timestamp 可空且串/数字并存(claude/codex ISO 串,`!` shell 消息 epoch ms),空值不参与比较。
                 const ts = item.msg.timestamp;
-                const prevTs = i > 0 ? mergedMessages[i - 1].msg.timestamp : null;
+                const prevTs = i > 0 ? visibleMessages[i - 1].msg.timestamp : null;
                 const gapTs =
                   ts != null && prevTs != null && messageTimeMs(ts) - messageTimeMs(prevTs) > MESSAGE_GAP_MS ? ts : null;
                 return (
@@ -1885,7 +1888,7 @@ const MessageRow = memo(function MessageRow({
     .join("\n");
   return (
     // 左右对话框:assistant 消息靠左,深底气泡 + 左侧品牌徽标。不设 max-w 限宽(工具卡/代码块需要宽)。
-    <div className="group/message flex items-start gap-1.5">
+    <div className="mx-msg-in group/message flex items-start gap-1.5">
       {/* A1 角色徽标:assistant 品牌块(青 X),置于气泡左侧。 */}
       <span aria-hidden className="flex h-[1.625em] shrink-0 items-center">
         <span className="grid h-[18px] w-[18px] place-items-center rounded-full bg-[var(--mx-accent)] text-[10px] font-extrabold text-[var(--mx-accent-contrast)]">X</span>

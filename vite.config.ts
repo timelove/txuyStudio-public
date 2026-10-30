@@ -12,20 +12,35 @@ export default defineConfig({
   },
   clearScreen: false,
   server: {
+    host: true, // 0.0.0.0 等价:Windows 上让「localhost」(IPv4/IPv6) 都能解析到 vite,vite 7 + node 22 在 Windows 上 host: "127.0.0.1" 不响应
     port: 1420,
     strictPort: true,
     watch: {
-      // 排除 Rust 编译产物(src-tauri/target 近 2 万 debug+release 文件)。vite 的 chokidar
-      // watcher 默认递归监听项目根,target 不在默认 ignore 列表,冷启动初始化时要遍历全部
-      // ~19386 个编译产物文件,在 Windows 上 CPU 满载、阻塞事件循环数分钟 → dev server 完全
-      // 不响应(浏览器死卡在 splash「正在加载工作区」)。这是 dev 冷启动卡死的真正根因
-      // (与 vite 版本/runtime/插件/依赖全无关——之前怀疑的 radix/tailwind/vite8 都是被它掩盖的)。
-      // 排除后 watcher 初始化秒级,冷启动恢复正常;HMR 本就只该监听 src 前端代码。
-      // 用正则匹配「目录路径本身」(而非 glob `.../target/**` 只匹配其下文件)——chokidar 遍历到
-      // src-tauri/target 目录时即跳过整个子树,不递归读近 2 万个 Rust 编译产物文件。glob 形式
-      // 只过滤文件、仍会进入目录遍历,等于没排除。同时显式带上 node_modules/.git(vite 默认项,
-      // 覆盖 watch.ignored 时会替换默认,需一并声明)。
-      ignored: [/node_modules/, /\.git/, /src-tauri[\\/]target/],
+      // ── dev 冷启动卡死的根因(2026-10-19 实测定位)─────────────────────────────
+      // chokidar 默认递归监听项目根。本项目 Rust 编译产物体量:
+      //   src-tauri/target 42G + src-gpui/target 22G + gpui-lab/target 4.4G
+      //   + crates/txuy-core/target 436M  ≈ 69G
+      // 不排除 → 冷启遍历这 69G 的数十万文件,Windows 上 CPU 满载、阻塞事件循环,
+      // dev server 端口虽 LISTENING 但收到请求**永不响应**(curl 5s 0 字节;
+      // 浏览器表现为「加载工作区」永久转圈 / 黑屏)。
+      //
+      // 两条硬约束(踩过坑):
+      // 1) 必须用 **RegExp**,不能用 glob 字符串 —— chokidar 走 anymatch,glob 里的
+      //    `/` 与 Windows 路径的 `\` 不匹配,`"**/target/**"` 直接失效(实测仍扫全量)。
+      //    RegExp 用 [\\/] 兼容两种分隔符。
+      // 2) 必须匹配**目录路径本身**(`[\\/]target([\\/]|$)`)—— 只匹配其下文件的形式
+      //    仍会进入目录做递归遍历,等于没排除。
+      //
+      // 用 `([\\/]|$)` 而非 `[\\/]` 是为了同时命中「目录自身」与「其下文件」两种路径形态。
+      // node_modules/.git 是 vite 默认项,一旦显式声明 watch.ignored 就会**替换**默认值,
+      // 故必须一并列出。
+      ignored: [
+        /[\\/]target([\\/]|$)/, // 所有 Rust target(src-tauri / src-gpui / gpui-lab / crates)
+        /[\\/]gpui-lab([\\/]|$)/, // GPUI 实验目录整树(仅 gpui 分支跟踪)
+        /[\\/]src-gpui([\\/]|$)/, // GPUI 分支源码 + 产物(Tauri 前端 HMR 用不到)
+        /[\\/]node_modules([\\/]|$)/,
+        /[\\/]\.git([\\/]|$)/,
+      ],
     },
   },
   optimizeDeps: {

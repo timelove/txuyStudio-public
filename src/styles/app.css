@@ -102,6 +102,10 @@
    * 值 = 改动前的硬编码值,故默认(midnight)观感零变化。 */
   --mx-editor-bg: #0b1020;
   --mx-card-bg: #0e1424;
+  /* 气泡内小卡片底色(工具调用卡片):比 --mx-card-bg 再抬一档,让卡片从气泡里「浮」出来。
+   * 注意别用 --mx-surface-soft 代替 —— 那是半透明叠加色,暗色主题下叠在气泡上算出来
+   * 与气泡同色(只差 1~3/255),卡片会「看不见」(2026-10-19 踩过)。 */
+  --mx-card-inner: #161d31;
   --mx-text-bright: #e2e8f0;
   --mx-text-dim: #64748b;
   --mx-accent-bright: #cffafe;
@@ -128,6 +132,11 @@
    * One Dark 用经典 chrome 色 #21252b(比内容区暗,Atom/VS Code One Dark 层级);midnight 搬
    * border-soft 现值,观感零变化。 */
   --mx-tabbar-bg: rgba(148, 163, 184, 0.055);
+  /* Claude 品牌色(= baocode AppColors.claude,Claude 官方陶土橙 #D97857):ClaudePane 的
+   * 图标/徽标/思考点专用。只定义在 :root 不随主题覆写——品牌色恒定,不跟主题走。 */
+  --mx-claude: #d97857;
+  --mx-claude-soft: rgba(217, 120, 87, 0.1);
+  --mx-claude-border: rgba(217, 120, 87, 0.3);
   /* 工具卡片强调色(ClaudePane 工具类型分类):violet/indigo/orange/accent-deep 的 soft/border 变体。 */
   --mx-violet-soft: rgba(167, 139, 250, 0.08);
   --mx-violet-border: rgba(167, 139, 250, 0.28);
@@ -172,7 +181,8 @@
   --mx-guarded: #56b6c2;
   --mx-permissive: #e5c07b;
   --mx-editor-bg: #1e2127;
-  --mx-card-bg: #2c313a;
+  --mx-card-bg: #333944;
+  --mx-card-inner: #3d4450;
   --mx-text-bright: #d7dae0;
   --mx-text-dim: #5c6370;
   --mx-accent-bright: #cdd9e5;
@@ -232,7 +242,8 @@
   --mx-guarded: #0891b2;
   --mx-permissive: #c48900;
   --mx-editor-bg: #ffffff;
-  --mx-card-bg: #f7f8fa;
+  --mx-card-bg: #ffffff;
+  --mx-card-inner: #f2f3f5;
   --mx-text-bright: #000000;
   --mx-text-dim: #8c919b;
   --mx-accent-bright: #2456c8;
@@ -295,7 +306,8 @@
   --mx-guarded: #3bb8c4;
   --mx-permissive: #d6bf55;
   --mx-editor-bg: #1e1f22;
-  --mx-card-bg: #222427;
+  --mx-card-bg: #2b2d30;
+  --mx-card-inner: #35383d;
   --mx-text-bright: #ffffff;
   --mx-text-dim: #777b84;
   --mx-accent-bright: #548af7;
@@ -332,6 +344,133 @@
   --mx-overlay: rgba(0, 0, 0, 0.45);
 }
 
+/* ============================================================
+ * 奶油金主题(暖纸浅色,取自用户提供的 Dark Mode Toggle 参考图浅侧):
+ * 米白暖纸窗底 #F6F1E7 + 白卡 #FFFFFF + 金色强调 #D4A843(参考图官方口径
+ * bg #ffffff / text #333333,金色按钮 ≈ #d4a843)。语义色走浅底可读深档,
+ * 品牌紫/Claude 橙保持(:root 恒定)。终端区用暖纸底,与 xterm bg 同值。
+ * ============================================================ */
+[data-theme="cream-gold"] {
+  color: #3d3a33;
+  background: #f6f1e7;
+  color-scheme: light;
+  --mx-bg: #f6f1e7;
+  --mx-border: #e2d9c4;
+  --mx-border-strong: #cbbf9f;
+  --mx-surface: #fffdf7;
+  --mx-text: #333333;
+  --mx-muted: #6e675a;
+  --mx-faint: #9a9284;
+  --mx-accent: #d4a843;
+  --mx-accent-deep: #8a5cf6;
+  --mx-brand-gradient: linear-gradient(135deg, #d4a843, #b8860b);
+  --mx-selected-bg: rgba(212, 168, 67, 0.16);
+  --mx-selected-border: rgba(180, 140, 40, 0.5);
+  --mx-hover-bg: rgba(0, 0, 0, 0.045);
+  --mx-guarded: #0e7490;
+  --mx-permissive: #a16207;
+  --mx-editor-bg: #faf6ec;
+  --mx-card-bg: #ffffff;
+  --mx-card-inner: #f4eee0;
+  --mx-text-bright: #1a1815;
+  --mx-text-dim: #8c8574;
+  --mx-accent-bright: #a1781c;
+  --mx-accent-soft: rgba(212, 168, 67, 0.14);
+  --mx-user-bubble: rgba(0, 0, 0, 0.055);
+  --mx-user-bubble-badge: rgba(0, 0, 0, 0.09);
+  --mx-violet: #8a5cf6;
+  --mx-danger: #c25656;
+  --mx-danger-bright: #a83f3f;
+  --mx-danger-bg: rgba(194, 86, 86, 0.1);
+  --mx-danger-border: rgba(194, 86, 86, 0.42);
+  --mx-success: #4f7d3a;
+  --mx-success-bright: #3d6630;
+  --mx-success-soft: rgba(79, 125, 58, 0.12);
+  --mx-warning: #b3851a;
+  --mx-warning-bright: #8a660f;
+  --mx-warning-soft: rgba(179, 133, 26, 0.12);
+  --mx-surface-2: #f0e9da;
+  --mx-surface-soft: #faf6ec;
+  --mx-border-soft: rgba(0, 0, 0, 0.06);
+  --mx-tabbar-bg: #efe8d8;
+  --mx-violet-soft: rgba(138, 92, 246, 0.07);
+  --mx-violet-border: rgba(138, 92, 246, 0.3);
+  --mx-indigo-soft: rgba(80, 90, 220, 0.08);
+  --mx-indigo-border: rgba(80, 90, 220, 0.28);
+  --mx-orange-soft: rgba(191, 113, 36, 0.09);
+  --mx-orange-border: rgba(191, 113, 36, 0.3);
+  --mx-accent-deep-soft: rgba(138, 92, 246, 0.08);
+  --mx-info: #3056c8;
+  --mx-info-soft: rgba(48, 86, 200, 0.1);
+  --mx-link: #a16207;
+  --mx-code-bg: #f3ecdd;
+  --mx-accent-contrast: #3a2c08;
+  --mx-overlay: rgba(40, 32, 16, 0.35);
+}
+
+/* ============================================================
+ * 午夜靛蓝主题(深色,取自同一参考图深侧官方口径:bg #1A1A2E / text #EAEAEA,
+ * 靛蓝强调 ≈ #7C83F0,卡片/边框走靛蓝同系抬亮)。语义色深底亮档,
+ * 品牌紫/Claude 橙保持(:root 恒定)。终端区同底色,与 xterm bg 一致。
+ * ============================================================ */
+[data-theme="indigo-night"] {
+  color: #eaeaea;
+  background: #1a1a2e;
+  color-scheme: dark;
+  --mx-bg: #1a1a2e;
+  --mx-border: rgba(124, 131, 240, 0.22);
+  --mx-border-strong: rgba(124, 131, 240, 0.42);
+  --mx-surface: #20203a;
+  --mx-text: #eaeaea;
+  --mx-muted: #9a9ab8;
+  --mx-faint: #67678a;
+  --mx-accent: #7c83f0;
+  --mx-accent-deep: #a78bfa;
+  --mx-brand-gradient: linear-gradient(135deg, #a78bfa, #7c83f0);
+  --mx-selected-bg: rgba(124, 131, 240, 0.22);
+  --mx-selected-border: rgba(124, 131, 240, 0.5);
+  --mx-hover-bg: rgba(255, 255, 255, 0.06);
+  --mx-guarded: #3bb8c4;
+  --mx-permissive: #d6bf55;
+  --mx-editor-bg: #1a1a2e;
+  --mx-card-bg: #20203a;
+  --mx-card-inner: #282848;
+  --mx-text-bright: #ffffff;
+  --mx-text-dim: #8080a8;
+  --mx-accent-bright: #a3a8fa;
+  --mx-accent-soft: rgba(124, 131, 240, 0.18);
+  --mx-user-bubble: rgba(255, 255, 255, 0.06);
+  --mx-user-bubble-badge: rgba(255, 255, 255, 0.1);
+  --mx-violet: #a78bfa;
+  --mx-danger: #f07178;
+  --mx-danger-bright: #f8a0a6;
+  --mx-danger-bg: rgba(240, 113, 120, 0.15);
+  --mx-danger-border: rgba(240, 113, 120, 0.45);
+  --mx-success: #6fd08c;
+  --mx-success-bright: #96e2ab;
+  --mx-success-soft: rgba(111, 208, 140, 0.15);
+  --mx-warning: #f5a623;
+  --mx-warning-bright: #ffc53d;
+  --mx-warning-soft: rgba(245, 166, 35, 0.14);
+  --mx-surface-2: #1f1f38;
+  --mx-surface-soft: #191930;
+  --mx-border-soft: rgba(255, 255, 255, 0.06);
+  --mx-tabbar-bg: #1f1f38;
+  --mx-violet-soft: rgba(167, 139, 250, 0.1);
+  --mx-violet-border: rgba(167, 139, 250, 0.32);
+  --mx-indigo-soft: rgba(124, 131, 240, 0.12);
+  --mx-indigo-border: rgba(124, 131, 240, 0.35);
+  --mx-orange-soft: rgba(245, 146, 62, 0.1);
+  --mx-orange-border: rgba(245, 146, 62, 0.32);
+  --mx-accent-deep-soft: rgba(167, 139, 250, 0.14);
+  --mx-info: #8fa5ff;
+  --mx-info-soft: rgba(124, 131, 240, 0.16);
+  --mx-link: #a3a8fa;
+  --mx-code-bg: #15152c;
+  --mx-accent-contrast: #ffffff;
+  --mx-overlay: rgba(0, 0, 0, 0.5);
+}
+
 * {
   box-sizing: border-box;
 }
@@ -341,8 +480,14 @@ body {
   overflow: hidden;
 }
 
-button {
-  font: inherit;
+/* @layer base:无层规则会整体压过 Tailwind v4 的 @layer utilities(层叠层先于特异性),
+ * button{font:inherit} 裸写曾导致全应用按钮上的 text-[Npx] 字号声明静默失效
+ * (Edge CDP 实测 2026-10-21:同 parent 下 button 算 14px、span 11px)。入 base 层后
+ * utilities 可正常覆盖,未写字号的按钮仍 inherit 周围文字。 */
+@layer base {
+  button {
+    font: inherit;
+  }
 }
 
 /* ============================================================
@@ -607,6 +752,24 @@ button {
   to { opacity: 0; transform: scale(0.96); }
 }
 
+/* Sheet(侧边抽屉)内容:左缘全高(设置入口在左上角,贴入口侧滑入),滑入/滑出(translateX,
+ * 与 Dialog 的 scale 区分;关闭动画走「未挂载前」的 data-state=closed,卸载由 Radix 延迟到
+ * 动画结束)。 */
+.mx-sheet-content[data-state="open"] {
+  animation: mx-sheet-in 220ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.mx-sheet-content[data-state="closed"] {
+  animation: mx-sheet-out 160ms ease-in;
+}
+@keyframes mx-sheet-in {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(0); }
+}
+@keyframes mx-sheet-out {
+  from { transform: translateX(0); }
+  to { transform: translateX(-100%); }
+}
+
 /* Popover/ContextMenu 内容:fade + 轻微缩放(不 translate,定位由 Radix side/align 管)。
  * direction 变体由 data-side 提供进/出方向(Radix 自动加 data-side=top|bottom|left|right),
  * 此处用统一淡入淡出,简洁且不与定位冲突。 */
@@ -626,6 +789,17 @@ button {
   to { opacity: 0; transform: scale(0.97); }
 }
 
+/* 设置弹窗入场(2026-10-21 页化→IDEA 式居中模态):fade+scale 轻回弹(与 Dialog
+ * content 同观感;设置弹窗非 Radix 无 data-state,故独立类名直挂 animation)。
+ * 遮罩 mx-fade-in 在 AppShell 内联指定,同为一次性入场。 */
+.mx-settings-modal {
+  animation: mx-settings-modal-in 200ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+@keyframes mx-settings-modal-in {
+  from { opacity: 0; transform: scale(0.96) translateY(8px); }
+  to { opacity: 1; transform: none; }
+}
+
 /* Tooltip:统一淡入淡出 + 轻微缩放(与 popover 同观感)。z-300 高于 modal z-200。 */
 .mx-tooltip-content[data-state="open"] {
   animation: mx-pop-in 120ms ease-out;
@@ -638,6 +812,16 @@ button {
  * Markdown 预览(探针 MdPreview)。手写复用 --mx-* token,对齐深蓝/cyan chrome。
  * marked 渲染的 HTML 经 dompurify sanitize 后注入,样式在此收口(不依赖外部 md css)。
  * ============================================================ */
+/* 消息流内嵌 markdown(压缩总结等):任何子块都不得把父容器撑宽。
+ * `break-words`(=overflow-wrap:break-word)只在排版末尾断行、**不参与 min-content 计算**,
+ * 故 96 字符的 C:\Users\... 路径照样把父级撑开 → 消息流冒出底部横向滚动条。
+ * 这里用 `anywhere`(参与 min-content 计算)让长不可断串可收缩,代码块/表格例外——
+ * 它们自带横向滚动(pre 内 white-space:pre 本就不折行,补 normal 防 anywhere 传染)。
+ * 表格滚动容器(.mx-md-table-scroll)的 overflow-x 在同文件下方定义,此处只补限宽。 */
+.mx-md-preview { max-width: 100%; min-width: 0; overflow-wrap: anywhere; }
+.mx-md-preview pre,
+.mx-md-preview .mx-codeblock { max-width: 100%; }
+.mx-md-preview pre { overflow-wrap: normal; }
 .mx-md-preview h1,
 .mx-md-preview h2,
 .mx-md-preview h3,
@@ -779,4 +963,52 @@ body.mx-dragging-split * {
 body.mx-dragging-split.dragging-vertical,
 body.mx-dragging-split.dragging-vertical * {
   cursor: row-resize !important;
+}
+
+/* ============================================================
+ * anime.js 风格微动效层(2026-10-21):统一 easeOutBack 弹性 + stagger 错峰。
+ * 不引 anime.js 库——spring 感全部由 cubic-bezier(0.34,1.56,0.64,1)
+ * (easeOutBack,轻微过冲)与 cubic-bezier(0.22,1,0.36,1)(easeOutQuint 系,快进缓停)
+ * 承载,匹配项目零冗余依赖习惯(先例:趋势图自绘 SVG 不引 recharts)。
+ * ============================================================ */
+
+/* 审批坞/设置 tab 内容:rise 入场(快进缓停,克制不抢戏)。 */
+@keyframes mx-rise-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: none; }
+}
+/* 审批坞卡片:滑入 + 轻过冲(easeOutBack)。 */
+@keyframes mx-dock-in {
+  from { opacity: 0; transform: translateY(14px) scale(0.97); }
+  to { opacity: 1; transform: none; }
+}
+/* 热力图格子:缩放淡入,stagger 逐格点亮。 */
+@keyframes mx-cell-in {
+  from { opacity: 0; transform: scale(0.5); }
+  to { opacity: 1; transform: none; }
+}
+/* 消息流入场:user 气泡/assistant 卡片 mount 时轻抬(180ms,流式不重放)。 */
+@keyframes mx-msg-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+.mx-rise-in { animation: mx-rise-in 240ms cubic-bezier(0.22, 1, 0.36, 1) backwards; }
+.mx-dock-in { animation: mx-dock-in 300ms cubic-bezier(0.34, 1.56, 0.64, 1) backwards; }
+.mx-cell-in { animation: mx-cell-in 260ms cubic-bezier(0.34, 1.56, 0.64, 1) backwards; }
+.mx-msg-in { animation: mx-msg-in 180ms cubic-bezier(0.22, 1, 0.36, 1); }
+
+/* 主题切换 View Transitions 圆形 reveal:新主题从触发点(--mx-vt-x/y,缺省回退
+ * 视口中上)圆形荡开盖过旧主题,全应用(chrome + xterm 终端)一起过渡。
+ * WebView2(Chromium 111+)支持;JS 侧无 startViewTransition 时直接切换,无副作用。 */
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation: none;
+  mix-blend-mode: normal;
+}
+::view-transition-new(root) {
+  animation: mx-theme-reveal 520ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+@keyframes mx-theme-reveal {
+  from { clip-path: circle(0% at var(--mx-vt-x, 50%) var(--mx-vt-y, 38%)); }
+  to { clip-path: circle(142% at var(--mx-vt-x, 50%) var(--mx-vt-y, 38%)); }
 }

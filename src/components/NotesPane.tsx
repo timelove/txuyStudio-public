@@ -13,6 +13,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "./ui/Popover";
 import { Button } from "./ui/Button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/Tooltip";
 import { Tabs, TabsList, TabsTrigger } from "./ui/Tabs";
+import { TabCloseIcon } from "./icons";
 
 type NotesPaneProps = {
   paneId: string;
@@ -262,8 +263,6 @@ export function NotesPane({
             {sessions.map((s) => {
               const isActive = s.id === activeTabId;
               return (
-                <Tooltip key={s.id}>
-                  <TooltipTrigger asChild>
                     <TabsTrigger asChild value={s.id}>
                       <div
                         className={`mx-tab-item group/tab flex h-[length:var(--mx-tab-h)] min-w-0 shrink cursor-pointer items-center gap-1 px-2 transition-colors ${
@@ -282,14 +281,11 @@ export function NotesPane({
                             }}
                             onClick={(e) => e.stopPropagation()}
                           >
-                            ×
+                            <TabCloseIcon className="h-2 w-2" />
                           </Button>
                         )}
                       </div>
                     </TabsTrigger>
-                  </TooltipTrigger>
-                  <TooltipContent>{t(s.name)}</TooltipContent>
-                </Tooltip>
               );
             })}
           </TabsList>

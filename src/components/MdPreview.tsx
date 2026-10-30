@@ -223,8 +223,11 @@ export const MdPreview = memo(function MdPreview({ content, inline = false }: { 
       ref={ref}
       onClick={handleBlockClick}
       className={
+        // inline(嵌入消息流)只用 break-words 之外的隐性需求:宽度收缩交给 app.css 的
+        // `.mx-md-preview{min-width:0; overflow-wrap:anywhere}`——break-word 不参与 min-content
+        // 计算,长路径会把消息流撑出横向滚动条。block 态(探针预览)保持自带滚动。
         inline
-          ? "mx-md-preview mx-scroll-pretty break-words leading-relaxed text-[var(--mx-text)]"
+          ? "mx-md-preview mx-scroll-pretty leading-relaxed text-[var(--mx-text)]"
           : "mx-md-preview mx-scroll-pretty h-full overflow-auto px-4 py-3 leading-relaxed text-[var(--mx-text)]"
       }
       style={{ fontSize }}

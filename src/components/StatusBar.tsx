@@ -171,38 +171,48 @@ export function StatusBar({ focusedProject, gitBranch, claudeStatuses, codexStat
             <span className="font-[600] tabular-nums">v{updaterSnap.update.version}</span>
           </button>
         )}
+        {/* 聚焦项目 chip:项目色点 + 项目名 + ⎇ 分支合成一个胶囊(与顶栏项目 chip 同
+            色彩/命名体系,绑定「这是哪个项目」)——点击在资源管理器打开项目根目录
+            (与项目下拉 📂/右键菜单同语义的第四入口);完整路径直接跟在 chip 后面
+            内联展示(淡色截断,超长 hover 原生 title 看全)。 */}
         {focusedProject ? (
           <>
-            <Tooltip>
-            <TooltipTrigger asChild>
+            <button
+              type="button"
+              onClick={() => {
+                if (path) invoke("reveal_in_folder", { path }).catch(() => {});
+              }}
+              className="flex min-w-0 shrink-0 cursor-pointer items-center gap-1.5 rounded-[var(--mx-radius-md)] px-1.5 py-0.5 transition-colors hover:bg-[var(--mx-hover-bg)]"
+            >
+              <span
+                aria-hidden
+                className="h-1.5 w-1.5 shrink-0 rounded-full"
+                style={{ background: projectAccentColor(focusedProject.id) }}
+              />
+              <span className="max-w-[180px] truncate font-[600] text-[var(--mx-text)]">
+                {focusedProject.name}
+              </span>
+              {gitBranch && (
+                <span className="flex min-w-0 shrink-0 items-center gap-[3px] text-[var(--mx-text)]">
+                  <span aria-hidden>⎇</span>
+                  <span className="max-w-[140px] truncate font-mono text-[11px]">{gitBranch}</span>
+                </span>
+              )}
+            </button>
             <span
-              className="h-1.5 w-1.5 shrink-0 rounded-full"
-              style={{ background: focusedProject ? projectAccentColor(focusedProject.id) : "var(--mx-accent)" }}
-            />
-            </TooltipTrigger>
-            <TooltipContent>{t("statusbar.focusedProject")}</TooltipContent>
-            </Tooltip>
-            <Tooltip>
-            <TooltipTrigger asChild>
-            <span className="truncate" dir="ltr">
+              className="min-w-0 truncate text-[var(--mx-text)]"
+              dir="ltr"
+              title={path}
+              // 双击路径开文件夹(与左侧 chip 单击同语义的第二入口;双击而非单击,避免误触
+              // 频繁弹资源管理器)。preventDefault 阻止双击原生选词。
+              onDoubleClick={(e) => {
+                if (!path) return;
+                e.preventDefault();
+                invoke("reveal_in_folder", { path }).catch(() => {});
+              }}
+            >
               {path}
             </span>
-            </TooltipTrigger>
-            <TooltipContent>{path}</TooltipContent>
-            </Tooltip>
-            {gitBranch && (
-              <Tooltip>
-              <TooltipTrigger asChild>
-              <span
-                className="flex shrink-0 items-center gap-[3px] text-[var(--mx-muted)]"
-              >
-                <span aria-hidden>⎇</span>
-                <span className="max-w-[160px] truncate">{gitBranch}</span>
-              </span>
-              </TooltipTrigger>
-              <TooltipContent>{t("statusbar.gitBranch", { branch: gitBranch })}</TooltipContent>
-              </Tooltip>
-            )}
           </>
         ) : (
           <span className="text-[var(--mx-faint)]">—</span>
@@ -216,7 +226,7 @@ export function StatusBar({ focusedProject, gitBranch, claudeStatuses, codexStat
         <div className="flex shrink-0 items-center gap-1.5">
           {aiActive > 0 && (
             <>
-              <span className="text-[var(--mx-faint)]">{t("statusbar.aiSessions")}</span>
+              <span className="text-[var(--mx-muted)]">{t("statusbar.aiSessions")}</span>
               {aiPills.filter((p) => aiCounts[p.kind] > 0).map((p) => {
                 const first = allAiStatuses.find((e) => e.summary.kind === p.kind);
                 return (
@@ -248,7 +258,7 @@ export function StatusBar({ focusedProject, gitBranch, claudeStatuses, codexStat
           <Tooltip>
           <TooltipTrigger asChild>
           <span
-            className="tabular-nums"
+            className="tabular-nums text-[var(--mx-text)]"
           >
             MEM {Math.round(mem.usedBytes / 1e9)}/{Math.round(mem.totalBytes / 1e9)}G
           </span>
@@ -264,10 +274,11 @@ export function StatusBar({ focusedProject, gitBranch, claudeStatuses, codexStat
           className={[
             "transition-colors cursor-pointer select-none",
             tipHidden
-              ? "text-[var(--mx-faint)] hover:text-[var(--mx-muted)]"
+              ? "text-[var(--mx-muted)] hover:text-[var(--mx-text)]"
               : tipHighlight
-                ? "text-[var(--mx-accent)]"
-                : "text-[var(--mx-muted)] hover:text-[var(--mx-text)]",
+                // 新 tip 轮换高亮:温和提亮一档(text),弃 accent——高饱和纯蓝刺眼。
+                ? "text-[var(--mx-text)]"
+                : "text-[var(--mx-text)] hover:text-[var(--mx-text-bright)]",
           ].join(" ")}
           onClick={() => setTipHidden((h) => !h)}
         >

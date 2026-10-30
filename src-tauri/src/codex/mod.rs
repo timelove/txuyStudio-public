@@ -90,12 +90,19 @@ pub struct CodexEvent {
 /// `tag = "kind"`:serde 内部标签,前端 `CodexEventPayload` union 按 `kind` 字段判别。
 /// `rename_all = "snake_case"`:kind 值用 snake_case(init/item_started/item_completed/
 /// turn_started/turn_completed/terminated)。
+/// `rename_all_fields = "camelCase"`:字段名 camelCase(前端读 `payload.sessionId`;
+/// 缺这条会序列化成 `session_id`,与 `ClaudeEventPayload` 的既有约定不一致)。
 #[derive(Clone, serde::Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", rename_all_fields = "camelCase")]
 pub enum CodexEventPayload {
     /// `thread.started{thread_id}`:会话开始。thread_id 即 resume id(codex exec resume <id>,
     /// 实测同 id 续接成功)。
     Init { session_id: String },
+    /// 用户输入的**回显**(非 codex 原生事件)。codex exec --json 完全不回显用户 prompt,
+    /// 桌面端靠自己 `appendUserMessage` 乐观插入;手机经中继发的消息桌面端没有插入点,
+    /// 故后端在写完 stdin 后补发一条。`message` 与 claude 同构(`{id,role,content:[…]}`),
+    /// 两端渲染代码可共用。桌面 transport 传 `clientMessageId=None` → 不发,避免重复。
+    User { message: serde_json::Value },
     /// `item.started{item}`:item 开始(command_execution/mcp_tool_call 等,status=in_progress)。
     /// 前端 push pending 工具卡(spinner),item.completed 同 item.id 回填。
     ItemStarted { item: serde_json::Value },

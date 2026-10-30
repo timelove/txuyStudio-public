@@ -1,6 +1,7 @@
 node_modules/
 dist/
 src-tauri/target/
+crates/*/target/
 logs/
 .DS_Store
 *.log
@@ -12,7 +13,30 @@ logs/
 # IDE
 .idea/
 
+# GPUI 实验目录(仅 gpui 分支跟踪;main 屏蔽切分支残留的构建产物)
+gpui-lab/
+# GPUI 分支源码 + 构建产物(Tauri 前端 HMR 用不到;target 22G 会被 vite chokidar 扫)
+src-gpui/target/
+
+# 临时脚本/中间产物(写完即弃)
+.work/tmp/
+.work/__pycache__/
+
 # 内置大文件资源（手动下载放入，不入库）
 # - src-tauri/resources/oh-my-posh.exe  （oh-my-posh releases: posh-windows-amd64.exe 重命名）
 # - src-tauri/resources/CaskaydiaCoveNF.ttf  （Cascadia Code Nerd Font）
 # - public/CaskaydiaCoveNF.ttf  （同上，前端 @font-face 用，走 Vite 管线）
+
+# relay(中继)产物:二进制/含 token 的配置/测试库与日志不入库
+src-tauri/resources/relay.exe
+relay/relay.exe
+relay/relay-config.json
+relay/relay.db*
+relay/relay-test.log
+
+# .work/result 临时产物区(探针截图/日志/冒烟目录;历史截图已 track 不受影响)
+.work/result/
+
+# relay 交叉编译产物与本地备份(不入库)
+relay/dist/
+relay/relay.exe~

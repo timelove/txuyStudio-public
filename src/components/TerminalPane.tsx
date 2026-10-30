@@ -16,6 +16,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "./ui/Popover";
 import { Button } from "./ui/Button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/Tooltip";
 import { Tabs, TabsList, TabsTrigger } from "./ui/Tabs";
+import { TabCloseIcon } from "./icons";
 
 type TerminalPaneProps = {
   /** 该 pane 的稳定身份(分屏树 / 左栏 / transport 池前缀)。 */
@@ -70,7 +71,16 @@ type TabTerminal = {
   cancelPtyResize: () => void;
   /** buffer 切换(normal↔alternate)订阅取消:TUI 进出时按 buffer 类型 refit 切换 margin。 */
   disposeBufferChange: { dispose: () => void };
+  /** 当前挂着的 WebGL 渲染器(null = 未挂/不可用)。只给**可见** tab 挂,切走即卸
+   *  (见 attachWebgl)。terminal.dispose() 会连带 dispose,关 tab 无需显式清理。 */
+  webgl: WebglAddon | null;
+  /** 把隐藏期间积压的输出一次性写进 xterm(切回 tab 时调)。 */
+  flushHidden: () => void;
 };
+
+/** 隐藏 tab 输出缓冲上限(字符)。后台 tab 长跑构建时输出只入缓冲不进 xterm,
+ *  切回一次性补写;超限丢头保尾(切回至少能看到最近的输出)。 */
+const HIDDEN_BUF_MAX = 2_000_000;
 
 /** 底部滚动留白:PTY 逻辑屏比视口少固定 24px 对应的行数(ceil,至少 1 行)——
  *  提示符/光标恒距视口底 24px,下方是 scrollback 里可滚过的空行,输入/阅读不贴底。
@@ -133,6 +143,35 @@ function refit(
   resize(terminal.cols, terminal.rows);
 }
 
+/** 给 tab 挂 WebGL 渲染器(GPU 绘制,大量输出时性能显著优于默认 DOM/canvas 行渲染)。
+ *  必须在 terminal.open 之后加载。**只给可见 tab 挂,切走即 detach**:Chromium 每页
+ *  活动 WebGL 上下文有上限(~16),tab 常驻各自上下文时,开多了之后最旧的会被浏览器
+ *  强制丢失——那个 tab 的终端就黑屏/显示不出来(长时间运行「有时候显示不出来」的
+ *  根因)。按可见性挂卸后,同时存活的上下文数 = 可见 tab 数,恒个位数。
+ *  加载抛错(无 GPU/驱动/WebGL 上下文不可用)静默回退默认渲染器;运行中上下文丢失
+ *  (驱动重置等)dispose 自身回落 canvas,本 tab 不再重试(切走再切回才有机会恢复——
+ *  可接受,罕见事件)。 */
+function attachWebgl(tt: TabTerminal) {
+  if (tt.webgl) return;
+  try {
+    const webgl = new WebglAddon();
+    webgl.onContextLoss(() => {
+      tt.webgl?.dispose();
+      tt.webgl = null;
+    });
+    tt.terminal.loadAddon(webgl);
+    tt.webgl = webgl;
+  } catch {
+    /* WebGL 不可用:保持默认渲染器 */
+  }
+}
+
+/** 卸下 WebGL 渲染器(隐藏 tab 用不着 GPU 上下文),xterm 自动回落 DOM 渲染并重绘。 */
+function detachWebgl(tt: TabTerminal) {
+  tt.webgl?.dispose();
+  tt.webgl = null;
+}
+
 export function TerminalPane({
   paneId,
   sessions,
@@ -157,6 +196,8 @@ export function TerminalPane({
   const terminalsRef = useRef<Map<string, TabTerminal>>(new Map());
   /** tab id → 该 tab 的 DOM 容器 ref(由渲染层挂载,创建 xterm 时用)。 */
   const tabContainerRefs = useRef<Map<string, HTMLDivElement>>(new Map());
+  /** 上一个活动 tab id:切 tab 时卸掉它的 WebGL(上下文预算,见 attachWebgl)。 */
+  const prevActiveTabRef = useRef<string | null>(null);
   /** 当前展开的新建菜单:`"tab"`(+) / `"split"`(▥) / null(关)。两菜单互斥,
    *  open/close 由 Radix Popover 管理(点外/Esc 内置),无需手写点外关闭 effect。 */
   const [menuMode, setMenuMode] = useState<"tab" | null>(null);
@@ -215,6 +256,10 @@ export function TerminalPane({
       // convertEol=true 会把 \n 错误转成 \r\n 致光标定位错乱、某些行重绘丢失(文件列表局部不刷新)。
       // PTY 模式下 PowerShell 等程序本就发 \r\n,关掉对裸 shell 无影响。
       convertEol: false,
+      // scrollback 500(默认 1000):buffer 每 cell 存字符+属性,长会话/多 pane 叠加是前端内存
+      // 大头之一;超出的历史由后端 transcript 环形缓存(256KB/会话)兜底,WebView 重载 re-attach
+      // 时回放,不在前端无限堆。
+      scrollback: 500,
       cursorBlink: true,
       // 细竖线光标(bar):block 默认整格实心块显粗,改 1px 竖线。cursorStyle 仅初始值,
       // 运行时会被 PowerShell/ConPTY 的 DECSCUSR 设回 block,故下方注册拦截器锁定。
@@ -232,18 +277,6 @@ export function TerminalPane({
     const fitAddon = new FitAddon();
     terminal.loadAddon(fitAddon);
     terminal.open(container);
-    // WebGL 渲染器(GPU 绘制,大量输出时性能显著优于默认 canvas 行渲染):必须在 open 之后
-    // 加载。加载抛错(无 GPU/驱动/WebGL 上下文不可用)静默回退默认 canvas 渲染器;运行中
-    // 上下文丢失(onContextLoss,驱动重置等)dispose 自身回落 canvas,终端继续可用(本 tab
-    // 不再重试 WebGL,重建 tab 才有机会恢复——可接受,罕见事件)。addon 生命周期挂在
-    // terminal 上,terminal.dispose() 连带,无需手动清理。
-    try {
-      const webgl = new WebglAddon();
-      webgl.onContextLoss(() => webgl.dispose());
-      terminal.loadAddon(webgl);
-    } catch {
-      /* WebGL 不可用:保持默认 canvas 渲染 */
-    }
     // 玻璃化下新建 terminal 也要透明 padding 区(theme effect 依赖不变不会重跑,此处补一次)。
     if (bgSetting.path && terminal.element) terminal.element.style.background = "transparent";
     // Ctrl+C 智能复制(Windows Terminal 行为):有非空选区时 Ctrl+C = 复制选中文本到剪贴板 +
@@ -312,7 +345,41 @@ export function TerminalPane({
     // === IME 候选框跟随光标修复 结束 ===
 
     const transport = getTransportRef.current(tabId);
-    const unsubscribe = transport.onOutput(tabId, (chunk) => terminal.write(chunk));
+    // 隐藏 tab 的输出只入缓冲、不进 xterm:后台 tab 长跑构建输出时不再持续跑 parser/
+    // 触发渲染拖慢前台(整页卡顿的另一来源);恢复可见时 flushHiddenBuf 一次性补写,
+    // 顺序保留,历史完整。上限 HIDDEN_BUF_MAX 丢头保尾,防无界增长。
+    const hiddenBuf: string[] = [];
+    let hiddenLen = 0;
+    const flushHiddenBuf = () => {
+      if (!hiddenBuf.length) return;
+      const data = hiddenBuf.join("");
+      hiddenBuf.length = 0;
+      hiddenLen = 0;
+      if (data) terminal.write(data);
+    };
+    const unsubscribe = transport.onOutput(tabId, (chunk) => {
+      if (container.offsetParent === null) {
+        hiddenBuf.push(chunk);
+        hiddenLen += chunk.length;
+        if (hiddenLen > HIDDEN_BUF_MAX) {
+          let excess = hiddenLen - HIDDEN_BUF_MAX;
+          while (excess > 0 && hiddenBuf.length > 1) {
+            const head = hiddenBuf[0];
+            if (head.length <= excess) {
+              hiddenBuf.shift();
+              hiddenLen -= head.length;
+              excess -= head.length;
+            } else {
+              hiddenBuf[0] = head.slice(excess);
+              hiddenLen -= excess;
+              excess = 0;
+            }
+          }
+        }
+        return;
+      }
+      terminal.write(chunk);
+    });
     const disposeOnData = terminal.onData((data) => {
       void transport.write(tabId, data);
     });
@@ -325,6 +392,10 @@ export function TerminalPane({
     const observer = new ResizeObserver(() => {
       // 隐藏 tab 的容器尺寸为 0,fit 会算错;仅在 tab 可见时 fit + resize。
       if (container.offsetParent === null) return;
+      // 隐藏→可见(切 tab / 项目列滚回可视区)必然触发本 observer(0→N 尺寸变化):
+      // 先把隐藏期间积压的输出补写进 xterm,再 fit——钉住项目整列隐藏再恢复时
+      // activeTabId 不变、切 tab effect 不重跑,这里是唯一的恢复时机。
+      flushHiddenBuf();
       fitWithMargin(terminal, fitAddon, fontSize);
       terminal.refresh(0, terminal.rows - 1);
       if (ptyResizeTimer) window.clearTimeout(ptyResizeTimer);
@@ -343,9 +414,14 @@ export function TerminalPane({
     observer.observe(container);
 
     // 无 scrollback(内容未超出可视区)时给容器加 .mx-no-scrollback,隐藏滚动条(见 xterm.css)。
-    // 有 scrollback 才显示常驻滚动条。onRender 渲染后 buffer 已更新,据此 toggle(幂等,高频无害)。
+    // 有 scrollback 才显示常驻滚动条。onRender 渲染后 buffer 已更新,据此 toggle;状态没变
+    // 不碰 DOM(onRender 每帧都跑,长跑下别留高频 class 操作)。
+    let lastNoScrollback = false;
     const disposeScrollback = terminal.onRender(() => {
-      container.classList.toggle("mx-no-scrollback", terminal.buffer.active.length <= terminal.rows);
+      const noSb = terminal.buffer.active.length <= terminal.rows;
+      if (noSb === lastNoScrollback) return;
+      lastNoScrollback = noSb;
+      container.classList.toggle("mx-no-scrollback", noSb);
     });
 
     // TUI 进出(alternate screen 切换)时按 buffer 类型 refit:进 TUI 满行数、退回裸 shell
@@ -375,7 +451,7 @@ export function TerminalPane({
       },
     };
 
-    terminalsRef.current.set(tabId, {
+    const tt: TabTerminal = {
       terminal,
       fitAddon,
       element: container,
@@ -391,7 +467,13 @@ export function TerminalPane({
         if (ptyResizeTimer) window.clearTimeout(ptyResizeTimer);
         ptyResizeTimer = 0;
       },
-    });
+      // WebGL 只给可见 tab 挂:创建时必可见(懒建),挂载点在下方 set 之后统一处理。
+      webgl: null,
+      flushHidden: flushHiddenBuf,
+    };
+    terminalsRef.current.set(tabId, tt);
+    // 创建时该 tab 必可见(懒建时机 = 切到它),直接挂 WebGL。
+    attachWebgl(tt);
 
     // 启动后端会话(先 listen 后 spawn 由 transport 内部保证)。
     void transport.start(tabId, {
@@ -433,12 +515,24 @@ export function TerminalPane({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessions, activeTabId, terminalTheme]);
 
-  // 切活动 tab:显隐切换 + 切到的 tab 懒建 + rAF 后 fit/resize(隐藏期间尺寸可能变过)。
+  // 切活动 tab:显隐切换 + 切到的 tab 懒建 + WebGL 上下文预算(旧卸新挂) + 隐藏积压
+  // 补写 + rAF 后 fit/resize(隐藏期间尺寸可能变过)。
   useEffect(() => {
     if (!activeTabId) return;
     ensureTerminal(activeTabId);
     const t = terminalsRef.current.get(activeTabId);
     if (!t) return;
+    // WebGL 只留可见 tab:旧活动 tab 卸下释放上下文(防开多后浏览器强制丢失最旧的
+    // → 那个 tab 黑屏),新活动 tab 挂上。
+    const prev = prevActiveTabRef.current;
+    prevActiveTabRef.current = activeTabId;
+    if (prev && prev !== activeTabId) {
+      const pt = terminalsRef.current.get(prev);
+      if (pt) detachWebgl(pt);
+    }
+    attachWebgl(t);
+    // 隐藏期间积压的输出一次性写回(顺序保留,切回即完整历史),再 fit。
+    t.flushHidden();
     // 切到的 tab fit 一次(用当前可见容器尺寸)+ 通知后端 resize。
     const raf = requestAnimationFrame(() => {
       const container = tabContainerRefs.current.get(activeTabId);
@@ -492,6 +586,37 @@ export function TerminalPane({
 
   // 新建/分屏菜单的 open/close 由 Radix Popover 管理(点外、Esc 内置),无需手写 effect。
 
+  /** 重置终端:kill 旧 PTY(连不响应 Ctrl+C 的卡死进程一并杀掉)→ 清屏 → 同 cwd 重启。
+   *  用户痛点:Ctrl+C 杀不干净(程序吞了 ^C 或 TUI 卡死),输入无响应只能关 tab 重开;
+   *  transport.stop 清 sessionId 后可重入 start(后端按同 sessionId 查不到存活会话即新 spawn,
+   *  命中 cwd 传承)。reset() 重置 buffer 与模式(卡在 alternate screen 的 TUI 一并还原),
+   *  随后 refit 恢复 normal buffer 的底部留白行数。 */
+  const resetSession = (tabId: string) => {
+    const tt = terminalsRef.current.get(tabId);
+    const session = sessionById.get(tabId);
+    if (!tt || !session) return;
+    const transport = getTransportRef.current(tabId);
+    void (async () => {
+      try {
+        await transport.stop(tabId); // kill_pty;已死会话 kill 失败静默,继续重启
+      } catch {
+        /* 忽略:stop 内部已 catch,双保险 */
+      }
+      tt.terminal.reset();
+      const container = tabContainerRefs.current.get(tabId);
+      if (container && container.offsetParent !== null) {
+        refit(tt.terminal, tt.fitAddon, fontSize, (cols, rows) => void transport.resize(tabId, cols, rows));
+      }
+      await transport.start(tabId, {
+        size: { cols: tt.terminal.cols, rows: tt.terminal.rows },
+        cwd: session.cwd,
+        shellKind: session.kind,
+      });
+      tt.terminal.focus();
+    })();
+  };
+
+
   const activeSession = sessionById.get(activeTabId);
 
   return (
@@ -539,7 +664,7 @@ export function TerminalPane({
                     }}
                     onClick={(e) => e.stopPropagation()}
                   >
-                    ×
+                    <TabCloseIcon className="h-2 w-2" />
                   </Button>
                   </TooltipTrigger>
                   <TooltipContent>{t("shell.tab.close")}</TooltipContent>
@@ -605,7 +730,26 @@ export function TerminalPane({
             </Popover>
           )}
           {onAddTab && (
-            <Popover open={menuMode === "tab"} onOpenChange={(o) => setMenuMode(o ? "tab" : null)}>
+            <>
+              {/* 重置终端:杀进程 + 清屏 + 同 cwd 重启(Ctrl+C 杀不掉的卡死进程一键恢复)。 */}
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant="ghost"
+                    size="icon-sm"
+                    className="text-[13px] text-[var(--mx-muted)] hover:bg-[var(--mx-border)] hover:text-[var(--mx-text)]"
+                    onMouseDown={(e) => {
+                      e.stopPropagation();
+                      resetSession(activeTabId);
+                    }}
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    ⟳
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>{t("shell.pane.reset")}</TooltipContent>
+              </Tooltip>
+              <Popover open={menuMode === "tab"} onOpenChange={(o) => setMenuMode(o ? "tab" : null)}>
               <Tooltip>
               <TooltipTrigger asChild>
               <PopoverTrigger asChild>
@@ -629,7 +773,8 @@ export function TerminalPane({
                   }}
                 />
               )}
-            </Popover>
+              </Popover>
+            </>
           )}
           {onSplitPane && (
             <SplitPaneButtons onSplit={(kind, direction) => onSplitPane(paneId, kind, direction)} />

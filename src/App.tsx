@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
@@ -11,6 +11,7 @@ import { useTranslation } from "react-i18next";
 import type { BackendAppSnapshot, ProjectRecord } from "./domain/appState";
 import type { ProjectId, ProjectSnapshot } from "./domain/projects";
 import { deriveProjects } from "./domain/projectDeriver";
+import { bootstrapProvidersMirror } from "./domain/claudeProviders";
 
 /**
  * 多项目工作台根组件。
@@ -57,6 +58,9 @@ function resolveWindowMode(): { isMain: boolean; label: string; routeProjectId: 
 export default function App() {
   const mode = useMemo(resolveWindowMode, []);
   const [projects, setProjects] = useState<ProjectSnapshot[]>([]);
+  // 事件监听里读最新项目列表用(监听 effect 只挂一次,不能闭包住首帧的 projects)。
+  const projectsRef = useRef<ProjectSnapshot[]>([]);
+  projectsRef.current = projects;
   const [activeProjectId, setActiveProjectId] = useState<ProjectId | null>(null);
   const [loadState, setLoadState] = useState<"loading" | "ready" | "error">("loading");
   /** 后端持久化的界面语言(hydrate 后传入 I18nProvider 作权威初始值;非 Tauri 兜底用 localStorage/系统)。 */
@@ -73,6 +77,8 @@ export default function App() {
 
   // 启动 hydrate：按窗口身份传 windowLabel/routeHint。独立窗口后端只回该单个项目。
   useEffect(() => {
+    // providers 镜像推 Rust(providers.json,手机端模型分组用):存量迁移 + 漂移自愈。
+    bootstrapProvidersMirror();
     let cancelled = false;
 
     const withTimeout = <T,>(promise: Promise<T>, ms: number): Promise<T> =>
@@ -91,6 +97,15 @@ export default function App() {
       }
       setLoadState("ready");
     };
+
+    // 非 Tauri 环境(纯浏览器 `bun run dev`)→ 直接 fallback,不浪费 8s 超时
+    const isTauriEnv = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+    if (!isTauriEnv) {
+      fallbackToMock();
+      return () => {
+        cancelled = true;
+      };
+    }
 
     withTimeout(
       invoke<BackendAppSnapshot>("hydrate_window", {
@@ -154,6 +169,101 @@ export default function App() {
       unlisten?.();
     };
   }, [mode.isMain]);
+
+  // 手机远程激活项目 → 后端 emit "active-project-changed"(payload = projectId)。
+  // 桌面端只做本地切 active(pane 树/focus 由 AppShell 按 activeProjectId 自行收敛),
+  // 不再回写 set_active_project——后端刚写过,回写只会多一次落盘。
+  // 独立项目窗口也收(它只拿到自己那个项目,不匹配的直接忽略)。
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    listen<string>("active-project-changed", (e) => {
+      if (cancelled) return;
+      const pid = e.payload;
+      if (typeof pid !== "string" || !pid) return;
+      if (!projectsRef.current.some((p) => p.id === pid)) return;
+      setActiveProjectId(pid);
+    })
+      .then((u) => {
+        if (cancelled) u();
+        else unlisten = u;
+        return null;
+      })
+      .catch((err) => console.warn("[App] listen active-project-changed failed:", err));
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
+
+  // 主窗口大小/位置持久化(#132):resize/移动停止 350ms 后保存逻辑像素 bounds,
+  // 启动时后端 `restore_main_window_bounds` 还原(屏外防护 + 最大化记忆)。
+  // 最大化中只报 maximized 标志(width=0 的「仅标志」条目,后端保留上次 normal 态);
+  // 最小化跳过(Windows 最小化时 outer_position 是 -32000 假值)。关窗前最后一段
+  // 变化由后端 CloseRequested 兜底补存,这里非 Tauri 环境 getCurrentWindow 抛错即静默跳过。
+  useEffect(() => {
+    // 仅 main 窗口保存(workspace-N 后端本就忽略,不白发;独立项目窗口不持久化 bounds)。
+    if (!mode.isMain || mode.label !== "main") return;
+    const appWindow = getCurrentWindow();
+    let timer: number | undefined;
+    const flush = () => {
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => {
+        void (async () => {
+          try {
+            if (await appWindow.isMinimized()) return;
+            const scale = await appWindow.scaleFactor();
+            if (await appWindow.isMaximized()) {
+              await invoke("save_window_bounds", {
+                windowLabel: "main",
+                bounds: { x: 0, y: 0, width: 0, height: 0, maximized: true },
+              });
+              return;
+            }
+            const pos = await appWindow.outerPosition();
+            const size = await appWindow.outerSize();
+            await invoke("save_window_bounds", {
+              windowLabel: "main",
+              bounds: {
+                x: Math.round(pos.x / scale),
+                y: Math.round(pos.y / scale),
+                width: Math.round(size.width / scale),
+                height: Math.round(size.height / scale),
+                maximized: false,
+              },
+            });
+          } catch {
+            /* 非 Tauri 环境 / 命令失败:静默 */
+          }
+        })();
+      }, 350);
+    };
+    // cancelled:cleanup 先于 onResized/onMoved 的 listen Promise resolve 时补注销,
+    // 防 StrictMode 双挂载游离 listener(同上方 project-window-closed effect 模式)。
+    let cancelled = false;
+    let unresized: (() => void) | undefined;
+    let unmoved: (() => void) | undefined;
+    appWindow
+      .onResized(flush)
+      .then((u) => {
+        if (cancelled) u();
+        else unresized = u;
+      })
+      .catch(() => {});
+    appWindow
+      .onMoved(flush)
+      .then((u) => {
+        if (cancelled) u();
+        else unmoved = u;
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+      unresized?.();
+      unmoved?.();
+    };
+  }, [mode.isMain, mode.label]);
 
   const handleSelect = useCallback((projectId: ProjectId) => {
     // 乐观更新：UI 立即切换，后端落 active(按窗口;main 写旧字段,workspace 写各自 entry)。

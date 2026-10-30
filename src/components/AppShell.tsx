@@ -5,6 +5,7 @@ import { useSettings } from "../settings/SettingsProvider";
 import { DEFAULT_FONT_SIZE } from "../settings";
 import { colorWithAlpha } from "../domain/bg";
 import { useTheme } from "../theme/ThemeProvider";
+import { isLightTheme } from "../domain/themes";
 import type { ProjectId, ProjectSnapshot } from "../domain/projects";
 import type { ShellKind, PaneNode, PaneLeaf, PaneRef, SplitDirection, PaneTab } from "../domain/paneTree";
 import type { ProjectRecord } from "../domain/appState";
@@ -47,6 +48,8 @@ import type { TerminalTransport } from "../domain/terminalTransport";
 import { TauriPtyTransport } from "../domain/tauriPtyTransport";
 import { ClaudeTransport } from "../domain/claudeTransport";
 import { useClaudeStatuses } from "../domain/claudeStatusRegistry";
+import { PROVIDER_CHANGED_EVENT } from "../domain/claudeProviders";
+import { CODEX_PROVIDER_CHANGED_EVENT } from "../domain/codexProviders";
 import { CodexTransport } from "../domain/codexTransport";
 import { useCodexStatuses } from "../domain/codexStatusRegistry";
 import { ShellRunTransport } from "../domain/shellRunTransport";
@@ -54,7 +57,7 @@ import { ProjectColumn } from "./ProjectColumn";
 import { ShellSidebar } from "./ShellSidebar";
 import { StatusBar } from "./StatusBar";
 import { TopProjectBar } from "./TopProjectBar";
-import { SettingsModal, type SettingsTab } from "./SettingsModal";
+import { SettingsPage, type SettingsTab } from "./SettingsModal";
 import { InstallPromptModal } from "./InstallPromptModal";
 
 type AppShellProps = {
@@ -157,6 +160,12 @@ export function AppShell({
   //   会把淡罩抬成实色块,背景反而被 pane tabs 挡住(v0.1.5 的 bug)。
   // 未覆写的 token(--mx-surface/--mx-border/文字色)保持主题原色,保证弹层/边框/文字可读。
   // 先 removeProperty 再读 computedStyle 取主题原值(非上次覆写值);主题切换后 effect 重跑。
+  //
+  // **顺序坑**:React effect 自底向上执行,ThemeProvider(父级)写 `html[data-theme]` 的
+  // effect 在本组件(子级)**之后**才跑。若不先自己把 data-theme 同步到目标主题,下面
+  // getComputedStyle 读到的是**上一个主题**的变量值,玻璃色就全算成旧主题的 —— 背景图
+  // 开着切主题,卡片/顶栏颜色错乱(2026-10-19 实证)。等价于「清覆写 → 设主题 → 重建」
+  // 三步,但只动 token 层,背景图层不卸载,无闪烁。
   const { themeId: bgThemeId } = useTheme();
   useEffect(() => {
     const r = document.documentElement.style;
@@ -165,6 +174,7 @@ export function AppShell({
     r.removeProperty("--mx-card-bg");
     r.removeProperty("--mx-tabbar-bg");
     if (!bgSetting.path) return;
+    document.documentElement.dataset.theme = bgThemeId;
     r.setProperty("--mx-bg", "transparent");
     r.setProperty("--mx-editor-bg", "transparent");
     const cs = getComputedStyle(document.documentElement);
@@ -235,6 +245,10 @@ export function AppShell({
   const pendingResumeRef = useRef<
     Map<string, { provider: "claude" | "codex"; sessionId: string; cwd: string | null }>
   >(new Map());
+  // 用户本会话内**手动新建**的 claude tab id(handleAddTab 标记):这些 tab 首启保持全新会话;
+  // 不在集合里的 claude tab = hydrate 恢复的上次会话 tab → getClaudeTransport 建池时启用
+  // 「默认恢复最近会话」(enableAutoResumeLatest,见 ClaudeTransport.startSession)。
+  const manualAddedTabIdsRef = useRef<Set<string>>(new Set());
 
   // pane 实际尺寸(由 TerminalPane 的 ResizeObserver 上报,按 pane 复合键存):供分屏方向自适应。
   const paneRectsRef = useRef<Map<string, { width: number; height: number }>>(new Map());
@@ -253,6 +267,28 @@ export function AppShell({
       return changed ? next : prev;
     });
   }, [projects]);
+
+  // 内置供应商切换完成(设置 → 模型 → 启用,见 domain/claudeProviders):对池内所有
+  // ClaudeTransport 调 refreshIfSettingsChanged —— settings.json env 已变,该命令 kill +
+  // --resume 重启长进程拾取新 BASE_URL/TOKEN/MODEL;busy(运行中)或未启动的静默跳过
+  // (运行中不打断轮次,用户下次点模型选择器时再触发)。
+  useEffect(() => {
+    const onProviderChanged = () => {
+      for (const t of claudeTransportsRef.current.values()) void t.refreshIfSettingsChanged();
+    };
+    window.addEventListener(PROVIDER_CHANGED_EVENT, onProviderChanged);
+    return () => window.removeEventListener(PROVIDER_CHANGED_EVENT, onProviderChanged);
+  }, []);
+
+  // codex 侧同构事件(见 domain/codexProviders):每轮新进程自动读最新 config.toml,无需
+  // 重启——仅刷新池内 CodexTransport 的 meta.model 显示(refreshIfConfigChanged)。
+  useEffect(() => {
+    const onCodexProviderChanged = () => {
+      for (const t of codexTransportsRef.current.values()) void t.refreshIfConfigChanged();
+    };
+    window.addEventListener(CODEX_PROVIDER_CHANGED_EVENT, onCodexProviderChanged);
+    return () => window.removeEventListener(CODEX_PROVIDER_CHANGED_EVENT, onCodexProviderChanged);
+  }, []);
 
   // 可见项目:钉住集合(去重、保序)并入 active,保证选中项目始终在中央;为空回退 [active]。
   // 主窗口模式:过滤掉已弹出为独立窗口的项目(它们由独立窗口独占,主窗口不再渲染终端列)。
@@ -281,32 +317,48 @@ export function AppShell({
   // 且后续不自动取消),导致下拉切换时误触发「旧 active 已钉住 -> 新选也钉住」的副作用。
   // 已移除:pin 完全由用户显式动作(●/○、右键、+ 菜单历史项)驱动。
 
-  // 拉取可见项目的 git 分支:仅对缓存中未查过的 rootPath invoke 一次。
+  // 拉取可见项目的 git 分支:新项目立即查一次 + 15s 低频轮询刷新(切分支后状态栏
+  // 跟随更新;.git/HEAD 读取是亚毫秒级本地 IO,轮询开销可忽略)。值未变化时保持
+  // 原引用(state 浅比较 no-op),避免轮询引发的连锁重渲染。
   useEffect(() => {
     let alive = true;
+    const refresh = (rootPaths: string[]) => {
+      if (rootPaths.length === 0) return;
+      Promise.all(
+        rootPaths.map(async (rp) => {
+          try {
+            const branch = await invoke<string | null>("get_git_branch", { rootPath: rp });
+            return [rp, branch] as const;
+          } catch {
+            return [rp, null] as const;
+          }
+        }),
+      ).then((entries) => {
+        if (!alive) return;
+        setGitBranchByRoot((prev) => {
+          let changed = false;
+          const next = { ...prev };
+          for (const [rp, branch] of entries) {
+            if (next[rp] !== branch) {
+              next[rp] = branch;
+              changed = true;
+            }
+          }
+          return changed ? next : prev;
+        });
+      });
+    };
+    // 缓存中未查过的立即查;已查过的等轮询兜底。
     const missing = Array.from(
       new Set(visibleProjects.map((p) => p.rootPath).filter((rp) => gitBranchByRoot[rp] === undefined)),
     );
-    if (missing.length === 0) return;
-    Promise.all(
-      missing.map(async (rp) => {
-        try {
-          const branch = await invoke<string | null>("get_git_branch", { rootPath: rp });
-          return [rp, branch] as const;
-        } catch {
-          return [rp, null] as const;
-        }
-      }),
-    ).then((entries) => {
-      if (!alive) return;
-      setGitBranchByRoot((prev) => {
-        const next = { ...prev };
-        for (const [rp, branch] of entries) next[rp] = branch;
-        return next;
-      });
-    });
+    refresh(missing);
+    const timer = window.setInterval(() => {
+      refresh(Array.from(new Set(visibleProjects.map((p) => p.rootPath))));
+    }, 15000);
     return () => {
       alive = false;
+      window.clearInterval(timer);
     };
   }, [visibleProjects, gitBranchByRoot]);
 
@@ -349,6 +401,10 @@ export function AppShell({
         if (pending?.provider === "claude") {
           t.setResumeSessionId(pending.sessionId);
           pendingResumeRef.current.delete(key);
+        } else if (!manualAddedTabIdsRef.current.has(tabId)) {
+          // hydrate 恢复的 claude tab(非本会话手动新建、无显式恢复注入):首启默认接续本 cwd
+          // 最近一条历史会话——「打开即接着上次聊」。拉取/认领/降级逻辑在 transport.startSession。
+          t.enableAutoResumeLatest();
         }
         pool.set(key, t);
       } else {
@@ -602,6 +658,9 @@ export function AppShell({
         title: titleOverride ?? SHELL_KIND_META[kind].defaultTitle,
         ...(cwd ? { cwd } : {}),
       };
+      // 手动新建的 claude tab 记入集合:首启不自动恢复最近会话(用户点「新建」期望全新话题;
+      // hydrate 恢复的 tab 不经过这里,才享受默认恢复)。
+      if (kind === "claudepane") manualAddedTabIdsRef.current.add(newTab.id);
       // 用领域纯函数 addTab 追加并设 active。
       const next = addTab(cur, paneId, newTab);
       commitTree(projectId, next);
@@ -1154,12 +1213,55 @@ export function AppShell({
 
   // 设置弹窗开关(AppShell 统一持有):入口在顶栏品牌区齿轮(原状态栏左下角),
   // 状态栏「新版本可用」chip 经 onOpenSettings("about") 直达更新页。
+  // 设置浮层锚点:顶栏 logo 按钮(面板从它正下方左缘「点到面」展开);/config 等无锚入口缺省。
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("general");
+  // 设置弹窗拖拽(IDEA 同款:标题栏即手柄)。卡片默认 flex 居中;首次按下标题时冻结当前
+  // 实际位置转 fixed 定位,之后直接改 left/top(clamp 在视口内,至少留 80px 高度可见)。
+  // 双击标题行回屏幕居中;关闭重开也回中(偏移不做跨开合记忆)。
+  const [settingsPos, setSettingsPos] = useState<{ left: number; top: number } | null>(null);
+  const settingsDragRef = useRef<{ sx: number; sy: number; sl: number; st: number } | null>(null);
+  const beginSettingsDrag = (e: React.MouseEvent) => {
+    if (e.button !== 0) return;
+    // 手柄上的按钮(✕ 等)不触发拖拽。
+    if ((e.target as HTMLElement).closest("button, input, select, a")) return;
+    const card = (e.currentTarget as HTMLElement).closest(".mx-settings-modal") as HTMLElement | null;
+    if (!card) return;
+    const r = card.getBoundingClientRect();
+    const base = settingsPos ?? { left: r.left, top: r.top };
+    setSettingsPos(base);
+    settingsDragRef.current = { sx: e.clientX, sy: e.clientY, sl: base.left, st: base.top };
+    const onMove = (ev: MouseEvent) => {
+      const d = settingsDragRef.current;
+      if (!d) return;
+      const left = Math.min(Math.max(8, d.sl + ev.clientX - d.sx), Math.max(8, window.innerWidth - card.offsetWidth - 8));
+      const top = Math.min(Math.max(8, d.st + ev.clientY - d.sy), Math.max(8, window.innerHeight - 80));
+      setSettingsPos({ left, top });
+    };
+    const onUp = () => {
+      settingsDragRef.current = null;
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    e.preventDefault();
+  };
   const openSettings = useCallback((tab?: SettingsTab) => {
     if (tab) setSettingsTab(tab);
     setSettingsOpen(true);
   }, []);
+
+  // 跨组件开设置(#131 /doctor):ClaudePane 命令注册表经全局 CustomEvent 请求打开指定页
+  // (环境体检在 general 页),避免 openSettings prop 沿 ClaudePane → AppShell 深钻透传。
+  useEffect(() => {
+    const onOpen = (e: Event) => {
+      const tab = (e as CustomEvent<{ tab?: SettingsTab }>).detail?.tab;
+      openSettings(tab);
+    };
+    window.addEventListener("mx-open-settings", onOpen);
+    return () => window.removeEventListener("mx-open-settings", onOpen);
+  }, [openSettings]);
 
   // 全部 claude tab 的对外状态汇总(供 StatusBar 跨 tab 显示「几个在跑/报错/等待」)。
   // useSyncExternalStore 订阅 claudeStatusRegistry,transport emit 时上报、关 tab 时注销。
@@ -1198,7 +1300,15 @@ export function AppShell({
               transform: "scale(1.15)",
             }}
           />
-          <div className="absolute inset-0" style={{ background: `rgba(0, 0, 0, ${bgSetting.dim})` }} />
+          {/* 遮罩按主题明暗分叉:深色主题白字浮在图上,黑罩压暗图片保可读;
+              浅色主题(intellij-light)文字/终端字都是深色,黑罩会把白玻璃压成灰泥、
+              深色文字没进暗图 —— 反转为白纱提亮(同 dim 档),文字才落回亮底。 */}
+          <div
+            className="absolute inset-0"
+            style={{
+              background: `rgba(${isLightTheme(bgThemeId) ? "255, 255, 255" : "0, 0, 0"}, ${bgSetting.dim})`,
+            }}
+          />
         </div>
       )}
       <TopProjectBar
@@ -1222,11 +1332,13 @@ export function AppShell({
         pinnedLayout={pinnedLayout}
         onPinnedLayoutChange={changePinnedLayout}
         onOpenSettings={openSettings}
+        settingsOpen={settingsOpen}
+        onCloseSettings={() => setSettingsOpen(false)}
       />
       {/* 左栏 shell 列表(ShellSidebar):长期使用基本用不到,2026-09-22 注释禁用——
           中央区整宽铺开直连顶栏/状态栏。恢复:外层 grid 改回
           grid-cols-[length:var(--mx-sidebar-w)_1fr] 并取消下方整段注释(组件/import 未删)。 */}
-      <div className="grid min-h-0 grid-cols-[1fr]">
+      <div className="relative grid min-h-0 grid-cols-[1fr]">
         {/* <div className="flex min-h-0 flex-col">
           {hasProject ? (
             <ShellSidebar
@@ -1309,6 +1421,30 @@ export function AppShell({
             </div>
           )}
         </div>
+        {/* 设置弹窗(2026-10-21 页化→IDEA 式居中模态):fixed 遮罩盖全窗压暗(z-[200] 对齐
+            Dialog 约定),中央 pane 在遮罩下保持挂载(transport 池/xterm buffer 不丢)。
+            遮罩**不响应点击关闭**(IDEA 同款模态,用户定调),✕/底部按钮/Esc 退出。 */}
+        {settingsOpen && (
+          <div
+            className="fixed inset-0 z-[200] flex items-center justify-center bg-[var(--mx-overlay)]"
+            style={{ animation: "mx-fade-in 160ms ease-out" }}
+          >
+            <div
+              className="mx-settings-modal flex h-[min(660px,84vh)] w-[min(920px,94vw)] flex-col overflow-hidden rounded-[var(--mx-radius-lg)] border border-[var(--mx-border-strong)] bg-[var(--mx-surface)] shadow-2xl"
+              style={settingsPos != null ? { position: "fixed", left: settingsPos.left, top: settingsPos.top, margin: 0 } : undefined}
+            >
+              <SettingsPage
+                initialTab={settingsTab}
+                onClose={() => {
+                  setSettingsPos(null); // 关闭重开回屏幕居中(拖拽偏移不跨开合记忆)
+                  setSettingsOpen(false);
+                }}
+                onTitlePointerDown={beginSettingsDrag}
+                onTitleDoubleClick={() => setSettingsPos(null)}
+              />
+            </div>
+          </div>
+        )}
       </div>
       <StatusBar
         focusedProject={focusedProject}
@@ -1319,7 +1455,6 @@ export function AppShell({
         onOpenSettings={openSettings}
       />
       <InstallPromptModal prompt={installPrompt} onClose={() => setInstallPrompt(null)} />
-      <SettingsModal open={settingsOpen} initialTab={settingsTab} onClose={() => setSettingsOpen(false)} />
     </main>
   );
 }

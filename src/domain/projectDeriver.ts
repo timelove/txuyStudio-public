@@ -2,7 +2,7 @@ import type { PaneConfig, ProjectRecord, BackendAppSnapshot } from "./appState";
 import type { PaneNode } from "./paneTree";
 import { defaultPaneTree, listPanes, migratePaneNode } from "./paneTree";
 import type { ProjectSnapshot } from "./projects";
-import { SHELL_KIND_META } from "./shellKinds";
+import { SHELL_KIND_META, normalizeTabTitle } from "./shellKinds";
 import type {
   SessionStatus,
   WorkspaceSession,
@@ -38,7 +38,9 @@ export function deriveSessions(tree: PaneNode, rootPath: string): WorkspaceSessi
         // id 复用 tabId:tab 即稳定身份,贯穿 transport 池 / React key / PTY sessionId。
         id: tab.id,
         paneId: pane.id,
-        name: tab.title || meta.defaultTitle,
+        // title 经 normalizeTabTitle:存量 shell tab 的旧值("PowerShell")归一为当前
+        // 「终端」key;空回 defaultTitle(与原 `|| meta.defaultTitle` 语义一致)。
+        name: normalizeTabTitle(tab.title, tab.shellKind),
         kind: tab.shellKind,
         command: tab.shellKind,
         cwd: tab.cwd ?? rootPath,

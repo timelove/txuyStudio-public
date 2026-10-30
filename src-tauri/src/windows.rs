@@ -13,7 +13,7 @@
 
 use tauri::{AppHandle, Manager, State, WebviewUrl, WebviewWindowBuilder};
 
-use crate::state::{archive_recent, AppState, ProjectRecord};
+use crate::state::{archive_recent, AppState, ProjectRecord, WindowBounds};
 
 /// 独立项目窗口 label 前缀。主窗口恒为 `"main"`(tauri.conf.json 默认)。
 pub const PROJECT_WINDOW_PREFIX: &str = "project-";
@@ -31,6 +31,112 @@ pub fn is_project_window(label: &str) -> bool {
 /// 判定一个 window label 是否为空白工作台窗口(main 之外的多项目窗口)。
 pub fn is_workspace_window(label: &str) -> bool {
     label.starts_with(WORKSPACE_WINDOW_PREFIX)
+}
+
+/// 启动时恢复主窗口大小/位置(#132):`lib.rs` setup 在任何 show 之前调用。
+///
+/// - bounds 以**逻辑像素**存取(前端保存时物理 px / scaleFactor 归一),恢复时 Tauri 按
+///   当前窗口 scale_factor 换算物理 px——跨 DPI/换显示器重启近似还原。
+/// - 屏外防护:恢复位置前把矩形中心换算为物理 px,校验是否落在任一显示器矩形内;
+///   不在(显示器被拔/换布局)→ 只恢复大小、跳过位置,避免窗口出现在不可见区域。
+/// - 大小钳制到 tauri.conf.json 的 min(1080x720),防异常小值把窗口卡死。
+/// - `maximized` 记忆:最后 set_maximized(true)(还原态 bounds 已先恢复,退出最大化
+///   即回到上次 normal 大小,与 VS Code/Chrome 行为一致)。
+/// - width=0 的「仅标志」条目:跳过 size/position,只 apply 最大化。
+pub fn restore_main_window_bounds(app: &AppHandle, bounds: WindowBounds) {
+    let Some(win) = app.get_webview_window("main") else {
+        log::warn!("restore_main_window_bounds: main window not found, skip");
+        return;
+    };
+    if bounds.width > 0 && bounds.height > 0 {
+        let w = bounds.width.max(1080);
+        let h = bounds.height.max(720);
+        if let Err(e) = win.set_size(tauri::LogicalSize::new(w as f64, h as f64)) {
+            log::warn!("restore_main_window_bounds: set_size failed: {e}");
+        }
+        // 中心点逻辑 px × 当前 scale = 物理 px,对 available_monitors(物理矩形)校验。
+        // 注意 i32 position 与 u32 size 混合运算须统一转 f64(编译器不认 i32+u32)。
+        let scale = win.scale_factor().unwrap_or(1.0);
+        let cx = (bounds.x as f64 + w as f64 / 2.0) * scale;
+        let cy = (bounds.y as f64 + h as f64 / 2.0) * scale;
+        let on_screen = win
+            .available_monitors()
+            .map(|mons| {
+                mons.iter().any(|m| {
+                    let p = m.position();
+                    let s = m.size();
+                    let (px, py) = (p.x as f64, p.y as f64);
+                    (px..px + s.width as f64).contains(&cx) && (py..py + s.height as f64).contains(&cy)
+                })
+            })
+            .unwrap_or(false);
+        if on_screen {
+            if let Err(e) = win.set_position(tauri::LogicalPosition::new(bounds.x as f64, bounds.y as f64)) {
+                log::warn!("restore_main_window_bounds: set_position failed: {e}");
+            }
+        } else {
+            log::info!("restore_main_window_bounds: saved center off-screen, position skipped");
+        }
+    }
+    if bounds.maximized {
+        if let Err(e) = win.maximize() {
+            log::warn!("restore_main_window_bounds: maximize failed: {e}");
+        }
+    }
+    log::info!(
+        "restore_main_window_bounds: restored {}x{} at ({},{}), maximized={}",
+        bounds.width, bounds.height, bounds.x, bounds.y, bounds.maximized
+    );
+}
+
+/// 主窗口关闭时兜底补存 bounds(#132):`lib.rs` 的 `on_window_event` CloseRequested 调用。
+///
+/// 前端运行期防抖(350ms)保存为主路径;关窗前最后一段变化(拖完即关等)在此同步补上。
+/// 最大化:只更新 `maximized` 标志(x/y/w/h 保留快照里上次 normal 态;无快照则造零尺寸
+/// 「仅标志」条目);最小化:跳过(Windows 最小化时 outer_position 是 -32000 假值)。
+/// 同步落盘(CloseRequested 后紧接退出流程,没有异步机会);失败仅 warn 不阻断关窗。
+pub fn persist_main_bounds_on_close(app: &AppHandle, win: &tauri::Window) {
+    if win.is_minimized().unwrap_or(false) {
+        return;
+    }
+    let bounds = if win.is_maximized().unwrap_or(false) {
+        // 只报标志:保留已存的 normal bounds(width=0 让 save 走「仅标志」分支)。
+        WindowBounds { x: 0, y: 0, width: 0, height: 0, maximized: true }
+    } else {
+        let (Ok(pos), Ok(size)) = (win.outer_position(), win.outer_size()) else {
+            return;
+        };
+        let scale = win.scale_factor().unwrap_or(1.0);
+        WindowBounds {
+            x: (pos.x as f64 / scale).round() as i32,
+            y: (pos.y as f64 / scale).round() as i32,
+            width: (size.width as f64 / scale).round() as u32,
+            height: (size.height as f64 / scale).round() as u32,
+            maximized: false,
+        }
+    };
+    let state = app.state::<AppState>();
+    let snapshot = match state.inner.lock() {
+        Ok(mut snap) => {
+            if bounds.width == 0 {
+                // 仅标志:原地改 maximized,normal 态字段保留(无记录则存零尺寸条目)。
+                match snap.main_window_bounds.as_mut() {
+                    Some(b) => b.maximized = bounds.maximized,
+                    None => snap.main_window_bounds = Some(bounds),
+                }
+            } else {
+                snap.main_window_bounds = Some(bounds);
+            }
+            snap.clone()
+        }
+        Err(e) => {
+            log::error!("persist_main_bounds_on_close: state lock poisoned: {e}");
+            return;
+        }
+    };
+    if let Err(e) = crate::state::persistence::save(app, &snapshot) {
+        log::warn!("persist_main_bounds_on_close: persist failed: {e}");
+    }
 }
 
 /// 新建一个空白工作台窗口,返回窗口 label。

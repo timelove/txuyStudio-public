@@ -63,6 +63,10 @@ pub async fn send_codex_message(
     reasoning_effort: Option<String>,
     resume_session_id: Option<String>,
     new_session: Option<bool>,
+    // 手机经中继发来的消息:`Some(id)` = spawn 成功后补发一条 user 事件(带该 id),
+    // 桌面端才看得见「手机问的那句话」。桌面 transport 传 None——它已在前端
+    // `appendUserMessage` 做过乐观插入,后端再回显会重复一条。
+    client_message_id: Option<String>,
 ) -> Result<(), String> {
     // 1) 短锁:取/建 session + busy 检查 + take 残存 child(置 killed=true 让旧读循环不发 error)。
     let old_child = {
@@ -261,6 +265,26 @@ pub async fn send_codex_message(
     tokio::task::spawn_blocking(move || {
         run_read_loop(app_handle, pid, tid, stdout);
     });
+
+    // 9) 回显手机来源的 user 消息。codex 同样不回显用户输入,桌面端靠自己 appendUserMessage
+    //    乐观插入;手机发的话桌面端没有任何本地插入点,只能由后端补一条(与 claude 同款)。
+    //    id 由手机侧生成并经 chat.send 带上 → 手机侧 `_applyUser` 的 msgIndex 去重会吞掉回显。
+    if let Some(msg_id) = client_message_id {
+        let _ = app.emit(
+            "codex-event",
+            CodexEvent {
+                project_id,
+                tab_id,
+                payload: CodexEventPayload::User {
+                    message: serde_json::json!({
+                        "id": msg_id,
+                        "role": "user",
+                        "content": [{ "type": "text", "text": prompt }],
+                    }),
+                },
+            },
+        );
+    }
 
     Ok(())
 }
@@ -473,6 +497,115 @@ pub fn codex_config_changed(
             .and_then(|g| *g)
     };
     Ok(stored.map(|h| codex_config_hash() != h).unwrap_or(false))
+}
+
+/// `~/.codex/config.toml` 路径(home 下 .codex/config.toml;dirs::home_dir 兜底 USERPROFILE)。
+fn codex_config_path() -> Option<std::path::PathBuf> {
+    std::env::var("USERPROFILE")
+        .ok()
+        .map(std::path::PathBuf::from)
+        .or_else(|| dirs::home_dir())
+        .map(|home| home.join(".codex").join("config.toml"))
+}
+
+/// 读 config.toml 当前 provider 信息(txuyStudio 内置 codex 供应商管理用:「生效中」判定 +
+/// 「从当前导入」)。段名取顶级 `model_provider` 实际值(缺省 "custom",与 cc-switch 惯例一致),
+/// 从 `[model_providers.<段名>]` 取 base_url / experimental_bearer_token,顶级取 model /
+/// model_reasoning_effort。文件缺失/解析失败返回各字段空串(非错误,前端按未知显示)。
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexProviderInfo {
+    pub base_url: String,
+    pub token: String,
+    pub model: String,
+    pub reasoning_effort: String,
+}
+
+#[tauri::command]
+pub fn read_codex_provider_info() -> Result<CodexProviderInfo, String> {
+    use toml_edit::DocumentMut;
+    let doc: DocumentMut = codex_config_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|content| content.parse::<DocumentMut>().ok())
+        .unwrap_or_default();
+    let key = doc
+        .get("model_provider")
+        .and_then(|v| v.as_str())
+        .unwrap_or("custom")
+        .to_string();
+    let empty = String::new();
+    let (base_url, token) = doc
+        .get("model_providers")
+        .and_then(|mp| mp.get(&key))
+        .map(|t| {
+            (
+                t.get("base_url").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                t.get("experimental_bearer_token").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            )
+        })
+        .unwrap_or((empty.clone(), empty.clone()));
+    Ok(CodexProviderInfo {
+        base_url,
+        token,
+        model: doc.get("model").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        reasoning_effort: doc
+            .get("model_reasoning_effort")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+    })
+}
+
+/// 应用 codex provider:toml_edit **保格式**改写 config.toml 的 provider 相关部分——
+/// 顶级 `model_provider` / `model`(reasoning_effort 非空才写,空保留现状)与
+/// `[model_providers.custom]` 段重建(name/base_url/wire_api/requires_openai_auth=false/
+/// experimental_bearer_token)。**mcp_servers / plugins / marketplaces 等其余段与注释原样
+/// 保留**(与 cc-switch 整份替换不同:用户本地 MCP/插件配置不进 provider 副本,不丢)。
+/// token 走 provider 段的 experimental_bearer_token(与用户现行 custom 段一致,不碰 auth.json)。
+#[tauri::command]
+pub fn apply_codex_provider(
+    name: String,
+    base_url: String,
+    token: String,
+    model: String,
+    wire_api: Option<String>,
+    reasoning_effort: Option<String>,
+) -> Result<(), String> {
+    use toml_edit::{value, DocumentMut, Item, Table};
+    let path = codex_config_path().ok_or_else(|| "cannot resolve home directory".to_string())?;
+    let mut doc = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|content| content.parse::<DocumentMut>().ok())
+        .unwrap_or_default();
+
+    // 顶级键:覆盖 model_provider/model;reasoning_effort 仅非空时写(空 = 保留现状,不删用户配置)。
+    doc["model_provider"] = value("custom");
+    if !model.is_empty() {
+        doc["model"] = value(model.as_str());
+    }
+    if let Some(effort) = reasoning_effort.as_deref().filter(|e| !e.is_empty()) {
+        doc["model_reasoning_effort"] = value(effort);
+    }
+
+    // [model_providers.custom] 重建(整段替换,旧段遗留键清干净)。
+    let mut t = Table::new();
+    t["name"] = value(name);
+    t["base_url"] = value(base_url);
+    t["wire_api"] = value(wire_api.as_deref().unwrap_or("responses"));
+    t["requires_openai_auth"] = value(false);
+    t["experimental_bearer_token"] = value(token);
+    let mp = doc["model_providers"].or_insert(Item::Table({
+        let mut tbl = Table::new();
+        tbl.set_implicit(true);
+        tbl
+    }));
+    if let Some(mp) = mp.as_table_mut() {
+        mp["custom"] = Item::Table(t);
+    } else {
+        return Err("config.toml [model_providers] is not a table".to_string());
+    }
+
+    std::fs::write(&path, doc.to_string()).map_err(|e| format!("write config.toml: {e}"))
 }
 
 /// 取某 codex 会话当前 model(短锁读 registry)。

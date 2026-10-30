@@ -3,7 +3,7 @@ import { useTranslation } from "react-i18next";
 import type { PaneNode, ShellKind } from "../domain/paneTree";
 import type { PaneRef } from "../domain/paneTree";
 import { listPanes } from "../domain/paneTree";
-import { NEW_SHELL_GROUPS, SHELL_KIND_META } from "../domain/shellKinds";
+import { NEW_SHELL_GROUPS, SHELL_KIND_META, normalizeTabTitle } from "../domain/shellKinds";
 import type { ProjectSnapshot } from "../domain/projects";
 import { projectAccentColor } from "../domain/projects";
 import { Button } from "./ui/Button";
@@ -106,7 +106,8 @@ export function ShellSidebar({
                   // pane 的活动 tab 决定图标 shellKind/title(pane 自身不再有 shellKind/title)。
                   const activeTab = pane.tabs.find((t) => t.id === pane.activeTabId) ?? pane.tabs[0];
                   const shellKind = activeTab?.shellKind ?? "shell";
-                  const tabTitle = activeTab?.title ?? "shellkind.terminal";
+                  // title 经 normalizeTabTitle:存量 shell tab 旧值("PowerShell")归一为「终端」;空回 defaultTitle。
+                  const tabTitle = normalizeTabTitle(activeTab?.title, shellKind);
                   const meta = SHELL_KIND_META[shellKind] ?? SHELL_KIND_META.shell;
                   const isFocused = focused?.projectId === project.id && focused.paneId === pane.id;
                   return (

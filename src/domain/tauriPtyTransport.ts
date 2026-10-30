@@ -17,7 +17,12 @@ export class TauriPtyTransport implements TerminalTransport {
   private ptySessionId: string | null = null;
   private unlisten: UnlistenFn | null = null;
   private listeners = new Map<string, Set<(chunk: string) => void>>();
-  private transcript = "";
+  /** transcript 分段缓冲(内容 + 总长):镜像后端环形缓存,重挂 pane 时整段回放。
+   *  不再用单个大字符串——旧实现 `(transcript + chunk).slice(-1M)` 在打满上限后,
+   *  每个输出事件都触发 1MB flatten+复制,长会话高频输出下 GC 压力持续累积(页面
+   *  「开久了越来越卡」的前端主因)。分段后超限从头整段丢弃,均摊 O(chunk)。 */
+  private transcriptParts: string[] = [];
+  private transcriptLen = 0;
   private pendingOutput = "";
   private currentCwd: string | null = null;
   private readonly maxTranscriptLength = 1_000_000;
@@ -136,8 +141,8 @@ export class TauriPtyTransport implements TerminalTransport {
 
     // React 分屏会让 TerminalPane remount；新 xterm 需要回放历史输出，
     // 否则虽然 PTY 进程保住了，但可视缓冲区会像“重置”。
-    if (this.transcript) {
-      callback(this.transcript);
+    if (this.transcriptLen > 0) {
+      callback(this.transcriptParts.join(""));
     }
 
     return () => {
@@ -179,9 +184,23 @@ export class TauriPtyTransport implements TerminalTransport {
 
   private emitVisible(sessionId: string, chunk: string) {
     if (!chunk) return;
-    this.transcript += chunk;
-    if (this.transcript.length > this.maxTranscriptLength) {
-      this.transcript = this.transcript.slice(-this.maxTranscriptLength);
+    this.transcriptParts.push(chunk);
+    this.transcriptLen += chunk.length;
+    if (this.transcriptLen > this.maxTranscriptLength) {
+      // 环形截断:从头丢整段(最后一段可能部分丢),只保尾部 ≈ 上限。
+      let excess = this.transcriptLen - this.maxTranscriptLength;
+      while (excess > 0 && this.transcriptParts.length > 1) {
+        const head = this.transcriptParts[0];
+        if (head.length <= excess) {
+          this.transcriptParts.shift();
+          this.transcriptLen -= head.length;
+          excess -= head.length;
+        } else {
+          this.transcriptParts[0] = head.slice(excess);
+          this.transcriptLen -= excess;
+          excess = 0;
+        }
+      }
     }
     this.listeners.get(sessionId)?.forEach((callback) => callback(chunk));
   }
