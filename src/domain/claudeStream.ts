@@ -507,6 +507,11 @@ export function applyEvent(state: ClaudeStreamState, payload: ClaudeEventPayload
           streaming: true,
           // 流式全 0(glm)时保留旧值(resume 重放场景旧值是上轮 result 回填/历史回填的本轮口径)。
           usage: hasUsage(msg.usage) ? msg.usage : (oldMsg.usage ?? msg.usage),
+          // usage 取旧值(resume 重放全 0 流式)时,口径标记须随旧值一起保留——
+          // 否则 result 回填的累计值丢标记后被当流式快照直接用,ctx 显示成「拉总的」;
+          // 差分回填(usageDiffed)同理,丢了会污染混合域判定。
+          usageCumulative: hasUsage(msg.usage) ? undefined : oldMsg.usageCumulative,
+          usageDiffed: hasUsage(msg.usage) ? undefined : oldMsg.usageDiffed,
         };
       } else {
         next.messages.push({
