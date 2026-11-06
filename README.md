@@ -23,13 +23,11 @@ txuyStudio is a desktop workbench (built with Tauri + Rust + React + xterm.js) f
 ### Screenshots
 
 <p align="center">
-  <img src="docs/assets/txuyStudio-workspace.jpeg" alt="txuyStudio main workspace (midnight theme)" width="880"><br>
-  <sub>Main workspace — a PowerShell terminal and a Claude conversation pane side by side; tool cards, collapsible thinking blocks, and an inline diff view in the message stream.</sub>
+  <img src="docs/assets/txuyStudio-workspace.jpeg" alt="txuyStudio main workspace" width="880">
 </p>
 
 <p align="center">
-  <img src="docs/assets/txuyStudio-workflow.jpeg" alt="Terminal + AI editing workflow" width="880"><br>
-  <sub>The everyday loop — run commands in the terminal while Claude edits files; file tree and editor previews render inline, with per-tab context usage (62K / 200K) in the status bar.</sub>
+  <img src="docs/assets/txuyStudio-workflow.jpeg" alt="txuyStudio workflow" width="880">
 </p>
 
 ### Highlights
@@ -169,13 +167,11 @@ txuyStudio 是一个桌面工作台(基于 Tauri + Rust + React + xterm.js),用�
 ### 截图预览
 
 <p align="center">
-  <img src="docs/assets/txuyStudio-workspace.jpeg" alt="txuyStudio 主工作台(midnight 主题)" width="880"><br>
-  <sub>主工作台——PowerShell 终端与 Claude 对话面板并排;消息流内是工具卡片、可折叠思考块与内嵌 diff 视图。</sub>
+  <img src="docs/assets/txuyStudio-workspace.jpeg" alt="txuyStudio 主工作台" width="880">
 </p>
 
 <p align="center">
-  <img src="docs/assets/txuyStudio-workflow.jpeg" alt="终端 + AI 改文件工作流" width="880"><br>
-  <sub>日常循环——终端里跑命令,Claude 同步改文件;文件树与编辑器预览内嵌渲染,状态栏带每 tab 上下文占用(62K / 200K)。</sub>
+  <img src="docs/assets/txuyStudio-workflow.jpeg" alt="txuyStudio 工作流" width="880">
 </p>
 
 ### 核心特性
