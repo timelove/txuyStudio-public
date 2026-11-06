@@ -31,8 +31,10 @@ class AppRelease {
 class AppUpdateService {
   AppUpdateService({http.Client? client}) : _client = client ?? http.Client();
 
+  // 发版源 = 公开仓(桌面 exe/APK/latest.json 都发这里)。此前指向私有仓 txuyStudio,
+  // 其 releases API 未鉴权恒 404,更新检查从未生效。
   static const String owner = "timelove";
-  static const String repo = "txuyStudio";
+  static const String repo = "txuyStudio-public";
 
   final http.Client _client;
 

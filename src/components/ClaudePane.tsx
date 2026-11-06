@@ -655,21 +655,6 @@ export function ClaudePane(props: ClaudePaneProps) {
     window.addEventListener(PROVIDER_CHANGED_EVENT, onProviderChanged);
     return () => window.removeEventListener(PROVIDER_CHANGED_EVENT, onProviderChanged);
   }, [activeTabId, refreshProviders]);
-  /** 点供应商下的模型:整体切换(端点+token+该模型写 env 的 *_MODEL)→ 广播 →
-   *  AppShell 对活跃会话 kill+--resume 拾取(busy 静默跳过,下轮拾取)。 */
-  const switchProviderModel = useCallback(
-    async (p: ClaudeProvider, m: string) => {
-      const ok = await applyProvider({ ...p, model: m });
-      if (ok) {
-        notifyProviderChanged();
-        // 写完立刻回读 env:下拉顶部「当前」与生效家标记不等会话重启的 init 回填
-        // (busy 会话会跳过 kill,meta.model 可能长时间还是旧值)。
-        void readCurrentEnv().then((env) => setCurrentEnv(env));
-        setMenuMode(null);
-      }
-    },
-    [],
-  );
   const filteredModels = useMemo(() => {
     const q = modelQuery.trim().toLowerCase();
     if (!q) return availableModels;
@@ -1514,6 +1499,26 @@ export function ClaudePane(props: ClaudePaneProps) {
       void transport.setModel(name);
     },
     [activeTabId, busy],
+  );
+
+  /** 点供应商下的模型:整体切换(端点+token+该模型写 env 的 *_MODEL)。当前会话乐观切换
+   *  (复用 applyModel:interrupt if busy + setModel 置 --model 并立即重启拾取新 env,
+   *  --resume 保留 session),状态栏即时反映;其余会话靠广播走 refreshIfSettingsChanged
+   *  慢路径(busy 不打断,下轮拾取)。2026-11-05 用户反馈:此前当前会话也要等重启后
+   *  init 回填才切换,观感是「选完没反应,发一条请求回来才变」。 */
+  const switchProviderModel = useCallback(
+    async (p: ClaudeProvider, m: string) => {
+      const ok = await applyProvider({ ...p, model: m });
+      if (ok) {
+        await applyModel(m);
+        notifyProviderChanged();
+        // 写完立刻回读 env:下拉顶部「当前」与生效家标记不等会话重启的 init 回填
+        // (busy 会话会跳过 kill,meta.model 可能长时间还是旧值)。
+        void readCurrentEnv().then((env) => setCurrentEnv(env));
+        setMenuMode(null);
+      }
+    },
+    [applyModel],
   );
 
   // 应用选中的 effort:调 transport.setEffort("auto" -> undefined,不传 --effort flag)。

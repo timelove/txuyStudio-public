@@ -40,3 +40,8 @@ relay/relay-test.log
 # relay 交叉编译产物与本地备份(不入库)
 relay/dist/
 relay/relay.exe~
+
+# companion release 签名(仅本机,勿入库勿进公开 mirror;丢失=老安装须卸载重装)
+companion/app/android/key.properties
+companion/app/android/app/*.keystore
+companion/app/android/app/*.jks
