@@ -1,14 +1,14 @@
 gradle-wrapper.jar
 /.gradle
-/captures/
+/captures
 /gradlew
 /gradlew.bat
 /local.properties
 GeneratedPluginRegistrant.java
 .cxx/
 
-# Remember to never publicly share your keystore.
-# See https://flutter.dev/to/reference-keystore
-key.properties
-**/*.keystore
-**/*.jks
+# 签名材料改入私有仓备份(2026-11-06 用户决策:私有仓本身即备份位置)。
+# 公开仓由仓库根 scripts/sync-public.ps1 的 exclude 列表拦截,不靠这里的 ignore。
+# key.properties
+# **/*.keystore
+# **/*.jks
