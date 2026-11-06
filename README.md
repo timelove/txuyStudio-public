@@ -23,24 +23,11 @@ txuyStudio is a desktop workbench (built with Tauri + Rust + React + xterm.js) f
 ### Screenshots
 
 <p align="center">
-  <img src="docs/assets/txuyStudio.png" alt="txuyStudio main window (midnight theme)" width="880"><br>
-  <sub>Multi-project workspace with Windows-Terminal-style pane splitting, per-pane tabs, and a Claude conversation pane.</sub>
+  <img src="docs/assets/txuyStudio-workspace.jpeg" alt="txuyStudio main workspace" width="880">
 </p>
 
 <p align="center">
-  <img src="docs/assets/txuyStudio-codex.png" alt="Codex self-rendered conversation pane" width="880"><br>
-  <sub>Self-rendered Codex pane — inline message stream, tool-call cards, and a status bar with switchable sandbox.</sub>
-</p>
-
-<p align="center">
-  <img src="docs/assets/txuyStudio_select_pane.png" alt="Pane selection / focus" width="620"> &nbsp;&nbsp;
-  <img src="docs/assets/txuyStudio_one_dark.png" alt="One Dark theme" width="620"><br>
-  <sub>Left: pane focus / splitting. Right: built-in One Dark theme (terminal ANSI + UI surface).</sub>
-</p>
-
-<p align="center">
-  <img src="docs/assets/txuyStudio-bg-image.png" alt="Custom wallpaper with frosted-glass panels" width="880"><br>
-  <sub>Pick a local wallpaper — the UI blurs and dims it, and every surface (editor, tabs, terminals, panes) turns into frosted glass.</sub>
+  <img src="docs/assets/txuyStudio-workflow.jpeg" alt="txuyStudio workflow" width="880">
 </p>
 
 ### Highlights
@@ -180,24 +167,11 @@ txuyStudio 是一个桌面工作台(基于 Tauri + Rust + React + xterm.js),用�
 ### 截图预览
 
 <p align="center">
-  <img src="docs/assets/txuyStudio.png" alt="txuyStudio 主界面(midnight 主题)" width="880"><br>
-  <sub>多项目工作区 + Windows Terminal 式分屏 + 每 pane 多 tab + Claude 自渲染对话面板。</sub>
+  <img src="docs/assets/txuyStudio-workspace.jpeg" alt="txuyStudio 主工作台" width="880">
 </p>
 
 <p align="center">
-  <img src="docs/assets/txuyStudio-codex.png" alt="Codex 自渲染对话面板" width="880"><br>
-  <sub>Codex 自渲染面板 —— 行内消息流、工具卡片、可切换 sandbox 的状态栏。</sub>
-</p>
-
-<p align="center">
-  <img src="docs/assets/txuyStudio_select_pane.png" alt="分屏 / 焦点切换" width="620"> &nbsp;&nbsp;
-  <img src="docs/assets/txuyStudio_one_dark.png" alt="One Dark 主题" width="620"><br>
-  <sub>左:pane 焦点 / 分屏。右:内置 One Dark 主题(终端 ANSI + 界面色板)。</sub>
-</p>
-
-<p align="center">
-  <img src="docs/assets/txuyStudio-bg-image.png" alt="自定义背景图 + 玻璃化面板" width="880"><br>
-  <sub>选一张本地图片作背景——应用会模糊、暗化背景,编辑器、标签、终端、各 pane 整体变为半透明玻璃态。</sub>
+  <img src="docs/assets/txuyStudio-workflow.jpeg" alt="txuyStudio 工作流" width="880">
 </p>
 
 ### 核心特性
