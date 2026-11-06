@@ -594,6 +594,846 @@ pub(crate) fn walk_jsonl(dir: &Path, f: &mut dyn FnMut(&Path)) {
     }
 }
 
+// —— 用量统计(参考 cc-switch usage_daily_rollups 口径) ——
+//
+// 数据源是 claude/codex 的**会话 jsonl**(与 cc-switch 的 session_log 采集同源,非代理拦截):
+// - claude:`type=assistant` 行的 `message.usage`(同一轮多 block 行共享 message.id,按
+//   (文件, message.id) 去重,否则一轮重复计入多次——实测同一 usage 在 jsonl 里逐 block 重复)。
+//   glm 等代理返回的 usage 已分解:input(增量)+ cache_read(上下文重读)+ cache_creation,
+//   直接累加即真实消耗,不会高估。
+// - codex:`event_msg.payload.type=token_count` 行的 `info.last_token_usage`(单次请求增量;
+//   `total_token_usage` 是会话累计,不可累加)。model 从 turn_context 行取(会话内可切换)。
+// 聚合粒度:(本地日期, app, model) → 请求次数 + 四段 tokens。费用由前端按内置单价估算
+// (三方中转价不固定,后端只出 tokens)。
+
+/// 一天的用量聚合(某 app 某 model)。
+#[derive(serde::Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageRollup {
+    pub date: String,
+    pub app: String,
+    pub model: String,
+    pub requests: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_creation_tokens: u64,
+    /// 桶内出现过数据的会话文件数(distinct;同文件跨天/跨模型会进多个桶,只在桶内去重)。
+    pub sessions: u64,
+}
+
+/// 会话级汇总(跨桶 distinct 文件数,Hero「会话」格用)。
+#[derive(serde::Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageSummary {
+    pub rollups: Vec<UsageRollup>,
+    pub claude_sessions: u64,
+    pub codex_sessions: u64,
+}
+
+#[derive(Default)]
+struct UsageAcc {
+    requests: u64,
+    input: u64,
+    output: u64,
+    cache_read: u64,
+    cache_creation: u64,
+    /// 桶内贡献过数据的会话文件路径(distinct)。
+    session_files: std::collections::BTreeSet<String>,
+}
+
+/// ISO-8601 UTC 时间戳(如 `2026-10-20T15:29:16.084Z`)→ 本地日期字符串(`2026-10-20`)。
+/// 解析失败返回 None(该行跳过,不阻断整体扫描)。
+fn local_date_from_ts(ts: &str) -> Option<String> {
+    chrono::DateTime::parse_from_rfc3339(ts)
+        .ok()
+        .map(|dt| dt.with_timezone(&chrono::Local).date_naive().to_string())
+}
+
+/// 用量聚合扫描入口:days 天内(本地日期)的 claude + codex 会话用量,按 (date, app, model)
+/// 分桶。文件级 mtime 预过滤(jsonl 只追加,mtime=最后活动;早于范围起点的文件全行都旧)。
+fn scan_usage_rollups(days: u64) -> Result<UsageSummary, String> {
+    let home = dirs::home_dir().ok_or_else(|| "home dir not available".to_string())?;
+    let cutoff = chrono::Local::now() - chrono::Duration::days(days as i64);
+    let cutoff_date = cutoff.date_naive().to_string();
+
+    let mut map: std::collections::BTreeMap<(String, String, String), UsageAcc> = Default::default();
+    // 跨桶 distinct 会话文件(Hero「会话」格):key=(app, 文件路径)。
+    let mut all_sessions: std::collections::BTreeSet<(String, String)> = Default::default();
+
+    // claude:~/.claude/projects/**/*.jsonl
+    let claude_dir = home.join(".claude").join("projects");
+    if claude_dir.is_dir() {
+        walk_jsonl(&claude_dir, &mut |path| {
+            // mtime 预过滤:最后活动早于范围起点 → 跳过(拿的是 mtime 对应的本地日期串比较)。
+            if let Ok(meta) = std::fs::metadata(path) {
+                if let Ok(modified) = meta.modified() {
+                    let local: chrono::DateTime<chrono::Local> = modified.into();
+                    if local.date_naive().to_string() < cutoff_date {
+                        return;
+                    }
+                }
+            }
+            if scan_claude_usage_file(path, &cutoff_date, &mut map) {
+                all_sessions.insert(("claude".into(), path.to_string_lossy().into_owned()));
+            }
+        });
+    }
+
+    // codex:~/.codex/sessions/**/*.jsonl
+    let codex_dir = home.join(".codex").join("sessions");
+    if codex_dir.is_dir() {
+        walk_jsonl(&codex_dir, &mut |path| {
+            if let Ok(meta) = std::fs::metadata(path) {
+                if let Ok(modified) = meta.modified() {
+                    let local: chrono::DateTime<chrono::Local> = modified.into();
+                    if local.date_naive().to_string() < cutoff_date {
+                        return;
+                    }
+                }
+            }
+            if scan_codex_usage_file(path, &cutoff_date, &mut map) {
+                all_sessions.insert(("codex".into(), path.to_string_lossy().into_owned()));
+            }
+        });
+    }
+
+    let (claude_sessions, codex_sessions) = {
+        let mut c = 0u64;
+        let mut x = 0u64;
+        for (app, _) in &all_sessions {
+            if app == "claude" { c += 1 } else { x += 1 }
+        }
+        (c, x)
+    };
+    Ok(UsageSummary {
+        rollups: map
+            .into_iter()
+            .map(|((date, app, model), acc)| UsageRollup {
+                date,
+                app,
+                model,
+                requests: acc.requests,
+                input_tokens: acc.input,
+                output_tokens: acc.output,
+                cache_read_tokens: acc.cache_read,
+                cache_creation_tokens: acc.cache_creation,
+                sessions: acc.session_files.len() as u64,
+            })
+            .collect(),
+        claude_sessions,
+        codex_sessions,
+    })
+}
+
+/// 单个 claude jsonl 的用量提取:逐行找 `type=assistant` 行,按 (message.id) 去重后把
+/// `message.usage` 四段累进桶。坏行/坏文件静默跳过(版本演进容错,与 scan_claude_sessions 同策略)。
+fn scan_claude_usage_file(
+    path: &Path,
+    cutoff_date: &str,
+    map: &mut std::collections::BTreeMap<(String, String, String), UsageAcc>,
+) -> bool {
+    use std::io::BufRead;
+    let mut has_data = false;
+    let file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+    let path_key = path.to_string_lossy().into_owned();
+    // 同文件内 message.id 去重(一轮多 block 行共享 id;跨文件 id 亦全局唯一,但按文件分桶
+    // 语义已够——同一会话只在一个文件)。
+    let mut seen: std::collections::HashSet<String> = Default::default();
+    for line in std::io::BufReader::new(file).lines() {
+        let line = match line {
+            Ok(l) => l,
+            Err(_) => return has_data,
+        };
+        let v: serde_json::Value = match serde_json::from_str(&line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if v.get("type").and_then(|t| t.as_str()) != Some("assistant") {
+            continue;
+        }
+        let msg = match v.get("message") {
+            Some(m) => m,
+            None => continue,
+        };
+        let usage = match msg.get("usage") {
+            Some(u) if u.is_object() => u,
+            _ => continue,
+        };
+        // 去重:同一 message.id 的后续 block 行丢弃。
+        let mid = msg.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string();
+        if !mid.is_empty() && !seen.insert(mid) {
+            continue;
+        }
+        let date = match v.get("timestamp").and_then(|t| t.as_str()).and_then(local_date_from_ts) {
+            Some(d) => d,
+            None => continue,
+        };
+        if date < cutoff_date.to_string() {
+            continue;
+        }
+        let model = msg
+            .get("model")
+            .and_then(|m| m.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+        let get = |k: &str| usage.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+        // 过滤 synthetic 行(system 冒充 assistant 的合成消息,model 以 `<` 开头且四段全 0)。
+        let (i, o, cr, cc) = (
+            get("input_tokens"),
+            get("output_tokens"),
+            get("cache_read_input_tokens"),
+            get("cache_creation_input_tokens"),
+        );
+        if model.starts_with('<') && i + o + cr + cc == 0 {
+            continue;
+        }
+        let acc = map.entry((date, "claude".into(), model)).or_default();
+        acc.requests += 1;
+        acc.input += i;
+        acc.output += o;
+        acc.cache_read += cr;
+        acc.cache_creation += cc;
+        acc.session_files.insert(path_key.clone());
+        has_data = true;
+    }
+    has_data
+}
+
+/// 单个 codex rollout 的用量提取:`token_count` 行的 `info.last_token_usage`(单次请求增量;
+/// total_ 是累计不可加)。model 取最近的 `turn_context.payload.model`(会话内可换模型)。
+fn scan_codex_usage_file(
+    path: &Path,
+    cutoff_date: &str,
+    map: &mut std::collections::BTreeMap<(String, String, String), UsageAcc>,
+) -> bool {
+    use std::io::BufRead;
+    let mut has_data = false;
+    let file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+    let path_key = path.to_string_lossy().into_owned();
+    let mut model = String::new();
+    for line in std::io::BufReader::new(file).lines() {
+        let line = match line {
+            Ok(l) => l,
+            Err(_) => return has_data,
+        };
+        let v: serde_json::Value = match serde_json::from_str(&line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let payload = match v.get("payload").and_then(|p| p.as_object()) {
+            Some(p) => p,
+            None => continue,
+        };
+        // turn_context:刷新当前 model(token_count 事件本身不带 model)。
+        if v.get("type").and_then(|t| t.as_str()) == Some("turn_context") {
+            if let Some(m) = payload.get("model").and_then(|m| m.as_str()) {
+                model = m.to_string();
+            }
+            continue;
+        }
+        if payload.get("type").and_then(|t| t.as_str()) != Some("token_count") {
+            continue;
+        }
+        let last = match payload.get("info").and_then(|i| i.get("last_token_usage")).and_then(|l| l.as_object()) {
+            Some(l) => l,
+            None => continue,
+        };
+        let date = match v.get("timestamp").and_then(|t| t.as_str()).and_then(local_date_from_ts) {
+            Some(d) => d,
+            None => continue,
+        };
+        if date < cutoff_date.to_string() {
+            continue;
+        }
+        let model = if model.is_empty() { "unknown".to_string() } else { model.clone() };
+        let get = |k: &str| last.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+        let acc = map.entry((date, "codex".into(), model)).or_default();
+        acc.requests += 1;
+        // codex 口径:input_tokens **含**缓存(OpenAI 语义,cached_input_tokens 是其子集
+        // ——实测 rollout:input=143277, cached=143104),须减掉得 fresh input,否则四段
+        // 纯和把缓存重复计一遍(Hero 总量虚高,对齐 cc-switch fresh_input_sql 的减法)。
+        // output 含 reasoning(reasoning_output_tokens 是其子集,不另计)。
+        let cached = get("cached_input_tokens") + get("cache_write_input_tokens");
+        let fresh_input = get("input_tokens").saturating_sub(cached);
+        acc.input += fresh_input;
+        acc.output += get("output_tokens");
+        acc.cache_read += get("cached_input_tokens");
+        acc.cache_creation += get("cache_write_input_tokens");
+        acc.session_files.insert(path_key.clone());
+        has_data = true;
+    }
+    has_data
+}
+
+/// 用量统计(设置 → 用量 tab):聚合近 `days` 天(缺省 30)claude + codex 会话 jsonl 的
+/// token 用量,按 (日期, app, model) 分桶,日期升序。重 IO,spawn_blocking。
+#[tauri::command]
+pub async fn list_usage_rollups(days: Option<u64>) -> Result<UsageSummary, String> {
+    tokio::task::spawn_blocking(move || scan_usage_rollups(days.unwrap_or(30)))
+        .await
+        .map_err(|e| format!("join usage scan task: {e}"))?
+}
+
+/// 请求日志单条(用量「请求日志」页:一次 API 请求 = claude 一条去重后的 assistant 行 /
+/// codex 一个 token_count 事件)。倒序(最新在前),总量截断 LIMIT。
+#[derive(serde::Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestLogEntry {
+    /// ISO 时间戳原文(claude 行 timestamp / codex 行 timestamp)。
+    pub ts: String,
+    pub app: String,
+    pub model: String,
+    pub session_id: String,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_creation_tokens: u64,
+}
+
+const REQUEST_LOG_LIMIT: usize = 3000;
+
+/// 逐请求扫描(与 scan_usage_rollups 同源同过滤,不聚合逐条输出)。重 IO,spawn_blocking。
+fn scan_request_log(days: u64) -> Result<Vec<RequestLogEntry>, String> {
+    let home = dirs::home_dir().ok_or_else(|| "home dir not available".to_string())?;
+    let cutoff = chrono::Local::now() - chrono::Duration::days(days as i64);
+    let cutoff_date = cutoff.date_naive().to_string();
+    let mut out: Vec<RequestLogEntry> = Vec::new();
+
+    let claude_dir = home.join(".claude").join("projects");
+    if claude_dir.is_dir() {
+        walk_jsonl(&claude_dir, &mut |path| {
+            if let Ok(meta) = std::fs::metadata(path) {
+                if let Ok(modified) = meta.modified() {
+                    let local: chrono::DateTime<chrono::Local> = modified.into();
+                    if local.date_naive().to_string() < cutoff_date {
+                        return;
+                    }
+                }
+            }
+            scan_claude_request_log(path, &cutoff_date, &mut out);
+        });
+    }
+    let codex_dir = home.join(".codex").join("sessions");
+    if codex_dir.is_dir() {
+        walk_jsonl(&codex_dir, &mut |path| {
+            if let Ok(meta) = std::fs::metadata(path) {
+                if let Ok(modified) = meta.modified() {
+                    let local: chrono::DateTime<chrono::Local> = modified.into();
+                    if local.date_naive().to_string() < cutoff_date {
+                        return;
+                    }
+                }
+            }
+            scan_codex_request_log(path, &cutoff_date, &mut out);
+        });
+    }
+    // 时间倒序(最新在前;ts 格式两种都 ISO 可排序),再截断。
+    out.sort_by(|a, b| b.ts.cmp(&a.ts));
+    out.truncate(REQUEST_LOG_LIMIT);
+    Ok(out)
+}
+
+/// claude 单文件请求日志:与 scan_claude_usage_file 同提取规则(assistant 行 + message.id
+/// 去重 + synthetic 过滤),但不聚合,逐条带 ts/sessionId。
+fn scan_claude_request_log(path: &Path, cutoff_date: &str, out: &mut Vec<RequestLogEntry>) {
+    use std::io::BufRead;
+    let file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return,
+    };
+    let mut seen: std::collections::HashSet<String> = Default::default();
+    for line in std::io::BufReader::new(file).lines() {
+        let line = match line {
+            Ok(l) => l,
+            Err(_) => return,
+        };
+        let v: serde_json::Value = match serde_json::from_str(&line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if v.get("type").and_then(|t| t.as_str()) != Some("assistant") {
+            continue;
+        }
+        let msg = match v.get("message") {
+            Some(m) => m,
+            None => continue,
+        };
+        let usage = match msg.get("usage") {
+            Some(u) if u.is_object() => u,
+            _ => continue,
+        };
+        let mid = msg.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string();
+        if !mid.is_empty() && !seen.insert(mid) {
+            continue;
+        }
+        let ts = v.get("timestamp").and_then(|t| t.as_str()).unwrap_or("").to_string();
+        let date = match ts.as_str().split_once('T').map(|(d, _)| d.to_string()) {
+            Some(d) => d,
+            None => continue,
+        };
+        if date < cutoff_date.to_string() {
+            continue;
+        }
+        let model = msg.get("model").and_then(|m| m.as_str()).unwrap_or("unknown").to_string();
+        let get = |k: &str| usage.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+        let (i, o, cr, cc) = (
+            get("input_tokens"),
+            get("output_tokens"),
+            get("cache_read_input_tokens"),
+            get("cache_creation_input_tokens"),
+        );
+        if model.starts_with('<') && i + o + cr + cc == 0 {
+            continue;
+        }
+        out.push(RequestLogEntry {
+            ts,
+            app: "claude".into(),
+            model,
+            session_id: v.get("sessionId").and_then(|s| s.as_str()).unwrap_or("").to_string(),
+            input_tokens: i,
+            output_tokens: o,
+            cache_read_tokens: cr,
+            cache_creation_tokens: cc,
+        });
+    }
+}
+
+/// codex 单文件请求日志:token_count 事件的 last_token_usage 逐条;sessionId 取文件名尾段
+/// (rollout-<ts>-<uuid>.jsonl),同 usage 扫描。
+fn scan_codex_request_log(path: &Path, cutoff_date: &str, out: &mut Vec<RequestLogEntry>) {
+    use std::io::BufRead;
+    let file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return,
+    };
+    let session_id = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .and_then(|s| s.rsplit('-').next())
+        .unwrap_or("")
+        .to_string();
+    let mut model = String::new();
+    for line in std::io::BufReader::new(file).lines() {
+        let line = match line {
+            Ok(l) => l,
+            Err(_) => return,
+        };
+        let v: serde_json::Value = match serde_json::from_str(&line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let payload = match v.get("payload").and_then(|p| p.as_object()) {
+            Some(p) => p,
+            None => continue,
+        };
+        if v.get("type").and_then(|t| t.as_str()) == Some("turn_context") {
+            if let Some(m) = payload.get("model").and_then(|m| m.as_str()) {
+                model = m.to_string();
+            }
+            continue;
+        }
+        if payload.get("type").and_then(|t| t.as_str()) != Some("token_count") {
+            continue;
+        }
+        let last = match payload.get("info").and_then(|i| i.get("last_token_usage")).and_then(|l| l.as_object()) {
+            Some(l) => l,
+            None => continue,
+        };
+        let ts = v.get("timestamp").and_then(|t| t.as_str()).unwrap_or("").to_string();
+        let date = match ts.as_str().split_once('T').map(|(d, _)| d.to_string()) {
+            Some(d) => d,
+            None => continue,
+        };
+        if date < cutoff_date.to_string() {
+            continue;
+        }
+        let get = |k: &str| last.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+        // codex input 含缓存(OpenAI 语义),投影为 fresh input,与 scan_codex_usage_file
+        // 同口径;否则明细行 estimateCost 把缓存按全价重复计费。
+        let fresh_input = get("input_tokens").saturating_sub(get("cached_input_tokens") + get("cache_write_input_tokens"));
+        out.push(RequestLogEntry {
+            ts,
+            app: "codex".into(),
+            model: if model.is_empty() { "unknown".into() } else { model.clone() },
+            session_id: session_id.clone(),
+            input_tokens: fresh_input,
+            output_tokens: get("output_tokens"),
+            cache_read_tokens: get("cached_input_tokens"),
+            cache_creation_tokens: get("cache_write_input_tokens"),
+        });
+    }
+}
+
+/// 请求日志(用量「请求日志」页):近 `days` 天逐请求明细,倒序,最多 3000 条。
+#[tauri::command]
+pub async fn list_request_log(days: Option<u64>) -> Result<Vec<RequestLogEntry>, String> {
+    tokio::task::spawn_blocking(move || scan_request_log(days.unwrap_or(30)))
+        .await
+        .map_err(|e| format!("join request log task: {e}"))?
+}
+
+// —— AI 工作轨迹图谱(graph pane;plan: .work/design/20261021-graph-pane) ——
+//
+// 数据源与会话 jsonl 同源(usage 扫描),但提取维度是「会话 × 文件 × 模型」:
+// claude 逐行扫 tool_use(Read/Edit/Write/MultiEdit/NotebookEdit 的 file_path/
+// notebook_path)建会话→文件边;codex 只做会话级节点(rollout 的 apply_patch 路径
+// 解析脏,下期)。模型节点由前端从 sessions 分组派生。节点上限防爆(力导向 O(n²)
+// 在前端跑):会话按 tokens 取 top 40、文件按 touch 总量取 top 80。
+
+#[derive(serde::Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ActivitySession {
+    /// 会话 id(jsonl 文件名去扩展名;uuid,前端显示截短 8 位)。
+    pub id: String,
+    pub app: String,
+    /// 会话内频次最高的 model。
+    pub model: String,
+    pub requests: u64,
+    /// 四段 tokens 和(节点大小映射)。
+    pub tokens: u64,
+    pub first_ts: String,
+    pub last_ts: String,
+}
+
+#[derive(serde::Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ActivityFile {
+    /// 绝对路径(前端显示 basename + tooltip 全路径)。
+    pub path: String,
+    pub reads: u64,
+    pub writes: u64,
+    /// 关联(distinct)会话数。
+    pub sessions: u64,
+}
+
+#[derive(serde::Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ActivityEdge {
+    /// sessions 下标。
+    pub session: u32,
+    /// files 下标。
+    pub file: u32,
+    pub reads: u64,
+    pub writes: u64,
+}
+
+#[derive(serde::Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct AiActivityGraph {
+    pub sessions: Vec<ActivitySession>,
+    pub files: Vec<ActivityFile>,
+    pub edges: Vec<ActivityEdge>,
+}
+
+const ACTIVITY_MAX_SESSIONS: usize = 40;
+const ACTIVITY_MAX_FILES: usize = 80;
+
+#[derive(Default)]
+struct ActivitySessionAcc {
+    app: String,
+    /// model -> 出现行频次(取 max 做会话主模型)。
+    models: std::collections::HashMap<String, u64>,
+    requests: u64,
+    tokens: u64,
+    first_ts: String,
+    last_ts: String,
+    /// 文件路径 -> (reads, writes)。
+    files: std::collections::HashMap<String, (u64, u64)>,
+}
+
+/// 单个 claude jsonl 的活动提取。两个口径同行不同权:
+/// - usage/model/requests:按 message.id 去重(同一轮逐 block 行重复 usage,同 usage 扫描);
+/// - tool_use:**每行都扫**——tool_use 块只出现在自己所在行,message.id 去重会把后续行
+///   整行丢弃而误伤(首轮 text 行之后的 tool_use 行)。
+fn scan_claude_activity_file(path: &Path, cutoff_date: &str, acc: &mut ActivitySessionAcc) {
+    use std::io::BufRead;
+    let file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return,
+    };
+    let mut seen: std::collections::HashSet<String> = Default::default();
+    for line in std::io::BufReader::new(file).lines() {
+        let line = match line {
+            Ok(l) => l,
+            Err(_) => return,
+        };
+        let v: serde_json::Value = match serde_json::from_str(&line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if v.get("type").and_then(|t| t.as_str()) != Some("assistant") {
+            continue;
+        }
+        let msg = match v.get("message") {
+            Some(m) => m,
+            None => continue,
+        };
+        let ts = v.get("timestamp").and_then(|t| t.as_str()).unwrap_or("").to_string();
+        if ts.is_empty() {
+            continue;
+        }
+        if local_date_from_ts(&ts).map(|d| d < cutoff_date.to_string()).unwrap_or(true) {
+            continue;
+        }
+        let mid = msg.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string();
+        let first_block = mid.is_empty() || seen.insert(mid);
+        let model = msg.get("model").and_then(|m| m.as_str()).unwrap_or("unknown").to_string();
+        if first_block {
+            // synthetic 行(model `<` 开头)无 usage/tool_use,只不累计 tokens。
+            let usage = msg.get("usage").and_then(|u| u.as_object());
+            let total = usage
+                .map(|u| {
+                    let g = |k: &str| u.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+                    g("input_tokens") + g("output_tokens") + g("cache_read_input_tokens") + g("cache_creation_input_tokens")
+                })
+                .unwrap_or(0);
+            if !(model.starts_with('<') && total == 0) {
+                *acc.models.entry(model.clone()).or_insert(0) += 1;
+                acc.tokens += total;
+                acc.requests += 1;
+            }
+        }
+        if let Some(content) = msg.get("content").and_then(|c| c.as_array()) {
+            for block in content {
+                let bo = match block.as_object() {
+                    Some(o) => o,
+                    None => continue,
+                };
+                if bo.get("type").and_then(|t| t.as_str()) != Some("tool_use") {
+                    continue;
+                }
+                let name = bo.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                let input = match bo.get("input").and_then(|i| i.as_object()) {
+                    Some(i) => i,
+                    None => continue,
+                };
+                let fp = input
+                    .get("file_path")
+                    .or_else(|| input.get("notebook_path"))
+                    .and_then(|p| p.as_str())
+                    .unwrap_or("");
+                if fp.is_empty() {
+                    continue;
+                }
+                let entry = acc.files.entry(fp.to_string()).or_insert((0, 0));
+                match name {
+                    "Read" => entry.0 += 1,
+                    "Edit" | "Write" | "MultiEdit" | "NotebookEdit" => entry.1 += 1,
+                    _ => {}
+                }
+            }
+        }
+        if acc.first_ts.is_empty() || ts < acc.first_ts {
+            acc.first_ts = ts.clone();
+        }
+        if ts > acc.last_ts {
+            acc.last_ts = ts.clone();
+        }
+    }
+}
+
+/// 单个 codex rollout 的活动提取(会话级:token_count 累计 + 最近 turn_context 的 model;
+/// 文件边不做)。
+fn scan_codex_activity_file(path: &Path, cutoff_date: &str, acc: &mut ActivitySessionAcc) {
+    use std::io::BufRead;
+    let file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return,
+    };
+    let mut model = String::new();
+    for line in std::io::BufReader::new(file).lines() {
+        let line = match line {
+            Ok(l) => l,
+            Err(_) => return,
+        };
+        let v: serde_json::Value = match serde_json::from_str(&line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let payload = match v.get("payload").and_then(|p| p.as_object()) {
+            Some(p) => p,
+            None => continue,
+        };
+        if v.get("type").and_then(|t| t.as_str()) == Some("turn_context") {
+            if let Some(m) = payload.get("model").and_then(|m| m.as_str()) {
+                model = m.to_string();
+            }
+            continue;
+        }
+        if payload.get("type").and_then(|t| t.as_str()) != Some("token_count") {
+            continue;
+        }
+        let ts = v.get("timestamp").and_then(|t| t.as_str()).unwrap_or("").to_string();
+        if local_date_from_ts(&ts).map(|d| d < cutoff_date.to_string()).unwrap_or(true) {
+            continue;
+        }
+        let last = match payload.get("info").and_then(|i| i.get("last_token_usage")).and_then(|l| l.as_object()) {
+            Some(l) => l,
+            None => continue,
+        };
+        let get = |k: &str| last.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+        // codex input 含缓存(OpenAI 语义),fresh = input - cached - cache_write;
+        // 四段和才是真实消耗,直接原始四段相加会把缓存重复计一遍(同 scan_codex_usage_file)。
+        let fresh_input = get("input_tokens").saturating_sub(get("cached_input_tokens") + get("cache_write_input_tokens"));
+        acc.tokens += fresh_input + get("output_tokens") + get("cached_input_tokens") + get("cache_write_input_tokens");
+        acc.requests += 1;
+        let m = if model.is_empty() { "unknown".to_string() } else { model.clone() };
+        *acc.models.entry(m).or_insert(0) += 1;
+        if acc.first_ts.is_empty() || ts < acc.first_ts {
+            acc.first_ts = ts.clone();
+        }
+        if ts > acc.last_ts {
+            acc.last_ts = ts.clone();
+        }
+    }
+}
+
+/// 图谱扫描入口:mtime 预过滤同 usage;会话按 tokens top 40、文件按 touch top 80 裁剪。
+fn scan_ai_activity(days: u64) -> Result<AiActivityGraph, String> {
+    let home = dirs::home_dir().ok_or_else(|| "home dir not available".to_string())?;
+    let cutoff_date = (chrono::Local::now() - chrono::Duration::days(days as i64)).date_naive().to_string();
+    let mtime_pass = |path: &Path| -> bool {
+        match std::fs::metadata(path).and_then(|m| m.modified()) {
+            Ok(modified) => {
+                let local: chrono::DateTime<chrono::Local> = modified.into();
+                local.date_naive().to_string() >= cutoff_date
+            }
+            Err(_) => true, // 拿不到 mtime 不拦,行级时间戳兜底。
+        }
+    };
+
+    let mut accs: Vec<ActivitySessionAcc> = Vec::new();
+    let mut ids: Vec<String> = Vec::new();
+    let push = |id: String, acc: ActivitySessionAcc, accs: &mut Vec<ActivitySessionAcc>, ids: &mut Vec<String>| {
+        if acc.requests > 0 || !acc.files.is_empty() {
+            accs.push(acc);
+            ids.push(id);
+        }
+    };
+
+    let claude_dir = home.join(".claude").join("projects");
+    if claude_dir.is_dir() {
+        walk_jsonl(&claude_dir, &mut |path| {
+            if !mtime_pass(path) {
+                return;
+            }
+            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
+            if stem.is_empty() {
+                return;
+            }
+            let mut acc = ActivitySessionAcc::default();
+            acc.app = "claude".into();
+            scan_claude_activity_file(path, &cutoff_date, &mut acc);
+            push(stem, acc, &mut accs, &mut ids);
+        });
+    }
+    let codex_dir = home.join(".codex").join("sessions");
+    if codex_dir.is_dir() {
+        walk_jsonl(&codex_dir, &mut |path| {
+            if !mtime_pass(path) {
+                return;
+            }
+            // rollout 文件名 rollout-<ts>-<uuid>.jsonl:会话 id 取 stem 末段。
+            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+            let id = stem.rsplit('-').next().unwrap_or(stem).to_string();
+            if id.is_empty() {
+                return;
+            }
+            let mut acc = ActivitySessionAcc::default();
+            acc.app = "codex".into();
+            scan_codex_activity_file(path, &cutoff_date, &mut acc);
+            push(id, acc, &mut accs, &mut ids);
+        });
+    }
+
+    // 会话裁剪:tokens 降序 top N(tokens=0 但有文件边的会话给 1 兜底排序)。
+    let mut order: Vec<usize> = (0..accs.len()).collect();
+    order.sort_by(|&a, &b| accs[b].tokens.max(1).cmp(&accs[a].tokens.max(1)));
+    order.truncate(ACTIVITY_MAX_SESSIONS);
+    let sessions: Vec<ActivitySession> = order
+        .iter()
+        .map(|&i| {
+            let a = &accs[i];
+            let model = a
+                .models
+                .iter()
+                .max_by_key(|(_, c)| **c)
+                .map(|(m, _)| m.clone())
+                .unwrap_or_else(|| "unknown".into());
+            ActivitySession {
+                id: ids[i].clone(),
+                app: a.app.clone(),
+                model,
+                requests: a.requests,
+                tokens: a.tokens,
+                first_ts: a.first_ts.clone(),
+                last_ts: a.last_ts.clone(),
+            }
+        })
+        .collect();
+
+    // 文件聚合(仅入选会话的边):path -> (reads, writes, distinct 会话)。
+    let mut file_acc: std::collections::HashMap<String, (u64, u64, std::collections::HashSet<usize>)> = Default::default();
+    for &i in &order {
+        for (fp, (r, w)) in &accs[i].files {
+            let e = file_acc.entry(fp.clone()).or_default();
+            e.0 += r;
+            e.1 += w;
+            e.2.insert(i);
+        }
+    }
+    let mut files_sorted: Vec<(String, (u64, u64, std::collections::HashSet<usize>))> = file_acc.into_iter().collect();
+    files_sorted.sort_by(|a, b| (b.1 .0 + b.1 .1).cmp(&(a.1 .0 + a.1 .1)));
+    files_sorted.truncate(ACTIVITY_MAX_FILES);
+    // index 用拥有 String(不借 files_sorted,后续 edges 构建时它还在,生命周期不打架)。
+    let file_index: std::collections::HashMap<String, u32> = files_sorted
+        .iter()
+        .enumerate()
+        .map(|(i, (p, _))| (p.clone(), i as u32))
+        .collect();
+    let files: Vec<ActivityFile> = files_sorted
+        .drain(..)
+        .map(|(path, (reads, writes, sessions))| ActivityFile {
+            path,
+            reads,
+            writes,
+            sessions: sessions.len() as u64,
+        })
+        .collect();
+
+    // 边:入选会话 × 入选文件(session 下标 = sessions 输出序)。
+    let mut edges = Vec::new();
+    for (so, &i) in order.iter().enumerate() {
+        for (fp, (r, w)) in &accs[i].files {
+            if let Some(&fo) = file_index.get(fp.as_str()) {
+                edges.push(ActivityEdge {
+                    session: so as u32,
+                    file: fo,
+                    reads: *r,
+                    writes: *w,
+                });
+            }
+        }
+    }
+
+    Ok(AiActivityGraph { sessions, files, edges })
+}
+
+/// AI 工作轨迹图谱(graph pane):近 N 天(缺省 7)会话/文件/边。重 IO,spawn_blocking。
+#[tauri::command]
+pub async fn list_ai_activity(days: Option<u64>) -> Result<AiActivityGraph, String> {
+    tokio::task::spawn_blocking(move || scan_ai_activity(days.unwrap_or(7)))
+        .await
+        .map_err(|e| format!("join ai activity task: {e}"))?
+}
+
 /// 删除某 AI CLI 的指定会话记录文件(用户在侧栏点删除时调用)。
 ///
 /// - Claude:删 `~/.claude/projects/<encoded-cwd>/<sessionId>.jsonl`(目录定位与 list 相同)。
@@ -782,80 +1622,127 @@ fn parse_claude_messages(path: &Path) -> Result<Vec<AiCliSessionMessage>, String
     Ok(out)
 }
 
-/// 解析 Codex rollout 为消息流。以 event_msg 为主干(user_message/agent_message),
-/// response_item 只取 function_call(tool_use)/function_call_output(tool_result)。
-/// 跳过 developer/base_instructions。避免 event_msg 与 response_item.message 重复。
+/// 解析 Codex rollout 为消息流。**主干 = response_item**(两种 rollout 时代都稳定):
+/// message(role=user/assistant,文本在 content[].text)→ 对话文本;
+/// function_call / custom_tool_call → 工具卡;function_call_output / custom_tool_call_output
+/// → 按 call_id 回填上一张同名工具卡的结果。旧解析找 `event_msg/user_message`/
+/// `agent_message`,但 rollout 格式已迁移(0.166 时代 event_msg 只剩 item_completed,没有
+/// user_message/agent_message 事件)→ 文本全丢,只剩工具行(2026-11-04 用户报「恢复就一个
+/// 内容还是 wait」)。developer/system 角色跳过;event_msg 整类跳过(item_completed 与
+/// response_item 同内容)。
 fn parse_codex_messages(path: &Path) -> Result<Vec<AiCliSessionMessage>, String> {
     let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
     let reader = std::io::BufReader::new(file);
-    let mut out = Vec::new();
+    let mut out: Vec<AiCliSessionMessage> = Vec::new();
+    // call_id → out 下标(最近一张待配结果工具卡;同 id 重复调用覆盖,rollout 顺序即时间序)。
+    let mut pending_tools: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+
+    // message.content[] 的文本拼接(content[].text;空 content 容错)。
+    let content_text = |payload: &serde_json::Value| -> String {
+        payload
+            .get("content")
+            .and_then(|c| c.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|seg| seg.get("text").and_then(|x| x.as_str()))
+                    .collect::<Vec<_>>()
+                    .join("")
+            })
+            .unwrap_or_default()
+    };
 
     for line in reader.lines() {
         let line = match line { Ok(l) => l, Err(_) => continue };
         let trimmed = line.trim();
         if trimmed.is_empty() { continue; }
         let v: serde_json::Value = match serde_json::from_str(trimmed) { Ok(v) => v, Err(_) => continue };
-
-        let ty = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        if v.get("type").and_then(|t| t.as_str()) != Some("response_item") {
+            continue;
+        }
         let timestamp = v.get("timestamp").and_then(|x| x.as_str()).map(|s| s.to_string());
-        let payload = v.get("payload");
-
-        if ty == "event_msg" {
-            let sub = payload.and_then(|p| p.get("type")).and_then(|x| x.as_str()).unwrap_or("");
-            match sub {
-                "user_message" => {
-                    if let Some(msg) = payload.and_then(|p| p.get("message")).and_then(|x| x.as_str()) {
+        let payload = match v.get("payload") { Some(p) => p, None => continue };
+        let sub = payload.get("type").and_then(|x| x.as_str()).unwrap_or("");
+        match sub {
+            "message" => {
+                let role = payload.get("role").and_then(|x| x.as_str()).unwrap_or("");
+                match role {
+                    // user 文本 = 人类输入(developer/system 的 AGENTS.md 注入跳过;
+                    // 旧格式首条注入是 "# AGENTS.md instructions" 开头,一并跳过)。
+                    "user" => {
+                        let text = content_text(payload);
+                        let t = text.trim();
+                        if t.is_empty()
+                            || t.starts_with("<user_instructions>")
+                            || t.starts_with("<environment_context>")
+                            || t.starts_with("# AGENTS.md instructions")
+                        {
+                            continue;
+                        }
                         out.push(AiCliSessionMessage {
                             role: "user".into(),
                             timestamp,
-                            text: msg.trim().to_string(),
+                            text: t.to_string(),
                             tool_use: None,
                             tool_result: None,
                         });
                     }
-                }
-                "agent_message" => {
-                    if let Some(msg) = payload.and_then(|p| p.get("message")).and_then(|x| x.as_str()) {
-                        out.push(AiCliSessionMessage {
-                            role: "assistant".into(),
-                            timestamp,
-                            text: msg.trim().to_string(),
-                            tool_use: None,
-                            tool_result: None,
-                        });
+                    "assistant" => {
+                        let text = content_text(payload);
+                        if !text.trim().is_empty() {
+                            out.push(AiCliSessionMessage {
+                                role: "assistant".into(),
+                                timestamp,
+                                text,
+                                tool_use: None,
+                                tool_result: None,
+                            });
+                        }
                     }
+                    _ => {} // developer/system 跳过
                 }
-                _ => {} // token_count/task_started/task_complete 等跳过。
             }
-        } else if ty == "response_item" {
-            let sub = payload.and_then(|p| p.get("type")).and_then(|x| x.as_str()).unwrap_or("");
-            match sub {
-                "function_call" => {
-                    let name = payload.and_then(|p| p.get("name")).and_then(|x| x.as_str()).unwrap_or("").to_string();
-                    let args = payload.and_then(|p| p.get("arguments")).and_then(|x| x.as_str()).unwrap_or("");
-                    out.push(AiCliSessionMessage {
-                        role: "assistant".into(),
-                        timestamp,
-                        text: String::new(),
-                        tool_use: Some(ToolUseSummary {
-                            name,
-                            input_brief: truncate_chars(args.trim(), 200),
-                        }),
-                        tool_result: None,
-                    });
+            "function_call" | "custom_tool_call" => {
+                let name = payload.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                let args = payload
+                    .get("arguments")
+                    .or_else(|| payload.get("input"))
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("");
+                let call_id = payload.get("call_id").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                out.push(AiCliSessionMessage {
+                    role: "assistant".into(),
+                    timestamp,
+                    text: String::new(),
+                    tool_use: Some(ToolUseSummary {
+                        name,
+                        input_brief: truncate_chars(args.trim(), 200),
+                    }),
+                    tool_result: None,
+                });
+                if !call_id.is_empty() {
+                    pending_tools.insert(call_id, out.len() - 1);
                 }
-                "function_call_output" => {
-                    let output = payload.and_then(|p| p.get("output")).and_then(|x| x.as_str()).unwrap_or("");
-                    out.push(AiCliSessionMessage {
-                        role: "user".into(),
-                        timestamp,
-                        text: String::new(),
-                        tool_use: None,
-                        tool_result: Some(truncate_chars(output.trim(), 500)),
-                    });
-                }
-                _ => {} // message(role=developer/user/assistant)跳过(event_msg 已覆盖,避免重复)。
             }
+            "function_call_output" | "custom_tool_call_output" => {
+                // output 两形态:str 或 [{type,text}] 数组(新格式 function_call_output 实测)。
+                let output_text = match payload.get("output") {
+                    Some(serde_json::Value::String(s)) => s.clone(),
+                    Some(serde_json::Value::Array(arr)) => arr
+                        .iter()
+                        .filter_map(|seg| seg.get("text").and_then(|x| x.as_str()))
+                        .collect::<Vec<_>>()
+                        .join(""),
+                    _ => String::new(),
+                };
+                let call_id = payload.get("call_id").and_then(|x| x.as_str()).unwrap_or("");
+                if let Some(&idx) = pending_tools.get(call_id) {
+                    if let Some(slot) = out.get_mut(idx) {
+                        slot.tool_result = Some(truncate_chars(output_text.trim(), 500));
+                    }
+                    pending_tools.remove(call_id);
+                }
+            }
+            _ => {} // reasoning/message 之外(event_msg/token_usage_record 等)跳过
         }
     }
     Ok(out)

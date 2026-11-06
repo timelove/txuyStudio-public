@@ -165,14 +165,20 @@ export function normalizeCwdForCompare(cwd: string | null | undefined): string {
  * 设计原则(用户明确):「当前工作空间下统一性」--自动恢复 / ↻「恢复上一次」都必须是同目录的会话,
  * 不能取到别的项目的最近会话。cwd 比较走 [[normalizeCwdForCompare]](去 verbatim 前缀 + 小写),
  * 容忍 `\\?\D:\...` 与 `D:\...` 形态差异。无匹配返回 null(调用方降级为不恢复/显示空)。
+ *
+ * `excludeSessionIds`:要跳过的会话 id(默认恢复多 tab 时,先恢复的 tab 已认领最近一条,
+ * 后恢复的取次近,避免两条 claude 进程挂同一 session 互相分支)。
  */
 export function mostRecentSessionInCwd(
   items: AiCliSessionListItem[],
   cwd: string | null | undefined,
+  excludeSessionIds?: ReadonlySet<string>,
 ): AiCliSessionListItem | null {
   const key = normalizeCwdForCompare(cwd);
   if (!key) return null;
-  const same = items.filter((it) => normalizeCwdForCompare(it.cwd) === key);
+  const same = items.filter(
+    (it) => normalizeCwdForCompare(it.cwd) === key && !excludeSessionIds?.has(it.sessionId),
+  );
   if (same.length === 0) return null;
   same.sort((a, b) => (b.lastAt ?? "").localeCompare(a.lastAt ?? ""));
   return same[0];

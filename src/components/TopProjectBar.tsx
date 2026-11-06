@@ -1,3 +1,4 @@
+import type React from "react";
 import type { ProjectId, ProjectSnapshot } from "../domain/projects";
 import type { ProjectRecord } from "../domain/appState";
 import type { PinnedLayout } from "../domain/pinnedLayout";
@@ -43,6 +44,11 @@ type TopProjectBarProps = {
   onPinnedLayoutChange?: (patch: Partial<PinnedLayout>) => void;
   /** 打开设置弹窗(品牌区齿轮;tab 可指定直达页)。AppShell 持有弹窗状态。 */
   onOpenSettings?: (tab?: SettingsTab) => void;
+  /** logo 按钮 ref:设置浮层的弹出锚点(面板从按钮正下方左缘「点到面」展开)。 */
+  /** 设置页当前是否打开(logo 按钮 active 态)。 */
+  settingsOpen?: boolean;
+  /** 关闭设置页(logo 在设置页态再点 = 返回工作区)。 */
+  onCloseSettings?: () => void;
 };
 
 /** 品牌 logo(与 app-icon.svg 同构:深空底 + 镂空 T + 发光 >;小尺寸去 filter 保清晰)。
@@ -115,6 +121,8 @@ export function TopProjectBar({
   pinnedLayout,
   onPinnedLayoutChange,
   onOpenSettings,
+  settingsOpen,
+  onCloseSettings,
 }: TopProjectBarProps) {
   const { t } = useTranslation();
   const activeProject = projects.find((p) => p.id === activeProjectId) ?? null;
@@ -128,18 +136,22 @@ export function TopProjectBar({
           select-none 防长按误选文字打断拖拽。logo 是其中唯一交互元素(点击开设置,
           pointer-events-auto + stopPropagation),其余纯展示。 */}
       <div data-tauri-drag-region className="flex select-none items-center gap-2">
-        {/* 品牌 logo = 设置弹窗入口(点击打开,无独立齿轮图标)。拖拽区内 Radix hover 在
-            拖拽按下时失效,保留原生 title 兜底(同 dock back);hover 轻微放大给出可点反馈。 */}
+        {/* 品牌 logo = 设置页入口(点击 toggle 设置页;2026-10-21 页化后不再是浮层锚点,
+            hover 可自由变形)。设置页打开时按钮转 active 底色(状态可读)。 */}
         {onOpenSettings ? (
           <Tooltip>
             <TooltipTrigger asChild>
               <button
                 type="button"
-                onClick={() => onOpenSettings()}
+                onClick={() => {
+                  if (settingsOpen) onCloseSettings?.();
+                  else onOpenSettings();
+                }}
                 onMouseDown={(e) => e.stopPropagation()}
-                title={t("topbar.settings")}
                 aria-label={t("topbar.settings")}
-                className="pointer-events-auto cursor-pointer rounded-[6px] transition-transform duration-150 hover:scale-110 focus-visible:outline focus-visible:outline-1 focus-visible:outline-[var(--mx-accent)]"
+                className={`pointer-events-auto cursor-pointer rounded-[6px] p-[2px] transition-all duration-150 hover:brightness-125 focus-visible:outline focus-visible:outline-1 focus-visible:outline-[var(--mx-accent)] ${
+                  settingsOpen ? "bg-[var(--mx-accent-soft)]" : ""
+                }`}
               >
                 <BrandLogo />
               </button>

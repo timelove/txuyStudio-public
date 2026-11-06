@@ -19,6 +19,8 @@ use std::process::Stdio;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use serde_json::json;
+
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use super::{
@@ -111,6 +113,7 @@ pub async fn start_claude_session(
     resume_session_id: Option<String>,
     effort: Option<String>,
     model: Option<String>,
+    add_dirs: Option<Vec<String>>,
 ) -> Result<(), String> {
     // 1) 短锁:取/建 session;若旧 child 存活 → killed=true + take child+stdin(放锁后 kill 旧进程)。
     // 0) 读持久化的 claude_session_id(跨重启 --resume 用)。首启播种到新 session;session 已存在
@@ -148,6 +151,7 @@ pub async fn start_claude_session(
                 model: Mutex::new(None),
                 settings_env_hash: Mutex::new(None),
                 killed: Mutex::new(false),
+                background_tasks: Mutex::new(Vec::new()),
             });
         // 旧 child 存活:标记 killed(让旧读循环 EOF 不发 error)+ take child+stdin。
         let old = session.child.lock().ok().and_then(|mut g| g.take());
@@ -281,6 +285,12 @@ pub async fn start_claude_session(
         .arg("--verbose")
         .arg("--permission-mode")
         .arg(&mode_str);
+    // 权限确认走控制通道(对齐 BaoCode claude_code_transport.dart):CLI 遇需授权工具不再
+    // 自己拒绝,而是 stdout 发 control_request{can_use_tool},宿主回 control_response
+    // {behavior:allow/deny} 后**由 CLI 自己执行并续跑该轮**——取代原「识别拒绝文案 →
+    // 本地代执行 → 注入 tool_result」的启发式路径(那条路在批准后常断链:CLI 又吃拒绝,
+    // 卡片复现且轮次不继续)。spike 实测 2026-10-19(.work/spikes/can-use-tool-spike.mjs)。
+    cmd.arg("--permission-prompt-tool").arg("stdio");
     // 工具白名单(--allowedTools):合并「项目持久化 allowlist」∪「本次前端透传」,去重。
     // 短锁读 app_state(同步,不跨 .await)。
     {
@@ -315,6 +325,20 @@ pub async fn start_claude_session(
     // opus/…)由 claude 按 ANTHROPIC_DEFAULT_*_MODEL 解析。
     if let Some(m) = &model_str {
         cmd.arg("--model").arg(m);
+    }
+    // --add-dir:追加工作目录(前端 /add-dir 快捷指令与 ⋯ 菜单「添加工作目录」集成)。
+    // 路径校验同 cwd(validate_cwd);失败仅 warn 跳过该条,不阻断启动。
+    if let Some(dirs) = &add_dirs {
+        for d in dirs.iter().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            match validate_cwd(std::path::Path::new(d)) {
+                Ok(p) => {
+                    cmd.arg("--add-dir").arg(&p);
+                }
+                Err(reason) => {
+                    log::warn!("start_claude_session: add-dir rejected ({reason}): {d}");
+                }
+            }
+        }
     }
     if let Some(p) = &cwd_validated {
         cmd.current_dir(p);
@@ -412,6 +436,10 @@ pub async fn send_claude_message(
     tab_id: String,
     prompt: String,
     tool_result: Option<ToolResultPayload>,
+    // 手机经中继发来的消息:`Some(id)` = 写完 stdin 后补发一条 user 事件(带该 id),
+    // 桌面端才看得见「手机问的那句话」。桌面 transport 传 None——它已在前端
+    // `appendUserMessage` 做过乐观插入,后端再回显会重复一条。
+    client_message_id: Option<String>,
 ) -> Result<(), String> {
     // 1) 短锁:检查 busy + take stdin + 置 Running(即时 local command 如 /clear 除外,见下方
     //    `is_instant_local_command`:不置 Running,避免 /clear 不发 result 时 busy 死锁)。
@@ -497,7 +525,226 @@ pub async fn send_claude_message(
     .map_err(|e| format!("send_claude_message join: {e}"))?
     .map_err(|e| format!("send_claude_message write: {e}"))?;
 
+    // 4) 回显手机来源的 user 消息。stream-json 不回显用户输入(见 claudeStream.ts 注释),
+    //    桌面端是靠自己 appendUserMessage 乐观插入才看得见的;手机发的话桌面端没有任何
+    //    本地插入点,只能由后端补一条。id 由手机侧生成并经 chat.send 带上,两端同 id →
+    //    手机侧 `_applyUser` 的 msgIndex 去重会把回显吞掉,不会重复。
+    //    tool_result(reply=工具结果回传)不是用户输入,不回显。
+    if tool_result.is_none() && !prompt.trim().is_empty() {
+        if let Some(msg_id) = client_message_id {
+            let _ = app.emit(
+                "claude-event",
+                ClaudeEvent {
+                    project_id,
+                    tab_id,
+                    payload: ClaudeEventPayload::User {
+                        message: serde_json::json!({
+                            "id": msg_id,
+                            "role": "user",
+                            "content": [{ "type": "text", "text": prompt }],
+                        }),
+                    },
+                },
+            );
+        }
+    }
+
     Ok(())
+}
+
+/// 请求 CLI 的权威上下文账本(P2,#137 对齐 baocode):经 stdin 写一条 control_request
+/// `get_context_usage`,CLI 的回包(control_response)由读循环以 `ContextUsage` 事件广播,
+/// 前端 listen 消费(一次一个 inflight;20s 不回就降级用前端估算,不阻塞)。
+///
+/// spike 实测(2026-10-19,.work/spikes/):我们现有 spawn 形态(`-p --input-format
+/// stream-json --output-format stream-json --verbose`)CLI 即支持该 subtype,无需对话轮;
+/// 响应含 categories(kind: used/buffer/free)/totalTokens/maxTokens/autoCompactThreshold。
+///
+/// 查询**不受 busy 拦**(运行中查的是进行中账本,更有意义),也不动 status;stdin 与
+/// send_claude_message 共用同一把 Mutex 的 take/放回,天然互斥。
+#[tauri::command]
+pub async fn request_claude_context_usage(
+    app: AppHandle,
+    state: State<'_, ClaudeRegistry>,
+    project_id: String,
+    tab_id: String,
+) -> Result<(), String> {
+    let stdin = {
+        let by_project = state.by_project.lock().map_err(|e| e.to_string())?;
+        let session = by_project
+            .get(&project_id)
+            .and_then(|s| s.get(&tab_id))
+            .ok_or_else(|| "claude session not started: call start_claude_session first".to_string())?;
+        session.stdin.lock().ok().and_then(|mut g| g.take())
+    };
+    let Some(stdin) = stdin else {
+        return Err("claude stdin unavailable (process dead or busy writing)".to_string());
+    };
+    // request id 固定:前端一次只挂一个 inflight,响应广播按事件即收,无需匹配多个。
+    let line = serde_json::json!({
+        "type": "control_request",
+        "request_id": "ctx-usage",
+        "request": { "subtype": "get_context_usage", "detail": "summary" },
+    })
+    .to_string()
+        + "\n";
+
+    let app2 = app.clone();
+    let pid = project_id.clone();
+    let tid = tab_id.clone();
+    tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+        let mut s = stdin;
+        s.write_all(line.as_bytes())?;
+        s.flush()?;
+        // 放回 stdin(与 send_claude_message 同款:session 已被 kill/remove 则丢弃)。
+        {
+            let reg = app2.state::<ClaudeRegistry>();
+            let by_project = match reg.by_project.lock() {
+                Ok(g) => g,
+                Err(_) => return Ok(()),
+            };
+            if let Some(sess) = by_project.get(&pid).and_then(|m| m.get(&tid)) {
+                if let Ok(mut g) = sess.stdin.lock() {
+                    *g = Some(s);
+                }
+            }
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("request_claude_context_usage join: {e}"))?
+    .map_err(|e| format!("request_claude_context_usage write: {e}"))?;
+
+    Ok(())
+}
+
+/// 同步写一行到 claude stdin(取→写→放回,与 send_claude_message 共用同一把 Mutex 的
+/// take/放回模式,天然互斥)。读循环线程(同步上下文)与命令处理器(经 spawn_blocking)共用。
+fn write_stdin_line(
+    app: &AppHandle,
+    project_id: &str,
+    tab_id: &str,
+    line: &str,
+) -> Result<(), String> {
+    let stdin = {
+        let reg = app.state::<ClaudeRegistry>();
+        let by_project = reg.by_project.lock().map_err(|e| e.to_string())?;
+        let session = by_project
+            .get(project_id)
+            .and_then(|s| s.get(tab_id))
+            .ok_or_else(|| "claude session not started".to_string())?;
+        session.stdin.lock().ok().and_then(|mut g| g.take())
+    };
+    let Some(mut stdin) = stdin else {
+        return Err("claude stdin unavailable (process dead or busy writing)".to_string());
+    };
+    use std::io::Write;
+    let write_res = stdin.write_all(line.as_bytes()).and_then(|_| stdin.flush());
+    // 放回 stdin(session 已被 kill/remove 则丢弃)。
+    {
+        let reg = app.state::<ClaudeRegistry>();
+        let by_project = reg.by_project.lock();
+        if let Ok(by_project) = by_project {
+            if let Some(sess) = by_project.get(project_id).and_then(|m| m.get(tab_id)) {
+                if let Ok(mut g) = sess.stdin.lock() {
+                    *g = Some(stdin);
+                }
+            }
+        }
+    }
+    write_res.map_err(|e| e.to_string())
+}
+
+/// 软中断当前轮(stream-json 控制通道):经 stdin 写 control_request `interrupt`,
+/// CLI abort 当前轮回 result,进程**不死**,下一条消息直接 stdin 续跑——免掉 kill_claude
+/// 的 taskkill 收尸与下轮 --resume 重启进程(各秒级,双 ESC/停止按钮卡顿的根源)。
+/// spike 实测(2026-10-21,.work/spikes/interrupt-spike.mjs,CLI 2.1.304):回
+/// control_response{success,still_queued:[]} + result{subtype:"error_during_execution",
+/// is_error:true}(前端 handleEvent 按在途标志拦截该 result,防重试分流误重发)。
+/// 与 request_claude_context_usage 同款语义:**不受 busy 拦**(interrupt 就是打断
+/// Running)、不动 status(等 result 事件自然复位 Idle)。stdin 不可用(进程未启/已死)
+/// → Err,前端回退 kill_claude 硬中断。
+#[tauri::command]
+pub async fn interrupt_claude_turn(
+    app: AppHandle,
+    project_id: String,
+    tab_id: String,
+) -> Result<(), String> {
+    let line = serde_json::json!({
+        "type": "control_request",
+        "request_id": format!(
+            "interrupt-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0)
+        ),
+        "request": { "subtype": "interrupt" },
+    })
+    .to_string()
+        + "\n";
+    let app2 = app.clone();
+    let pid = project_id.clone();
+    let tid = tab_id.clone();
+    tokio::task::spawn_blocking(move || write_stdin_line(&app2, &pid, &tid, &line))
+        .await
+        .map_err(|e| format!("interrupt_claude_turn join: {e}"))??;
+    Ok(())
+}
+
+/// 回应用户对 `can_use_tool` 的决策(--permission-prompt-tool stdio):经 stdin 写
+/// control_response,CLI 收到后**自己执行工具**(allow)或把拒绝文案作为 tool_result 交给模型
+/// (deny)并续跑该轮。取代原「本地代执行 + 注入 tool_result」启发式路径(批准后常断链)。
+///
+/// `behavior`: "allow" | "deny"。allow 需带 `updated_input`(原样回传 CLI 给的 input,
+/// spike 实测 CLI 认这个形态);deny 可带 `message`(模型据此换方式)。
+#[tauri::command]
+pub async fn respond_claude_permission(
+    app: AppHandle,
+    state: State<'_, ClaudeRegistry>,
+    project_id: String,
+    tab_id: String,
+    request_id: String,
+    behavior: String,
+    updated_input: Option<serde_json::Value>,
+    message: Option<String>,
+) -> Result<(), String> {
+    // 仅校验会话存在(不 take stdin——实际写在 spawn_blocking 里由 write_stdin_line 取)。
+    {
+        let by_project = state.by_project.lock().map_err(|e| e.to_string())?;
+        if by_project
+            .get(&project_id)
+            .and_then(|s| s.get(&tab_id))
+            .is_none()
+        {
+            return Err("claude session not started".to_string());
+        }
+    }
+    let response = if behavior == "allow" {
+        serde_json::json!({
+            "behavior": "allow",
+            "updatedInput": updated_input.unwrap_or(serde_json::Value::Null),
+        })
+    } else {
+        serde_json::json!({
+            "behavior": "deny",
+            "message": message.unwrap_or_else(|| "User declined this action.".to_string()),
+        })
+    };
+    let line = serde_json::json!({
+        "type": "control_response",
+        "response": {
+            "subtype": "success",
+            "request_id": request_id,
+            "response": response,
+        },
+    })
+    .to_string()
+        + "\n";
+
+    tokio::task::spawn_blocking(move || write_stdin_line(&app, &project_id, &tab_id, &line))
+        .await
+        .map_err(|e| format!("respond_claude_permission join: {e}"))?
 }
 
 /// 中断当前轮(kill 整个长进程)。headless stream-json 无中断信号,中断靠 kill 进程。
@@ -663,6 +910,41 @@ pub fn list_claude_models() -> Result<Vec<String>, String> {
     Ok(models)
 }
 
+/// 探测「当前生效供应商」的模型目录(`GET {baseUrl}/v1/models`),返回完整可用模型 id 列表。
+///
+/// 与 `list_claude_models` 互补:后者只读 settings.json env 里**已配置**的别名/模型
+/// (`ANTHROPIC_MODEL`、`ANTHROPIC_DEFAULT_*_MODEL`),而供应商实际上支持更多模型——那些只有
+/// 问端点才知道。前端模型选择器打开时并行拉两条:env 列表先瞬时上屏,本命令的结果回来后
+/// 追加(去重),于是「明明有更多模型却没展示」被补齐。
+///
+/// 失败/超时(4s)/未配 baseUrl 一律返回空数组——选择器降级为只显示 env 项,不弹错。
+/// 走 Rust 侧请求的原因同 `probe_provider_endpoint`:三方端点几乎不开 CORS。
+#[tauri::command]
+pub async fn list_claude_catalog_models() -> Result<Vec<String>, String> {
+    let env = claude_settings_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
+        .and_then(|v| v.get("env").and_then(|e| e.as_object().cloned()))
+        .unwrap_or_default();
+    let base_url = env
+        .get("ANTHROPIC_BASE_URL")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if base_url.is_empty() {
+        return Ok(Vec::new());
+    }
+    let token = env
+        .get("ANTHROPIC_AUTH_TOKEN")
+        .or_else(|| env.get("ANTHROPIC_API_KEY"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let probe = crate::providers::commands::probe_endpoint(&base_url, Some(token.as_str()), 4).await;
+    Ok(probe.models)
+}
+
 /// 读 `~/.claude/settings.json` 的 `env` 段并算哈希(仅 env 段:theme 等无关字段由 claude CLI
 /// 自己改写,不应触发刷新)。文件缺失/解析失败返回空串的哈希(稳定值,仍可检测「从无到有」)。
 fn claude_settings_env_hash() -> u64 {
@@ -707,6 +989,51 @@ pub fn claude_settings_changed(
             .and_then(|g| *g)
     };
     Ok(stored.map(|h| claude_settings_env_hash() != h).unwrap_or(false))
+}
+
+/// `~/.claude/settings.json` 路径(home 下 .claude/settings.json;USERPROFILE 优先,回退 HOME)。
+pub(crate) fn claude_settings_path() -> Option<std::path::PathBuf> {
+    std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .ok()
+        .map(|home| std::path::Path::new(&home).join(".claude").join("settings.json"))
+}
+
+/// 读 `~/.claude/settings.json` 的 `env` 段(txuyStudio 内置供应商管理用:识别「当前生效」
+/// + 「从当前配置导入」)。文件缺失/无 env 段返回空 map(非错误,前端按空态处理)。
+#[tauri::command]
+pub fn read_claude_settings_env() -> Result<std::collections::BTreeMap<String, String>, String> {
+    let env = claude_settings_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
+        .and_then(|v| v.get("env").and_then(|e| e.as_object().cloned()))
+        .unwrap_or_default();
+    Ok(env
+        .into_iter()
+        .filter_map(|(k, v)| v.as_str().map(|s| (k, s.to_string())))
+        .collect())
+}
+
+/// 整体替换 `~/.claude/settings.json` 的 `env` 段(其余字段 statusLine/theme/enabledPlugins 等
+/// 原样保留)。txuyStudio 内置供应商切换 = 前端传该 provider 的完整 env 段;写完后活跃会话
+/// 由前端触发 `refreshIfSettingsChanged`(kill + --resume 拾取新 BASE_URL/TOKEN/MODEL)。
+/// 文件不存在时以 `{ "env": … }` 骨架新建。
+#[tauri::command]
+pub fn write_claude_settings_env(env: std::collections::BTreeMap<String, String>) -> Result<(), String> {
+    let path = claude_settings_path().ok_or_else(|| "cannot resolve home directory".to_string())?;
+    // 先读原文件保住非 env 字段;读失败(不存在/损坏)从空对象起步。
+    let mut root = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    let obj = root.as_object_mut().ok_or_else(|| "settings.json root is not an object".to_string())?;
+    let env_json: serde_json::Map<String, serde_json::Value> = env
+        .into_iter()
+        .map(|(k, v)| (k, serde_json::Value::String(v)))
+        .collect();
+    obj.insert("env".to_string(), serde_json::Value::Object(env_json));
+    let serialized = serde_json::to_string_pretty(&root).map_err(|e| format!("serialize settings.json: {e}"))?;
+    std::fs::write(&path, serialized).map_err(|e| format!("write settings.json: {e}"))
 }
 
 /// 设某 session 的状态(短锁)。失败静默(锁中毒不阻断主流程)。
@@ -809,6 +1136,15 @@ fn run_read_loop(app: AppHandle, project_id: String, tab_id: String, stdout: std
         };
 
         let evt_type = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        // sidechain 子链(Task 子 agent)的事件不进主对话流:其 assistant usage 快照会被
+        // 前端 computeContextInfo(取最近一条有 usage 的 assistant)误当主对话上下文,
+        // Task 跑完 ctx% 瞬间跳成子 agent 的值。与 resume 回放路径的同款过滤对齐
+        // (baocode _countRequest 亦排除 parent_tool_use_id / isSidechain)。
+        let is_sidechain = v.get("isSidechain").and_then(|b| b.as_bool()).unwrap_or(false)
+            || matches!(
+                v.get("parent_tool_use_id"),
+                Some(serde_json::Value::String(_))
+            );
         match evt_type {
             "system" => {
                 let subtype = v.get("subtype").and_then(|t| t.as_str()).unwrap_or("");
@@ -937,6 +1273,19 @@ fn run_read_loop(app: AppHandle, project_id: String, tab_id: String, stdout: std
                                 .collect()
                         })
                         .unwrap_or_default();
+                    // 快照同步进 session(手机 chat_status 断线重连补齐;见 ClaudeSession 字段注释)。
+                    if let Some(reg) = app.try_state::<ClaudeRegistry>() {
+                        if let Ok(by_project) = reg.by_project.lock() {
+                            if let Some(session) = by_project
+                                .get(project_id.as_str())
+                                .and_then(|m| m.get(tab_id.as_str()))
+                            {
+                                if let Ok(mut g) = session.background_tasks.lock() {
+                                    *g = tasks.clone();
+                                }
+                            }
+                        }
+                    }
                     let _ = app.emit(
                         "claude-event",
                         ClaudeEvent {
@@ -978,6 +1327,9 @@ fn run_read_loop(app: AppHandle, project_id: String, tab_id: String, stdout: std
                 }
             }
             "assistant" => {
+                if is_sidechain {
+                    continue;
+                }
                 // 进入 assistant/user/result:思考阶段结束,复位计数心跳(真实思考内容已随
                 // assistant 的 thinking block 到达,无需残留 flush)。
                 thinking_tokens = 0;
@@ -993,6 +1345,9 @@ fn run_read_loop(app: AppHandle, project_id: String, tab_id: String, stdout: std
                 );
             }
             "user" => {
+                if is_sidechain {
+                    continue;
+                }
                 // 跳过 isReplay && local-command-stdout(Compacted Tip 回放噪音,非真实用户消息)。
                 let is_replay = v.get("isReplay").and_then(|b| b.as_bool()).unwrap_or(false);
                 let content_str = v
@@ -1016,6 +1371,122 @@ fn run_read_loop(app: AppHandle, project_id: String, tab_id: String, stdout: std
                         payload: ClaudeEventPayload::User { message },
                     },
                 );
+            }
+            "control_response" => {
+                // P2(#137):`get_context_usage` 的 CLI 权威账本回包(请求由
+                // request_claude_context_usage 经 stdin 发出)。success 时透传 response.response
+                // 全量(categories(kind: used/buffer/free)/totalTokens/maxTokens/
+                // autoCompactThreshold/messageBreakdown/…);error 仅记日志(旧 CLI 不认该 subtype,
+                // baocode 同款容错:context 是锦上添花,拿不到就继续用前端估算)。
+                let resp = v.get("response");
+                let subtype = resp
+                    .and_then(|r| r.get("subtype"))
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("");
+                if subtype != "success" {
+                    log::info!(
+                        "claude control_response error, tab {tab_id}: {}",
+                        resp.and_then(|r| r.get("error"))
+                            .map(|e| e.to_string())
+                            .unwrap_or_else(|| "unknown".to_string())
+                    );
+                    continue;
+                }
+                let data = resp
+                    .and_then(|r| r.get("response"))
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
+                let _ = app.emit(
+                    "claude-event",
+                    ClaudeEvent {
+                        project_id: project_id.clone(),
+                        tab_id: tab_id.clone(),
+                        payload: ClaudeEventPayload::ContextUsage { data },
+                    },
+                );
+            }
+            "control_request" => {
+                // --permission-prompt-tool stdio:CLI 在执行需授权工具前问宿主。
+                // can_use_tool → 交前端弹确认卡(respond_claude_permission 回包);
+                // ExitPlanMode → 就地 deny(计划卡沿用现有 hasPendingPlan 流程:轮次就此结束,
+                // 等用户批准/反馈),对齐 BaoCode _permission 的 planPresented 处理。
+                let req = v.get("request");
+                let subtype = req
+                    .and_then(|r| r.get("subtype"))
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("");
+                let request_id = v.get("request_id").and_then(|s| s.as_str()).unwrap_or("");
+                if subtype == "can_use_tool" && !request_id.is_empty() {
+                    let tool_name = req
+                        .and_then(|r| r.get("tool_name"))
+                        .and_then(|s| s.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    if tool_name == "ExitPlanMode" {
+                        let line = serde_json::json!({
+                            "type": "control_response",
+                            "response": {
+                                "subtype": "success",
+                                "request_id": request_id,
+                                "response": {
+                                    "behavior": "deny",
+                                    "message": "Plan presented to the user; the turn ends here and waits for their reply.",
+                                },
+                            },
+                        })
+                        .to_string()
+                            + "\n";
+                        if let Err(e) = write_stdin_line(&app, &project_id, &tab_id, &line) {
+                            log::warn!("claude plan-deny write failed, tab {tab_id}: {e}");
+                        }
+                    } else {
+                        let input = req
+                            .and_then(|r| r.get("input"))
+                            .cloned()
+                            .unwrap_or(serde_json::Value::Null);
+                        let _ = app.emit(
+                            "claude-event",
+                            ClaudeEvent {
+                                project_id: project_id.clone(),
+                                tab_id: tab_id.clone(),
+                                payload: ClaudeEventPayload::PermissionRequest {
+                                    request_id: request_id.to_string(),
+                                    tool_use_id: req
+                                        .and_then(|r| r.get("tool_use_id"))
+                                        .and_then(|s| s.as_str())
+                                        .map(|s| s.to_string()),
+                                    tool_name,
+                                    display_name: req
+                                        .and_then(|r| r.get("display_name"))
+                                        .and_then(|s| s.as_str())
+                                        .map(|s| s.to_string()),
+                                    input,
+                                    description: req
+                                        .and_then(|r| r.get("description"))
+                                        .and_then(|s| s.as_str())
+                                        .map(|s| s.to_string()),
+                                    reason_type: req
+                                        .and_then(|r| r.get("decision_reason_type"))
+                                        .and_then(|s| s.as_str())
+                                        .map(|s| s.to_string()),
+                                },
+                            },
+                        );
+                    }
+                } else if !request_id.is_empty() {
+                    // 未支持的 subtype:明确拒绝,CLI 不至于干等。
+                    let line = serde_json::json!({
+                        "type": "control_response",
+                        "response": {
+                            "subtype": "success",
+                            "request_id": request_id,
+                            "response": { "behavior": "deny", "message": "Unsupported by this client" },
+                        },
+                    })
+                    .to_string()
+                        + "\n";
+                    let _ = write_stdin_line(&app, &project_id, &tab_id, &line);
+                }
             }
             "result" => {
                 // 进入 assistant/user/result:思考阶段结束,复位计数心跳(真实思考内容已随
@@ -1202,6 +1673,120 @@ fn take_killed_flag(app: &AppHandle, project_id: &str, tab_id: &str) -> bool {
 /// 历史回填事件上限:大会话(数千行)只回填最近部分,防一次性注入巨量消息卡 UI。
 const HISTORY_MAX_EVENTS: usize = 400;
 
+/// 手机端裁剪上限(仅 `slim_event_for_mobile` 消费):
+/// text/thinking 是正文与思考,给足余量截 16K 字符;tool_result 全文截 2K;
+/// tool_use.input 只产一句话摘要(200 字)。
+const HISTORY_SLIM_TEXT_MAX: usize = 16_000;
+const HISTORY_SLIM_RESULT_MAX: usize = 2_048;
+const HISTORY_SLIM_INPUT_MAX: usize = 200;
+
+fn truncate_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max).collect();
+    out.push('…');
+    out
+}
+
+/// 手机端 tool_use.input 摘要:与 companion `stream.dart _briefInput` 同款取法
+/// (取首个路径/命令类字段),产 String 让手机端 `_briefInput` 直通截断展示。
+fn brief_input_for_mobile(input: Option<&serde_json::Value>) -> String {
+    let Some(v) = input else {
+        return String::new();
+    };
+    match v {
+        serde_json::Value::String(s) => truncate_chars(s, HISTORY_SLIM_INPUT_MAX),
+        serde_json::Value::Object(m) => {
+            for k in ["command", "file_path", "path", "pattern", "url", "query", "prompt", "description"] {
+                if let Some(serde_json::Value::String(s)) = m.get(k) {
+                    if !s.is_empty() {
+                        return truncate_chars(s, HISTORY_SLIM_INPUT_MAX);
+                    }
+                }
+            }
+            let joined = m
+                .iter()
+                .map(|(k, x)| format!("{k}={x}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            truncate_chars(&joined, HISTORY_SLIM_INPUT_MAX)
+        }
+        other => truncate_chars(&other.to_string(), HISTORY_SLIM_INPUT_MAX),
+    }
+}
+
+/// 手机端 chat.history 载荷裁剪(2026-11-05 方案 1):历史回填的 message 是**完整** JSON
+/// (tool_use 完整 input、tool_result 全文,单条可达数百 KB),400 条序列化 + E2E 加密 +
+/// 公网转发轻松数 MB,手机首开秒等。手机渲染(`stream.dart applyClaude`)只消费
+/// text/thinking 全文、tool_use 的 name + input 一句话摘要、tool_result content 回填,
+/// 据此投影:text/thinking 截 16K、tool_use.input 摘要 200 字、tool_result.content 截 2K、
+/// 其余 block(redacted_thinking 等)与顶层大字段(usage 等)丢弃。
+/// 仅 relay `chat_history`(手机)走此路径;桌面 tauri command 回溯回填保持全量。
+pub fn slim_event_for_mobile(v: &ClaudeEventPayload) -> ClaudeEventPayload {
+    let message = match v {
+        ClaudeEventPayload::User { message } | ClaudeEventPayload::Assistant { message } => message,
+        other => return other.clone(),
+    };
+    let mut slim = serde_json::Map::new();
+    // 前端归并只用 id(同 id 覆盖)+ role;content 见下。
+    for k in ["id", "role"] {
+        if let Some(x) = message.get(k) {
+            slim.insert(k.to_string(), x.clone());
+        }
+    }
+    let mut out: Vec<serde_json::Value> = Vec::new();
+    if let Some(serde_json::Value::Array(blocks)) = message.get("content") {
+        for b in blocks {
+            match b.get("type").and_then(|t| t.as_str()).unwrap_or("") {
+                "text" => {
+                    let t = b.get("text").and_then(|t| t.as_str()).unwrap_or("");
+                    out.push(json!({ "type": "text", "text": truncate_chars(t, HISTORY_SLIM_TEXT_MAX) }));
+                }
+                "thinking" => {
+                    // thinking block 另有 signature(base64,可达数 KB)一并丢弃。
+                    let t = b.get("thinking").and_then(|t| t.as_str()).unwrap_or("");
+                    out.push(json!({ "type": "thinking", "thinking": truncate_chars(t, HISTORY_SLIM_TEXT_MAX) }));
+                }
+                "tool_use" => out.push(json!({
+                    "type": "tool_use",
+                    "id": b.get("id"),
+                    "name": b.get("name"),
+                    "input": brief_input_for_mobile(b.get("input")),
+                })),
+                "tool_result" => {
+                    // content 是 str 或 block 数组(取 text 拼接),统一拍平成截断字符串,
+                    // 手机端 `_flattenResult` 对 String 直通。
+                    let flat = match b.get("content") {
+                        Some(serde_json::Value::String(s)) => s.clone(),
+                        Some(serde_json::Value::Array(items)) => items
+                            .iter()
+                            .map(|c| c.get("text").and_then(|t| t.as_str()).unwrap_or("").to_string())
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                        _ => String::new(),
+                    };
+                    out.push(json!({
+                        "type": "tool_result",
+                        "tool_use_id": b.get("tool_use_id"),
+                        "is_error": b.get("is_error"),
+                        "content": truncate_chars(&flat, HISTORY_SLIM_RESULT_MAX),
+                    }));
+                }
+                // redacted_thinking / image / document 等手机不渲染,直接丢。
+                _ => {}
+            }
+        }
+    }
+    slim.insert("content".to_string(), json!(out));
+    let message = serde_json::Value::Object(slim);
+    match v {
+        ClaudeEventPayload::User { .. } => ClaudeEventPayload::User { message },
+        ClaudeEventPayload::Assistant { .. } => ClaudeEventPayload::Assistant { message },
+        _ => unreachable!(),
+    }
+}
+
 /// `read_claude_history_events` 返回:events(最多上限条,取**末尾**段=最近上下文)+ total(全会话
 /// 命中事件数,total > events.len 时前端提示「仅回填最近部分」)。camelCase 对齐前端。
 #[derive(serde::Serialize)]
@@ -1224,17 +1809,7 @@ pub struct ClaudeHistoryEvents {
 #[tauri::command]
 pub async fn read_claude_history_events(session_id: String) -> Result<ClaudeHistoryEvents, String> {
     tokio::task::spawn_blocking(move || {
-        let home = dirs::home_dir().ok_or_else(|| "home dir not available".to_string())?;
-        let root = home.join(".claude").join("projects");
-        // 递归找 stem 恰等 session_id 的 jsonl(全等比对,防 uuid 前缀误命中)。
-        let want = format!("{session_id}.jsonl");
-        let mut found: Option<std::path::PathBuf> = None;
-        crate::system::commands::walk_jsonl(&root, &mut |p| {
-            if found.is_none() && p.file_name().map(|s| s.to_str() == Some(want.as_str())).unwrap_or(false) {
-                found = Some(p.to_path_buf());
-            }
-        });
-        let file = found.ok_or_else(|| format!("claude session file not found: {session_id}"))?;
+        let file = find_claude_session_file(&session_id)?;
         let f = std::fs::File::open(&file).map_err(|e| format!("open {}: {e}", file.display()))?;
         let mut all: Vec<ClaudeEventPayload> = Vec::new();
         for line in std::io::BufReader::new(f).lines() {
@@ -1269,6 +1844,148 @@ pub async fn read_claude_history_events(session_id: String) -> Result<ClaudeHist
     })
     .await
     .map_err(|e| format!("join history read task: {e}"))?
+}
+
+/// 在 `~/.claude/projects` 下递归定位 stem 恰等 session_id 的 jsonl(全等比对,防 uuid 前缀
+/// 误命中)。`read_claude_history_events` 与 `fork_claude_session` 共用。
+fn find_claude_session_file(session_id: &str) -> Result<std::path::PathBuf, String> {
+    let home = dirs::home_dir().ok_or_else(|| "home dir not available".to_string())?;
+    let root = home.join(".claude").join("projects");
+    let want = format!("{session_id}.jsonl");
+    let mut found: Option<std::path::PathBuf> = None;
+    crate::system::commands::walk_jsonl(&root, &mut |p| {
+        if found.is_none() && p.file_name().map(|s| s.to_str() == Some(want.as_str())).unwrap_or(false) {
+            found = Some(p.to_path_buf());
+        }
+    });
+    found.ok_or_else(|| format!("claude session file not found: {session_id}"))
+}
+
+/// user 行的「对话全文」(与前端 ClaudePane 回溯弹窗同构的取法):content 为 block 数组时拼
+/// text block(用 "" 连接,多行消息单 block 内含换行不受影响);str/无 text block 返回 None
+/// (tool_result-only 行、compact 总结 str 行、command 标记行均非「用户输入」)。
+fn user_line_text(v: &serde_json::Value) -> Option<String> {
+    let content = v.get("message")?.get("content")?;
+    match content {
+        serde_json::Value::Array(blocks) => {
+            let texts: Vec<&str> = blocks
+                .iter()
+                .filter_map(|b| {
+                    if b.get("type").and_then(|t| t.as_str()) == Some("text") {
+                        b.get("text").and_then(|t| t.as_str())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            if texts.is_empty() { None } else { Some(texts.join("")) }
+        }
+        _ => None,
+    }
+}
+
+/// `fork_claude_session` 的返回:camelCase 对齐前端。
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForkClaudeSessionResult {
+    /// 分叉出的新会话 id。`None` = 截断点之前无对话内容(fork 是空壳,resume 无意义),
+    /// 前端走 `/clear` 等价路径(语义相同:空上下文重开)。
+    pub new_session_id: Option<String>,
+}
+
+/// 回溯到某条历史消息:把当前会话 jsonl **截断复制**成新会话文件(分叉),返回新 session id,
+/// 前端 `resumeSession(new_id)` kill 旧进程 + `--resume` 拉起分叉 -> 上下文与消息流真正回到
+/// 该消息之前(实测 glm 2.1.235 `--resume` 按文件加载上下文且 session id 不变,2026-10-21
+/// fork 验证通过;对齐 claude code 自带 rewind 的「分叉 transcript」语义,替换旧「/clear 全清
+/// + 回填输入框」——上下文全丢、消息流清空,用户实测「清空了也没回溯成功」)。
+///
+/// 定位截断点:与前端弹窗同构——找第 `occurrence`(0-based,同文本第几次出现)条「用户输入」
+/// user 行(非 sidechain/meta、block 数组含 text block、拼接全文 == `text` 完全相等),该行
+/// **之前**(不含)全部复制。stream-json 不回显用户消息、UI user 消息是乐观插入的自生成 id,
+/// 无法走 uuid,同文本 occurrence 是唯一稳定映射(UI 顺序 == jsonl 行顺序)。
+///
+/// 复制时逐行覆写 `sessionId` 为新 id(自洽;实测改写后 resume 正常);解析失败的行原样保留。
+#[tauri::command]
+pub async fn fork_claude_session(
+    session_id: String,
+    text: String,
+    occurrence: usize,
+) -> Result<ForkClaudeSessionResult, String> {
+    tokio::task::spawn_blocking(move || {
+        let file = find_claude_session_file(&session_id)?;
+        let content = std::fs::read_to_string(&file).map_err(|e| format!("read {}: {e}", file.display()))?;
+        let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
+
+        // 找第 occurrence 条全文 == text 的用户输入行。
+        let mut cut: Option<usize> = None;
+        let mut seen = 0usize;
+        for (i, line) in lines.iter().enumerate() {
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+            if v.get("type").and_then(|t| t.as_str()) != Some("user")
+                || v.get("isSidechain").and_then(|b| b.as_bool()).unwrap_or(false)
+                || v.get("isMeta").and_then(|b| b.as_bool()).unwrap_or(false)
+            {
+                continue;
+            }
+            if user_line_text(&v).as_deref() == Some(text.as_str()) {
+                if seen == occurrence {
+                    cut = Some(i);
+                    break;
+                }
+                seen += 1;
+            }
+        }
+        let cut = cut.ok_or_else(|| {
+            format!("rewind target not found in session {session_id} (occurrence {occurrence})")
+        })?;
+
+        // 截断点前无对话行(assistant / 用户输入 / tool_result)→ fork 是空壳,交给调用方走 /clear。
+        let has_conversation = lines[..cut].iter().any(|line| {
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { return false };
+            if v.get("isSidechain").and_then(|b| b.as_bool()).unwrap_or(false)
+                || v.get("isMeta").and_then(|b| b.as_bool()).unwrap_or(false)
+            {
+                return false;
+            }
+            match v.get("type").and_then(|t| t.as_str()) {
+                Some("assistant") => true,
+                Some("user") => {
+                    let content = v.get("message").and_then(|m| m.get("content"));
+                    matches!(content, Some(serde_json::Value::Array(_)))
+                }
+                _ => false,
+            }
+        });
+        if !has_conversation {
+            return Ok(ForkClaudeSessionResult { new_session_id: None });
+        }
+
+        // 复制 [0, cut) 行到同目录新文件,逐行覆写 sessionId。
+        let new_id = uuid::Uuid::new_v4().to_string();
+        let mut out = String::with_capacity(content.len());
+        for line in &lines[..cut] {
+            let rewritten = match serde_json::from_str::<serde_json::Value>(line) {
+                Ok(mut v) => {
+                    if let Some(sid) = v.get_mut("sessionId") {
+                        *sid = serde_json::Value::String(new_id.clone());
+                    }
+                    serde_json::to_string(&v).map_err(|e| format!("reserialize line: {e}"))?
+                }
+                Err(_) => (*line).to_string(),
+            };
+            out.push_str(&rewritten);
+            out.push('\n');
+        }
+        let dest = file.with_file_name(format!("{new_id}.jsonl"));
+        std::fs::write(&dest, out).map_err(|e| format!("write {}: {e}", dest.display()))?;
+        log::info!(
+            "fork_claude_session: {session_id} -> {new_id} (cut at line {cut}/{})",
+            lines.len()
+        );
+        Ok(ForkClaudeSessionResult { new_session_id: Some(new_id) })
+    })
+    .await
+    .map_err(|e| format!("join fork task: {e}"))?
 }
 
 /// 本地工具执行输出上限(字符):超长截尾保头(claude Bash 工具同思路,防巨输出打爆 IPC/UI)。

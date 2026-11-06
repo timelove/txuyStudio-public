@@ -1,26 +1,36 @@
 mod claude;
 mod codex;
 mod filetree;
+mod providers;
 mod pty;
+mod relay;
 mod shell_run;
 mod state;
 mod system;
 mod windows;
 
+use claude::providers_mirror::save_providers_snapshot;
 use claude::commands::{
-    claude_settings_changed, exec_claude_tool_local, get_claude_config_path, get_claude_session_model,
-    kill_claude, list_claude_models, read_claude_history_events, send_claude_message, set_claude_model,
-    start_claude_session,
+    claude_settings_changed, exec_claude_tool_local, fork_claude_session, get_claude_config_path,
+    get_claude_session_model, interrupt_claude_turn, kill_claude, list_claude_catalog_models,
+    list_claude_models,
+    read_claude_history_events, read_claude_settings_env, request_claude_context_usage,
+    respond_claude_permission, send_claude_message, set_claude_model, start_claude_session,
+    write_claude_settings_env,
 };
 use claude::ClaudeRegistry;
 use codex::commands::{
-    codex_config_changed, get_codex_current_model, get_codex_session_model, kill_codex,
-    list_codex_models, send_codex_message, set_codex_session_model,
+    apply_codex_provider, codex_config_changed, get_codex_current_model, get_codex_session_model,
+    kill_codex, list_codex_models, read_codex_provider_info, respond_codex_approval,
+    send_codex_message, set_codex_session_model,
 };
 use codex::CodexRegistry;
 use filetree::commands::{ensure_dir, list_dir, list_files, read_file, start_fs_watch, stop_fs_watch, write_file};
 use filetree::FsWatcherRegistry;
 use log::LevelFilter;
+use providers::balance::query_provider_balance;
+use providers::commands::probe_provider_endpoint;
+use relay::{get_relay_status, save_relay_config, relay_login, relay_register, relay_change_password, relay_logout};
 use pty::commands::{kill_pty, resize_pty, spawn_pty, write_pty};
 use pty::PtyRegistry;
 use shell_run::commands::{kill_shell_command, run_shell_command};
@@ -33,7 +43,9 @@ use state::commands::{
 use system::commands::{
     check_commands_installed, check_dev_environment, delete_ai_cli_session,
     fix_defender_exclusions, get_ai_cli_session_messages, get_git_branch, get_perf_stats,
-    get_system_memory, list_ai_cli_providers, list_ai_cli_sessions, reveal_in_folder,
+    get_system_memory, list_ai_cli_providers, list_ai_cli_sessions, list_usage_rollups, list_ai_activity,
+    reveal_in_folder,
+    list_request_log,
 };
 use std::collections::HashSet;
 use std::sync::Mutex;
@@ -245,6 +257,11 @@ pub fn run() {
                 if windows::is_workspace_window(label) {
                     windows::archive_workspace_projects(window.app_handle(), label);
                 }
+                // 主窗口关闭:兜底补存窗口 bounds(#132)——前端防抖 350ms 内的最后一次
+                // resize/移动在此同步落盘(紧接退出流程,没有异步机会)。
+                if label == "main" {
+                    windows::persist_main_bounds_on_close(window.app_handle(), window);
+                }
             }
         })
         .setup(|app| {
@@ -289,7 +306,13 @@ pub fn run() {
                 snapshot.projects.len(),
                 snapshot.active_project_id
             );
+            // 主窗口大小/位置恢复(#132):取走 bounds 后再 manage(WindowBounds 是 Copy),
+            // 在下方任何 show 之前应用,首帧即上次大小(不会先默认尺寸再跳变)。
+            let main_bounds = snapshot.main_window_bounds;
             app.manage(state::AppState::new(snapshot));
+            if let Some(b) = main_bounds {
+                windows::restore_main_window_bounds(&app.handle(), b);
+            }
 
             // tauri 2.11.3 内存缓解(H3):Pending::Emit 队列只在「存在 Rust 侧监听且被回调」
             // 时排水(event/listener.rs 的 maybe_pending),本项目无任何 Rust 监听 -> 并发 emit
@@ -297,8 +320,25 @@ pub fn run() {
             // 条件成立,零成本(上游修复前的缓解;PTY 输出已另行合批降消息数,见读循环注释)。
             let _ = app.listen("mx-drain", |_| {});
 
+            // AI 事件总线:把本地 claude-event/codex-event 转投 broadcast,供中继转发给手机。
+            // 必须早于 relay 任务启动(任务一上线就订阅)。
+            relay::bus::install(app.handle());
+
             // 注册「已 show 窗口」记录集(供 show_window 命令 + 兜底定时器去重)。
             app.manage(WindowsShown(Mutex::new(HashSet::new())));
+
+            // 移动伴侣出站中继:加载 relay.json(含本机身份),已配置则后台任务连接
+            // (纯出站零防火墙;任务断线自愈,换配置经 generation 换代号即时生效)。
+            match relay::config::load_or_init(app.handle()) {
+                Ok(relay_cfg) => {
+                    app.manage(std::sync::Arc::new(relay::RelayHandle::new(relay_cfg)));
+                    relay::spawn_task(app.handle());
+                }
+                Err(e) => {
+                    log::warn!("[relay] 配置加载失败,功能停用: {e}");
+                    app.manage(std::sync::Arc::new(relay::RelayHandle::new(Default::default())));
+                }
+            }
 
             // 白屏消除策略(dev / release 区分):
             //
@@ -356,21 +396,46 @@ pub fn run() {
             start_claude_session,
             // 恢复会话历史回填:读 jsonl 转与实时事件同构的序列(glm 代理 --resume 不重放历史的兜底)
             read_claude_history_events,
+            // 回溯历史消息:jsonl 截断分叉成新会话文件,前端 --resume 分叉实现真回溯
+            fork_claude_session,
             // 批准被拒工具时本地执行(Bash/Edit/Write),结果经 tool_result 原地回传(claude cli 同语义)
             exec_claude_tool_local,
             send_claude_message,
+            interrupt_claude_turn,
+            request_claude_context_usage,
+            respond_claude_permission,
             get_claude_config_path,
             get_claude_session_model,
             set_claude_model,
             kill_claude,
             claude_settings_changed,
             list_claude_models,
-            // codex 自渲染对话(每轮短命 codex exec --json + resume 续接;send 即 spawn,
-            // 事件流见 codex/mod.rs;model 目录读 cc-switch-model-catalog.json)
+            list_claude_catalog_models,
+            read_claude_settings_env,
+            write_claude_settings_env,
+            save_providers_snapshot,
+            // codex 自渲染对话(常驻 codex app-server 长连接;send=ensure 进程+thread/start|
+            // resume+turn/start,事件流见 codex/mod.rs;审批响应/respond;model 目录读 catalog)
             send_codex_message,
             kill_codex,
+            respond_codex_approval,
             list_codex_models,
             get_codex_current_model,
+            apply_codex_provider,
+            read_codex_provider_info,
+            // 供应商端点探测(拉模型列表 + 延迟测速合一,走后端避开 WebView CORS)
+            probe_provider_endpoint,
+            query_provider_balance,
+            // 移动伴侣(出站中继状态/配置保存+重启任务)
+            get_relay_status,
+            save_relay_config,
+            // 移动伴侣:中继账密登录(登录/注册/改密/登出,v4 纯账密)
+            relay_login,
+            relay_register,
+            relay_change_password,
+            relay_logout,
+            // 请求日志(用量「请求日志」页:逐请求明细,倒序 3000 条上限)
+            list_request_log, list_ai_activity,
             codex_config_changed,
             get_codex_session_model,
             set_codex_session_model,
@@ -403,6 +468,7 @@ pub fn run() {
             check_commands_installed,
             list_ai_cli_providers,
             list_ai_cli_sessions,
+            list_usage_rollups,
             delete_ai_cli_session,
             get_ai_cli_session_messages,
             // 资源管理器定位文件/目录(/select 选中或打开所在文件夹)

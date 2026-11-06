@@ -1,7 +1,7 @@
 import { useTranslation } from "react-i18next";
 import { PerfPanel } from "./PerfPanel";
 import { EnvCheckSection } from "./EnvCheck";
-import { useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
@@ -14,17 +14,17 @@ import { useTheme } from "../theme/ThemeProvider";
 import type { ThemeId } from "../domain/themes";
 import { DEFAULT_FONT_SIZE, FONT_SIZE_MAX, FONT_SIZE_MIN } from "../settings";
 import { Button } from "./ui/Button";
-import {
-  Dialog,
-  DialogContent,
-  DialogTitle,
-} from "./ui/Dialog";
+import { ProviderManager } from "./ProviderManager";
+import { UsagePanel } from "./UsagePanel";
+import { RelayPanel } from "./RelayPanel";
 import { Slider, SliderRange, SliderThumb, SliderTrack } from "./ui/Slider";
 
 /**
  * 滑杆 + 左右 −/+ 步进按钮(设置面板统一规格)。
  * 点击按钮步进一个 step(浮点步进经 round 修误差,clamp 到 [min,max]);
  * 中间滑杆照常拖拽。三处滑杆(字体/模糊/暗化)共用,± 视觉与面板小按钮一致。
+ * `trailing`:+ 按钮右侧追加的内容(当前值 px/%、重置等),与滑杆同行垂直居中
+ * (2026-10-21 用户定调:数值贴着滑杆,不搁在标题行最右侧显得空)。
  */
 function StepperSlider({
   value,
@@ -33,6 +33,7 @@ function StepperSlider({
   step,
   onValueChange,
   ariaLabel,
+  trailing,
 }: {
   value: number;
   min: number;
@@ -40,13 +41,25 @@ function StepperSlider({
   step: number;
   onValueChange: (v: number) => void;
   ariaLabel: string;
+  trailing?: ReactNode;
 }) {
   // 浮点 step(0.05)累积误差:先按 step 取整回栅格,再 clamp(min/max 兜住 0.85 这类端点)。
   const clamp = (v: number) => Math.min(max, Math.max(min, Math.round(v / step) * step));
+  // ± 用 SVG 线条而非文字字形:Inter 的 −/+ 墨迹贴基线,光学中心比盒中心低 ~2px
+  // (Edge CDP 实测 2026-10-21),SVG stroke 中心=几何中心,精确落在行中心线上。
+  // 颜色用 text-(color:--*) 显式语法:text-[13px]+text-[var()] 同行会触发 v4
+  // arbitrary value 歧义丢字号(同 Button 变体旧坑)。
   const btn =
-    "grid h-5 w-5 place-items-center rounded-[var(--mx-radius-md)] text-[13px] leading-none text-[var(--mx-muted)] transition-colors hover:bg-[var(--mx-hover-bg)] hover:text-[var(--mx-text)] disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:bg-transparent disabled:hover:text-[var(--mx-muted)]";
+    "grid h-5 w-5 place-items-center rounded-[var(--mx-radius-md)] text-(color:--mx-muted) transition-colors hover:bg-[var(--mx-hover-bg)] hover:text-(color:--mx-text) disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:bg-transparent disabled:hover:text-(color:--mx-muted)";
+  const glyph = (d: string) => (
+    <svg viewBox="0 0 10 10" className="h-2.5 w-2.5" aria-hidden="true">
+      <path d={d} stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" fill="none" />
+    </svg>
+  );
   return (
-    <div className="flex items-center gap-2">
+    // max-w-[400px]:滑杆类控件不撑满内容区(字体/模糊/暗化三处共用;用户 2026-10-21
+    // 「通用里面的字体大小、背景图这种不需要宽度撑满」)。
+    <div className="flex max-w-[400px] items-center gap-2">
       <button
         type="button"
         aria-label={`- ${ariaLabel}`}
@@ -54,7 +67,7 @@ function StepperSlider({
         onClick={() => onValueChange(clamp(value - step))}
         className={btn}
       >
-        −
+        {glyph("M1.5 5h7")}
       </button>
       <Slider
         value={[value]}
@@ -77,13 +90,15 @@ function StepperSlider({
         onClick={() => onValueChange(clamp(value + step))}
         className={btn}
       >
-        +
+        {glyph("M1.5 5h7M5 1.5v7")}
       </button>
+      {trailing}
     </div>
   );
 }
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./ui/Tabs";
 import { ToggleGroup, ToggleGroupItem } from "./ui/ToggleGroup";
+import { SliderItem, SliderToggleGroup } from "./ui/SegmentSlider";
 
 /** 公开仓库地址(私有 origin 不暴露,此处指向公开 mirror)。 */
 const GITHUB_URL = "https://github.com/timelove/txuyStudio-public";
@@ -217,42 +232,61 @@ function AppUpdater({ t }: { t: (k: string, o?: Record<string, unknown>) => stri
 }
 
 /** 设置面板 tab id(打开入口可指定直达页,如更新 chip → about)。 */
-export type SettingsTab = "general" | "shortcuts" | "performance" | "about";
+export type SettingsTab = "general" | "models" | "usage" | "shortcuts" | "performance" | "about";
 
-type SettingsModalProps = {
-  /** 是否显示;false 时不渲染。 */
-  open: boolean;
+type SettingsPageProps = {
   onClose: () => void;
-  /** 打开时定位到的 tab(顶栏齿轮缺省 general;状态栏「新版本可用」点击 → about)。Dialog
-   * 关闭即卸载内容,defaultValue 每次打开取新值,无需受控切换。 */
+  /** 打开时定位到的 tab(顶栏 logo 缺省 general;状态栏「新版本可用」点击 → about)。页
+   * 面每次挂载取新值,无需受控切换。 */
   initialTab?: SettingsTab;
+  /** 标题行按下 = 拖拽手柄(AppShell 实现位置管理;按钮等交互元素内部已排除)。 */
+  onTitlePointerDown?: (e: React.MouseEvent) => void;
+  /** 双击标题行 = 回屏幕居中。 */
+  onTitleDoubleClick?: () => void;
 };
 
 /**
- * 设置面板(模态)。基于 Radix Dialog:Esc / 点遮罩 / 焦点陷阱 / scroll lock 全部内置。
- *
- * **固定尺寸 + 内部滚动**:DialogContent 固定 `h-[460px]`,中部内容区 `overflow-y-auto`
- * + `.mx-scroll`(隐藏滚动条);标题行 / Tab 条 / 底部按钮固定不滚。
- *
- * 三个 tab(Radix Tabs 受控 defaultValue):
- * - **通用**:语言 + 字体大小。
- * - **快捷键**:快捷键分组列表。
- * - **关于**:产品描述 + GitHub 仓库链接 + 版本/协议/技术栈。
+ * 设置弹窗内容(2026-10-21 页化→IDEA 式居中模态:AppShell 挂 fixed 遮罩+居中弹窗壳,
+ * 壳体 920x660 圆角卡片;遮罩**不响应点击关闭**,仅 Esc / ✕ / 底部关闭退出)。本组件
+ * 只管弹窗内部:标题行 + 左侧竖导航(6 页)+ 内容区(固定高内滚动)+ 底部关闭。中央
+ * pane 在遮罩下保持挂载运行(transport 池/xterm buffer 不丢)。
  */
-export function SettingsModal({ open, onClose, initialTab }: SettingsModalProps) {
+export function SettingsPage({ initialTab, onClose, onTitlePointerDown, onTitleDoubleClick }: SettingsPageProps) {
   const { t } = useTranslation();
   const { locale, changeLanguage } = useI18n();
-  const { fontSize, changeFontSize, bgSetting, changeBgSetting } = useSettings();
+  const { fontSize, changeFontSize, bgSetting, changeBgSetting, showPromptBanner, changeShowPromptBanner } = useSettings();
   const { themeId, changeTheme, themes } = useTheme();
+  // 主题切换控件的 ref:View Transitions 圆形 reveal 的触发点(控件中心)。
+  const themeGroupRef = useRef<HTMLDivElement>(null);
+  // 模型 tab 的 Claude/Codex 二级段选(滑块版;替换 Radix Tabs,切换即条件渲染)。
+  const [modelKind, setModelKind] = useState<"claude" | "codex">("claude");
+  // Esc 退出弹窗(与 ✕/底部关闭同效;模态下遮罩不吃点击,Esc 是键盘侧的关闭路径)。
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  // 挂载即把焦点收到弹窗壳(tabIndex=-1):从 xterm textarea(终端 IME 上下文,常年
+  // 英文态)完整走一次 blur→focus,刷新 Windows IME 状态机——否则从终端直接点开设置
+  // 时,表单输入框的中文输入可能仍卡在终端的英文上下文(用户实测「模型输入框经常
+  // 打不出中文」,2026-11-02)。
+  const shellRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    shellRef.current?.focus({ preventScroll: true });
+  }, []);
 
   return (
-    <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="flex h-[460px] w-[440px] max-w-[90vw] flex-col overflow-hidden px-0 py-0">
-        {/* Radix 要求 Content 内有 Title(无障碍);视觉标题用原 div,Title 走 sr-only 消 warn。 */}
-        <DialogTitle className="sr-only">{t("settings.title")}</DialogTitle>
-
-        {/* 标题行(固定) */}
-        <div className="flex shrink-0 items-center justify-between px-4 pb-2.5 pt-3">
+    <div ref={shellRef} tabIndex={-1} className="flex h-full min-h-0 flex-col outline-none">
+        {/* 标题行(固定)= 弹窗拖拽手柄(cursor-move;✕ 按钮 closest 排除不误拖;
+            双击回屏幕居中)。 */}
+        <div
+          className="flex shrink-0 cursor-move items-center justify-between px-5 pb-2.5 pt-3"
+          onMouseDown={onTitlePointerDown}
+          onDoubleClick={onTitleDoubleClick}
+        >
           <div className="text-[13px] font-semibold text-[var(--mx-text)]">{t("settings.title")}</div>
           <Button
             variant="ghost"
@@ -265,49 +299,40 @@ export function SettingsModal({ open, onClose, initialTab }: SettingsModalProps)
           </Button>
         </div>
 
-        <Tabs defaultValue={initialTab ?? "general"} className="flex min-h-0 flex-1 flex-col">
-          {/* tab 条(固定):通用 / 快捷键 / 关于。active 走 cyan 下划线(Radix data-state=active)。 */}
-          <TabsList className="mx-4 flex shrink-0 gap-4 border-b border-[var(--mx-border)]">
-            <TabsTrigger
-              value="general"
-              className="border-b-2 border-transparent px-1 pb-1.5 text-[12px] text-[var(--mx-muted)] transition-colors hover:text-[var(--mx-text)] data-[state=active]:border-[var(--mx-accent)] data-[state=active]:text-[var(--mx-text)]"
-            >
-              {t("settings.tab.general")}
-            </TabsTrigger>
-            <TabsTrigger
-              value="shortcuts"
-              className="border-b-2 border-transparent px-1 pb-1.5 text-[12px] text-[var(--mx-muted)] transition-colors hover:text-[var(--mx-text)] data-[state=active]:border-[var(--mx-accent)] data-[state=active]:text-[var(--mx-text)]"
-            >
-              {t("settings.tab.shortcuts")}
-            </TabsTrigger>
-            <TabsTrigger
-              value="performance"
-              className="border-b-2 border-transparent px-1 pb-1.5 text-[12px] text-[var(--mx-muted)] transition-colors hover:text-[var(--mx-text)] data-[state=active]:border-[var(--mx-accent)] data-[state=active]:text-[var(--mx-text)]"
-            >
-              {t("settings.tab.performance")}
-            </TabsTrigger>
-            <TabsTrigger
-              value="about"
-              className="border-b-2 border-transparent px-1 pb-1.5 text-[12px] text-[var(--mx-muted)] transition-colors hover:text-[var(--mx-text)] data-[state=active]:border-[var(--mx-accent)] data-[state=active]:text-[var(--mx-text)]"
-            >
-              {t("settings.tab.about")}
-            </TabsTrigger>
+        <Tabs defaultValue={initialTab ?? "general"} className="flex min-h-0 flex-1">
+          {/* 左侧竖导航(macOS 系统设置式):页化后 tab 从顶部横条转竖列,active 走
+              accent soft 底(与 pill 段选同语言)。w-[120px]:6 项最长「快捷键」3 字,
+              168 显宽(2026-10-21 用户在用量页提出收窄,内容区让宽)。 */}
+          <TabsList className="flex w-[120px] shrink-0 flex-col items-stretch gap-0.5 border-r border-[var(--mx-border)] px-2 py-1.5">
+            {(["general", "models", "usage", "relay", "shortcuts", "performance", "about"] as const).map((v) => (
+              <TabsTrigger
+                key={v}
+                value={v}
+                className="justify-start rounded-[var(--mx-radius-md)] px-2.5 py-1.5 text-[12px] text-[var(--mx-muted)] transition-colors hover:bg-[var(--mx-hover-bg)] hover:text-[var(--mx-text)] data-[state=active]:bg-[var(--mx-accent-soft)] data-[state=active]:font-medium data-[state=active]:text-[var(--mx-accent-bright)]"
+              >
+                {t(`settings.tab.${v}`)}
+              </TabsTrigger>
+            ))}
           </TabsList>
 
-          {/* 内容区(固定高内滚动,无滚动条 .mx-scroll) */}
-          <div className="mx-scroll min-h-0 flex-1 overflow-y-auto px-4 py-3">
+          {/* 内容区(固定高内滚动,无滚动条 .mx-scroll;2026-10-21 用户回退限宽居中:撑满) */}
+          <div className="mx-scroll min-h-0 flex-1 overflow-y-auto px-5 py-4">
             {/* 通用 tab:语言 + 字体大小 */}
-            <TabsContent value="general" className="focus-visible:outline-none">
+            <TabsContent value="general" className="mx-rise-in focus-visible:outline-none">
               {/* 环境体检分区:Defender 排除项只读检测(防 pnpm 等被杀软拦截)。 */}
               <EnvCheckSection />
               {/* 主题分区:单选分段控件(ToggleGroup)。数据驱动 THEMES,切换即时生效(CSS data-theme + 终端热切)。 */}
               <section className="mb-4">
                 <div className="mb-1 text-[10px] uppercase tracking-wide text-[var(--mx-faint)]">{t("settings.theme.title")}</div>
                 <ToggleGroup
+                  ref={themeGroupRef}
                   type="single"
                   value={themeId}
                   onValueChange={(v) => {
-                    if (v) changeTheme(v as ThemeId);
+                    if (!v) return;
+                    // reveal 触发点 = 控件中心(anime.js 圆形扩散的 origin)。
+                    const r = themeGroupRef.current?.getBoundingClientRect();
+                    changeTheme(v as ThemeId, r ? { x: r.left + r.width / 2, y: r.top + r.height / 2 } : undefined);
                   }}
                 >
                   {themes.map((th) => (
@@ -336,22 +361,9 @@ export function SettingsModal({ open, onClose, initialTab }: SettingsModalProps)
                 </ToggleGroup>
               </section>
 
-              {/* 字体大小分区:shadcn Slider(终端 + Monaco + md 预览统一一个值)+ 数值 + 重置。 */}
+              {/* 字体大小分区:shadcn Slider(终端 + Monaco + md 预览统一一个值)+ 数值/重置随行。 */}
               <section>
-                <div className="mb-2 flex items-center justify-between">
-                  <span className="text-[10px] uppercase tracking-wide text-[var(--mx-faint)]">{t("settings.fontSize.title")}</span>
-                  <div className="flex items-center gap-2">
-                    <span className="text-[11px] tabular-nums text-[var(--mx-text)]">{fontSize}px</span>
-                    <button
-                      type="button"
-                      onClick={() => changeFontSize(DEFAULT_FONT_SIZE)}
-                      disabled={fontSize === DEFAULT_FONT_SIZE}
-                      className="text-[11px] text-[var(--mx-faint)] transition-colors hover:text-[var(--mx-text)] disabled:opacity-40 disabled:hover:text-[var(--mx-faint)]"
-                    >
-                      {t("settings.fontSize.reset")}
-                    </button>
-                  </div>
-                </div>
+                <div className="mb-2 text-[10px] uppercase tracking-wide text-[var(--mx-faint)]">{t("settings.fontSize.title")}</div>
                 <StepperSlider
                   value={fontSize}
                   min={FONT_SIZE_MIN}
@@ -359,6 +371,21 @@ export function SettingsModal({ open, onClose, initialTab }: SettingsModalProps)
                   step={1}
                   onValueChange={changeFontSize}
                   ariaLabel={t("settings.fontSize.title")}
+                  trailing={
+                    <>
+                      {/* w-9 定宽:拖动滑杆时数值位数变化不抖动布局。h-5+leading-none:与 ± 按钮
+                          同高同行盒,光学中心线对齐(裸 items-center 时小字号数字视觉偏上)。 */}
+                      <span className="flex h-5 w-9 items-center justify-end leading-none text-[11px] tabular-nums text-(color:--mx-text)">{fontSize}px</span>
+                      <button
+                        type="button"
+                        onClick={() => changeFontSize(DEFAULT_FONT_SIZE)}
+                        disabled={fontSize === DEFAULT_FONT_SIZE}
+                        className="flex h-5 items-center leading-none text-[11px] text-(color:--mx-faint) transition-colors hover:text-(color:--mx-text) disabled:opacity-40 disabled:hover:text-(color:--mx-faint)"
+                      >
+                        {t("settings.fontSize.reset")}
+                      </button>
+                    </>
+                  }
                 />
                 <div className="mt-1 flex justify-between text-[10px] tabular-nums text-[var(--mx-faint)]">
                   <span>{FONT_SIZE_MIN}</span>
@@ -405,11 +432,8 @@ export function SettingsModal({ open, onClose, initialTab }: SettingsModalProps)
                     <div className="mb-0.5 truncate text-[10px] text-[var(--mx-faint)]" title={bgSetting.path}>
                       {bgSetting.path}
                     </div>
-                    {/* 模糊滑杆:0-40px。 */}
-                    <div className="mb-1 flex items-center justify-between text-[10px] text-[var(--mx-faint)]">
-                      <span>{t("settings.bg.blur")}</span>
-                      <span className="tabular-nums">{bgSetting.blur}px</span>
-                    </div>
+                    {/* 模糊滑杆:0-40px。数值随行(贴滑杆右端,不搁标题行最右)。 */}
+                    <div className="mb-1 text-[10px] text-[var(--mx-faint)]">{t("settings.bg.blur")}</div>
                     <StepperSlider
                       value={bgSetting.blur}
                       min={0}
@@ -417,12 +441,10 @@ export function SettingsModal({ open, onClose, initialTab }: SettingsModalProps)
                       step={1}
                       onValueChange={(v) => changeBgSetting({ blur: v })}
                       ariaLabel={t("settings.bg.blur")}
+                      trailing={<span className="flex h-5 w-9 items-center justify-end leading-none text-[11px] tabular-nums text-(color:--mx-muted)">{bgSetting.blur}px</span>}
                     />
                     {/* 暗化滑杆:0-0.85。 */}
-                    <div className="mb-1 mt-2 flex items-center justify-between text-[10px] text-[var(--mx-faint)]">
-                      <span>{t("settings.bg.dim")}</span>
-                      <span className="tabular-nums">{Math.round(bgSetting.dim * 100)}%</span>
-                    </div>
+                    <div className="mb-1 mt-2 text-[10px] text-[var(--mx-faint)]">{t("settings.bg.dim")}</div>
                     <StepperSlider
                       value={bgSetting.dim}
                       min={0}
@@ -430,15 +452,86 @@ export function SettingsModal({ open, onClose, initialTab }: SettingsModalProps)
                       step={0.05}
                       onValueChange={(v) => changeBgSetting({ dim: v })}
                       ariaLabel={t("settings.bg.dim")}
+                      trailing={<span className="flex h-5 w-9 items-center justify-end leading-none text-[11px] tabular-nums text-(color:--mx-muted)">{Math.round(bgSetting.dim * 100)}%</span>}
                     />
                   </>
                 )}
                 <div className="mt-1.5 text-[10px] text-[var(--mx-faint)]">{t("settings.bg.hint")}</div>
               </section>
+
+              {/* 消息流悬浮条分区:开关关闭后 AI 对话流顶部不再吸附「当前问题」横幅。
+                  无现成 Switch 组件,自写极简 toggle(轨道 + 滑块,on=accent)。 */}
+              <section className="mt-4 border-t border-[var(--mx-border)] pt-3">
+                <div className="flex items-center justify-between">
+                  <div className="min-w-0 pr-3">
+                    <div className="text-[10px] uppercase tracking-wide text-[var(--mx-faint)]">{t("settings.promptBanner.title")}</div>
+                    <div className="mt-1 text-[10px] text-[var(--mx-faint)]">{t("settings.promptBanner.hint")}</div>
+                  </div>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={showPromptBanner}
+                    aria-label={t("settings.promptBanner.title")}
+                    onClick={() => changeShowPromptBanner(!showPromptBanner)}
+                    className={`relative h-5 w-9 shrink-0 rounded-full transition-colors ${
+                      showPromptBanner ? "bg-(color:--mx-accent)" : "bg-(color:--mx-border-strong)"
+                    }`}
+                  >
+                    <span
+                      className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-[left] ${
+                        showPromptBanner ? "left-[18px]" : "left-0.5"
+                      }`}
+                    />
+                  </button>
+                </div>
+              </section>
+            </TabsContent>
+
+            {/* 模型 tab:内置供应商管理,Claude 与 Codex 各自独立列表/切换(ProviderManager
+                按 kind 分流到各自 domain;两侧机制差异见 domain/claudeProviders|codexProviders)。 */}
+            <TabsContent value="models" className="mx-rise-in focus-visible:outline-none">
+              {/* 二级 tab:Claude / Codex 各自独立列表/切换(ProviderManager 按 kind 分流;
+                  两侧机制差异见 domain/claudeProviders|codexProviders)。pill 式与一级
+                  下划线 tab 区分层级。 */}
+              {/* pill 滑块段选(anime.js 风):滑块在 Claude/Codex 间平移;外框是 pill 槽,
+                  ToggleGroup 自身边框/底色清零只留布局(样式由槽承载)。 */}
+              <div className="mb-3 inline-flex rounded-full border border-[var(--mx-border)] bg-[var(--mx-surface-2)] p-0.5">
+                <SliderToggleGroup
+                  pill
+                  value={modelKind}
+                  onValueChange={(v) => {
+                    if (v) setModelKind(v as "claude" | "codex");
+                  }}
+                  className="border-0 bg-transparent p-0"
+                >
+                  {(["claude", "codex"] as const).map((k) => (
+                    <SliderItem
+                      key={k}
+                      value={k}
+                      className="rounded-full px-3 py-1 text-[11px] text-[var(--mx-muted)] transition-colors data-[state=on]:text-[var(--mx-accent-bright)]"
+                    >
+                      {k === "claude" ? "Claude" : "Codex"}
+                    </SliderItem>
+                  ))}
+                </SliderToggleGroup>
+              </div>
+              {modelKind === "claude" ? <ProviderManager kind="claude" /> : <ProviderManager kind="codex" key="codex" />}
+              {/* key="codex":claude↔codex 切换强制 remount——同一组件类型不加 key 时 React
+                  复用实例,claude 的 draft 编辑态会泄漏进 codex 实例(2026-11-04 探针实测:
+                  pill 切 Codex 后仍显示 claude 编辑表单,还叠出 codex 的推理力度字段)。 */}
+            </TabsContent>
+
+            {/* 用量 tab:近 N 天 claude/codex 会话 token 用量 + 估算费用(见 UsagePanel)。 */}
+            <TabsContent value="relay" className="mx-rise-in focus-visible:outline-none">
+              <RelayPanel />
+            </TabsContent>
+
+            <TabsContent value="usage" className="mx-rise-in focus-visible:outline-none">
+              <UsagePanel />
             </TabsContent>
 
             {/* 快捷键 tab */}
-            <TabsContent value="shortcuts" className="focus-visible:outline-none">
+            <TabsContent value="shortcuts" className="mx-rise-in focus-visible:outline-none">
               <div className="space-y-2">
                 {SHORTCUT_GROUPS.map((group) => (
                   <div key={group.title}>
@@ -462,12 +555,12 @@ export function SettingsModal({ open, onClose, initialTab }: SettingsModalProps)
             </TabsContent>
 
             {/* 性能 tab:应用内性能检测(挂载即采样/卸载即停,非常驻)。 */}
-            <TabsContent value="performance" className="focus-visible:outline-none">
+            <TabsContent value="performance" className="mx-rise-in focus-visible:outline-none">
               <PerfPanel />
             </TabsContent>
 
             {/* 关于 tab:产品描述 + GitHub 仓库链接 + 版本/协议/技术栈 */}
-            <TabsContent value="about" className="focus-visible:outline-none">
+            <TabsContent value="about" className="mx-rise-in focus-visible:outline-none">
               {/* 品牌标识:brand-gradient 方块 + 产品名 + 版本 */}
               <div className="mb-3 flex items-center gap-2.5">
                 <div className="grid h-10 w-10 shrink-0 place-items-center rounded-[var(--mx-radius-lg)] text-[18px] font-extrabold text-white bg-[var(--mx-brand-gradient)] shadow-[0_0_0_1px_var(--mx-selected-border),0_1px_3px_rgba(0,0,0,0.4)]">
@@ -510,13 +603,12 @@ export function SettingsModal({ open, onClose, initialTab }: SettingsModalProps)
           </div>
         </Tabs>
 
-        {/* 底部:关闭按钮(顶部已有 ✕,此为兜底)。固定不滚。 */}
-        <div className="flex shrink-0 justify-end px-4 pb-3 pt-2">
-          <Button size="sm" variant="outline" onClick={onClose}>
-            {t("common.close")}
-          </Button>
-        </div>
-      </DialogContent>
-    </Dialog>
+      {/* 底部:关闭按钮(顶部已有 ✕,此为兜底)。固定不滚。 */}
+      <div className="flex shrink-0 justify-end px-5 pb-3 pt-2">
+        <Button size="sm" variant="outline" onClick={onClose}>
+          {t("common.close")}
+        </Button>
+      </div>
+    </div>
   );
 }

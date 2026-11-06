@@ -10,7 +10,7 @@ import type { ITheme } from "@xterm/xterm";
  * 默认 `midnight` = 改动前的深蓝/slate 配色(变量值与原硬编码一致,观感零变化)。
  */
 
-export type ThemeId = "midnight" | "one-dark" | "intellij-light" | "intellij-dark";
+export type ThemeId = "midnight" | "one-dark" | "intellij-light" | "intellij-dark" | "cream-gold" | "indigo-night";
 
 export const DEFAULT_THEME_ID: ThemeId = "midnight";
 
@@ -20,6 +20,8 @@ export const KNOWN_THEME_IDS: readonly ThemeId[] = [
   "one-dark",
   "intellij-light",
   "intellij-dark",
+  "cream-gold",
+  "indigo-night",
 ];
 
 /** UI 列表(数据驱动 SettingsModal 的主题 ToggleGroup)。labelKey 走 i18n。 */
@@ -28,6 +30,8 @@ export const THEMES: { id: ThemeId; labelKey: string }[] = [
   { id: "one-dark", labelKey: "theme.one-dark" },
   { id: "intellij-light", labelKey: "theme.intellijLight" },
   { id: "intellij-dark", labelKey: "theme.intellijDark" },
+  { id: "cream-gold", labelKey: "theme.creamGold" },
+  { id: "indigo-night", labelKey: "theme.indigoNight" },
 ];
 
 /** 把任意字符串归一为合法 ThemeId(未知/空 -> 默认)。 */
@@ -35,6 +39,14 @@ export function normalizeThemeId(raw: string | null | undefined): ThemeId {
   return (KNOWN_THEME_IDS as readonly string[]).includes(raw ?? "")
     ? (raw as ThemeId)
     : DEFAULT_THEME_ID;
+}
+
+/** 浅色主题集合。背景图遮罩/玻璃化等「按明暗分叉」的视觉效果以此判定(见 AppShell 背景层)。 */
+const LIGHT_THEME_IDS: readonly ThemeId[] = ["intellij-light", "cream-gold"];
+
+/** 是否浅色主题。深色主题的背景图用黑罩压暗保白字可读;浅色主题文字是深色,须反转为白纱提亮。 */
+export function isLightTheme(id: ThemeId): boolean {
+  return LIGHT_THEME_IDS.includes(id);
 }
 
 /**
@@ -140,6 +152,57 @@ export const TERMINAL_THEMES: Record<ThemeId, ITheme> = {
     brightBlue: "#7eaef1",
     brightMagenta: "#ae8abe",
     brightCyan: "#6cdada",
+    brightWhite: "#ffffff",
+  },
+  /** 奶油金(暖纸浅色主题:米白/暖纸底 + 白卡 + 金色强调,取自用户提供的 Dark Mode Toggle
+   *  参考图浅侧;官方口径 bg #ffffff / text #333333,金色按钮 ≈ #d4a843)。终端用暖纸底
+   *  (bg 对齐 --mx-editor-bg #FAF6EC),前景深棕,ANSI 走白底可读深档 + 暖调。brightWhite
+   *  反转近黑而非近白(浅底惯例,同 intellij-light):PowerShell prompt/输入等常用
+   *  brightWhite,近白 #fffdf7 在米白底上不可见(2026-10-21 用户实测报障)。 */
+  "cream-gold": {
+    background: "#faf6ec",
+    foreground: "#3d3a33",
+    cursor: "#b8860b",
+    selectionBackground: "#ecdcb8",
+    black: "#3d3a33",
+    red: "#c25656",
+    green: "#4f7d3a",
+    yellow: "#b3851a",
+    blue: "#3056c8",
+    magenta: "#8a5cf6",
+    cyan: "#0e7490",
+    white: "#8a8378",
+    brightBlack: "#6b6558",
+    brightRed: "#d96c6c",
+    brightGreen: "#6a9a50",
+    brightYellow: "#d1a02e",
+    brightBlue: "#4f74e0",
+    brightMagenta: "#a67cf8",
+    brightCyan: "#2e9ab0",
+    brightWhite: "#3d3a33",
+  },
+  /** 午夜靛蓝(深色主题:官方口径 bg #1a1a2e / text #eaeaea,靛蓝强调 ≈ #7c83f0,取自
+   *  同一参考图深侧)。bg 对齐 --mx-editor-bg #1A1A2E,ANSI 靛蓝系和谐色。 */
+  "indigo-night": {
+    background: "#1a1a2e",
+    foreground: "#eaeaea",
+    cursor: "#7c83f0",
+    selectionBackground: "#2e2e52",
+    black: "#12122a",
+    red: "#f07178",
+    green: "#6fd08c",
+    yellow: "#f5a623",
+    blue: "#7c83f0",
+    magenta: "#a78bfa",
+    cyan: "#4cc9e0",
+    white: "#c9c9e8",
+    brightBlack: "#67678a",
+    brightRed: "#f8a0a6",
+    brightGreen: "#96e2ab",
+    brightYellow: "#ffc53d",
+    brightBlue: "#a3a8fa",
+    brightMagenta: "#c4b2fd",
+    brightCyan: "#7fdcee",
     brightWhite: "#ffffff",
   },
 };

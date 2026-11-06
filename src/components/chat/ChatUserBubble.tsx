@@ -21,7 +21,7 @@ export const ChatUserBubble = memo(function ChatUserBubble({
   t: (k: string) => string;
 }) {
   return (
-    <div className="group/message flex items-start justify-end gap-1.5">
+    <div className="mx-msg-in group/message flex items-start justify-end gap-1.5">
       <div className="min-w-0 max-w-[85%]">
         {/* 气泡右下角收小圆角(对话框朝向感;16px 大圆角 = AI 对话产品观感);user 不显示消耗时长/tokens。 */}
         <div dir="auto" className="whitespace-pre-wrap break-words rounded-2xl rounded-br-[6px] bg-[var(--mx-user-bubble)] px-3 py-1.5 leading-relaxed text-[var(--mx-text)]">

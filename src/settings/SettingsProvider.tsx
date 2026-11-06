@@ -12,7 +12,8 @@
  * - Codex sandbox 全局默认档已移除(2026-09-29):每 tab 在 CodexPane 状态栏切换,
  *   新会话初始档 = DEFAULT_CODEX_SANDBOX(workspace-write),不再有全局设置项。
  *
- * 通过 [[useSettings]] 暴露 `{ fontSize, changeFontSize, bgSetting, changeBgSetting }`。
+ * 通过 [[useSettings]] 暴露 `{ fontSize, changeFontSize, bgSetting, changeBgSetting,
+ * showPromptBanner, changeShowPromptBanner }`。
  */
 import { createContext, useContext, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
@@ -21,6 +22,19 @@ import { DEFAULT_BG_SETTING, type BgSetting } from "../domain/bg";
 
 /** 背景图设置的 localStorage 键(纯视觉,不走后端 state.json)。 */
 const BG_SETTING_KEY = "mx.bgSetting";
+
+/** 消息流顶部悬浮条(当前问题吸顶条)显示开关的 localStorage 键(纯视觉,不走后端)。 */
+const SHOW_PROMPT_BANNER_KEY = "mx.showPromptBanner";
+
+/** 从 localStorage 读悬浮条开关(缺省/损坏回退 true = 显示)。 */
+function loadShowPromptBanner(): boolean {
+  try {
+    const raw = localStorage.getItem(SHOW_PROMPT_BANNER_KEY);
+    return raw == null ? true : raw === "1";
+  } catch {
+    return true;
+  }
+}
 
 /** 从 localStorage 读背景图设置(损坏/缺字段回退默认)。 */
 function loadBgSetting(): BgSetting {
@@ -47,6 +61,10 @@ type SettingsContextValue = {
   bgSetting: BgSetting;
   /** 改背景图设置(局部合并)+ localStorage 持久化。 */
   changeBgSetting: (patch: Partial<BgSetting>) => void;
+  /** 消息流顶部悬浮条(当前问题吸顶条)是否显示。 */
+  showPromptBanner: boolean;
+  /** 切换悬浮条显示 + localStorage 持久化。 */
+  changeShowPromptBanner: (show: boolean) => void;
 };
 
 const SettingsContext = createContext<SettingsContextValue | null>(null);
@@ -62,6 +80,16 @@ export function SettingsProvider({
     () => initialFontSize ?? DEFAULT_FONT_SIZE,
   );
   const [bgSetting, setBgSetting] = useState<BgSetting>(loadBgSetting);
+  const [showPromptBanner, setShowPromptBanner] = useState<boolean>(loadShowPromptBanner);
+
+  const changeShowPromptBanner = (show: boolean) => {
+    setShowPromptBanner(show);
+    try {
+      localStorage.setItem(SHOW_PROMPT_BANNER_KEY, show ? "1" : "0");
+    } catch {
+      /* 写失败(隐私模式)忽略,仅内存生效 */
+    }
+  };
 
   const changeBgSetting = (patch: Partial<BgSetting>) => {
     setBgSetting((prev) => {
@@ -84,13 +112,15 @@ export function SettingsProvider({
   };
 
   return (
-    <SettingsContext.Provider value={{ fontSize, changeFontSize, bgSetting, changeBgSetting }}>
+    <SettingsContext.Provider
+      value={{ fontSize, changeFontSize, bgSetting, changeBgSetting, showPromptBanner, changeShowPromptBanner }}
+    >
       {children}
     </SettingsContext.Provider>
   );
 }
 
-/** 取当前设置(字体大小 + 背景图)。须在 SettingsProvider 内使用。 */
+/** 取当前设置(字体大小 + 背景图 + 消息流悬浮条开关)。须在 SettingsProvider 内使用。 */
 export function useSettings(): SettingsContextValue {
   const ctx = useContext(SettingsContext);
   if (!ctx) throw new Error("useSettings must be used within SettingsProvider");

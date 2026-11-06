@@ -12,6 +12,7 @@
  * TerminalPane 读 themeId 自行处理(此处只管 CSS data-theme + 持久化)。
  */
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
+import { flushSync } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
 import {
   DEFAULT_THEME_ID,
@@ -23,8 +24,11 @@ import {
 type ThemeContextValue = {
   /** 当前主题 id(已归一为合法值)。 */
   themeId: ThemeId;
-  /** 切主题:setState + 设 data-theme + 后端落盘。 */
-  changeTheme: (id: ThemeId) => void;
+  /** 切主题:setState + 设 data-theme + 后端落盘。
+   * `origin`:View Transitions 圆形 reveal 的触发点(通常是主题切换控件的中心,
+   * 视口坐标);缺省从视口中上荡开。WebView2 支持 startViewTransition,旧环境
+   * (纯浏览器/无 API)直接切换,无副作用。 */
+  changeTheme: (id: ThemeId, origin?: { x: number; y: number }) => void;
   /** 主题列表(数据驱动 UI)。 */
   themes: typeof THEMES;
 };
@@ -47,8 +51,28 @@ export function ThemeProvider({
     document.documentElement.dataset.theme = themeId;
   }, [themeId]);
 
-  const changeTheme = (id: ThemeId) => {
-    setThemeId(id);
+  const changeTheme = (id: ThemeId, origin?: { x: number; y: number }) => {
+    const root = document.documentElement;
+    // reveal 触发点写入 CSS 变量(mx-theme-reveal keyframes 读);无 origin 时清除,
+    // 回退到视口中上(50% 38%)。
+    if (origin) {
+      root.style.setProperty("--mx-vt-x", `${origin.x}px`);
+      root.style.setProperty("--mx-vt-y", `${origin.y}px`);
+    } else {
+      root.style.removeProperty("--mx-vt-x");
+      root.style.removeProperty("--mx-vt-y");
+    }
+    // flushSync:同步完成 render + effect(data-theme 写入 + AppShell 背景图玻璃 token
+    // 重建),让 startViewTransition 的新帧截图拿到完整新主题——否则 AppShell 的 effect
+    // 会在 Provider effect 之前抢先手写 data-theme(背景图场景),旧帧已是新色,reveal 失真。
+    const apply = () => {
+      flushSync(() => setThemeId(id));
+    };
+    const doc = document as Document & {
+      startViewTransition?: (cb: () => void) => unknown;
+    };
+    if (doc.startViewTransition) doc.startViewTransition(apply);
+    else apply();
     invoke("set_theme", { themeId: id }).catch((e) =>
       console.warn("[theme] set_theme backend failed:", e),
     );

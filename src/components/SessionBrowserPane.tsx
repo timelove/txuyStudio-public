@@ -11,6 +11,7 @@ import { Button } from "./ui/Button";
 import { Popover, PopoverTrigger } from "./ui/Popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/Tooltip";
 import { Tabs, TabsList, TabsTrigger } from "./ui/Tabs";
+import { TabCloseIcon } from "./icons";
 
 type SessionBrowserPaneProps = {
   paneId: string;
@@ -290,7 +291,7 @@ export function SessionBrowserPane({ paneId, focused, sessions, activeTabId, onF
                     }}
                     onClick={(e) => e.stopPropagation()}
                   >
-                    ×
+                    <TabCloseIcon className="h-2 w-2" />
                   </Button>
                   </TooltipTrigger>
                   <TooltipContent>{t("shell.tab.close")}</TooltipContent>
@@ -379,8 +380,9 @@ export function SessionBrowserPane({ paneId, focused, sessions, activeTabId, onF
 
       {/* 双栏:左列表 + 右详情。 */}
       <div className="grid min-h-0 min-w-0 grid-cols-[280px_1fr]">
-        {/* 左栏:provider 下拉 + 搜索 + 列表。 */}
-        <div className="flex min-h-0 min-w-0 flex-col border-r border-[var(--mx-border)]">
+        {/* 左栏:provider 下拉 + 搜索 + 列表。底色与各 pane 工具栏(ClaudePane header 等)同 token,
+            读作「导航/工具条」一侧;右详情保持根容器 editor-bg 作内容区,两栏有主次。 */}
+        <div className="flex min-h-0 min-w-0 flex-col border-r border-[var(--mx-border)] bg-[var(--mx-tabbar-bg)]">
           <div className="shrink-0 px-2 py-1.5 border-b border-[var(--mx-border)]">
             {/* provider 下拉框 + 搜索框 同行(下拉窄,搜索占剩余);尾部显示 过滤数/总数。 */}
             <div className="flex items-center gap-1.5">

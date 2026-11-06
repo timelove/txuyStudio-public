@@ -30,10 +30,19 @@ export type CodexEvent = {
 /** 分类后的事件。`kind` 标签是 snake_case(后端 `#[serde(tag="kind", rename_all="snake_case")]`)。 */
 export type CodexEventPayload =
   | { kind: "init"; sessionId: string }
+  | { kind: "user"; message: { id?: string; role?: string; content?: unknown } }
   | { kind: "item_started"; item: CodexItem }
   | { kind: "item_completed"; item: CodexItem }
   | { kind: "turn_started" }
   | { kind: "turn_completed"; usage?: CodexUsage }
+  /** app-server 增量通知(itemType: agentMessage|reasoning|commandOutput;field: text|summary|output)。 */
+  | { kind: "item_delta"; itemId: string; itemType: string; field: string; delta: string }
+  /** app-server 权威用量(后端取 tokenUsage.last=最后一轮=当前上下文口径;camelCase,归一化见 normalizeUsage)。 */
+  | { kind: "usage_updated"; usage: unknown; contextWindow?: number | null }
+  /** app-server 实时审批请求(request 外壳 = {key, method, params},key 供响应路由)。 */
+  | { kind: "approval_requested"; request: { key?: string; method?: string; params?: unknown } }
+  /** app-server 审批已解决(后端 respond 后广播;前端撤卡)。 */
+  | { kind: "approval_resolved"; requestId: string }
   | { kind: "terminated"; reason: string };
 
 /**
@@ -67,6 +76,8 @@ export type CodexItem = {
   error?: unknown;
   /** error item:错误/警告文案。 */
   message?: string;
+  /** app-server reasoning:摘要分段数组(completed 全文;delta 流式逐段)。 */
+  summary?: unknown;
   /** custom_tool_call(兼容保留):工具名/输入。 */
   name?: string;
   input?: unknown;
@@ -82,11 +93,42 @@ export type CodexUsage = {
   reasoning_output_tokens?: number;
 };
 
+/**
+ * 归一化用量对象为 CodexUsage(snake_case)。两来源字段形态不同:
+ * - exec 模式 turn.completed.usage:原生 snake_case(input_tokens);
+ * - app-server thread/tokenUsage/updated.last:camelCase(inputTokens)。
+ * 双 casing 兼容读取,未知形态返回 undefined(调用方保留旧值)。
+ */
+function normalizeUsage(v: unknown): CodexUsage | undefined {
+  if (!v || typeof v !== "object") return undefined;
+  const o = v as Record<string, unknown>;
+  const num = (...keys: string[]): number | undefined => {
+    for (const k of keys) {
+      const val = o[k];
+      if (typeof val === "number") return val;
+    }
+    return undefined;
+  };
+  return {
+    input_tokens: num("input_tokens", "inputTokens"),
+    cached_input_tokens: num("cached_input_tokens", "cachedInputTokens"),
+    cache_write_input_tokens: num("cache_write_input_tokens", "cacheWriteInputTokens"),
+    output_tokens: num("output_tokens", "outputTokens"),
+    reasoning_output_tokens: num("reasoning_output_tokens", "reasoningOutputTokens"),
+  };
+}
+
 // -- 归并后的 UI 模型 --
 
 export type CodexBlock =
   | { type: "text"; text: string }
-  | { type: "thinking"; text: string }
+  | {
+      type: "thinking";
+      text: string;
+      /** 思考耗时毫秒(started→completed 实测;历史回放无)。text 与 ms 双空时渲染层
+       *  不展示(上游中转常不回可读 summary,2026-11-05 起空思考不留占位)。 */
+      ms?: number;
+    }
   | {
       type: "tool_use";
       /** item.id(item.started/item.completed 同 id 归并)。 */
@@ -122,10 +164,24 @@ export type CodexStreamState = {
     contextWindow?: number;
     reasoningEffort?: string;
     sandbox?: string;
+    permission?: string;
   };
-  /** 最近一轮 token 用量(turn.completed 回填)。 */
+  /** 最近一轮 token 用量(turn.completed / usage_updated 回填)。 */
   lastUsage?: CodexUsage;
+  /** app-server 待决策审批(approval_requested 入,approval_resolved / 本地响应出)。 */
+  pendingApproval?: CodexPendingApproval;
   terminatedReason: string | null;
+  /** 仅内存:进行中 reasoning 的 started 时刻(itemId → epoch ms)。completed 时算耗时;
+   *  上游中转不回可读 summary 时**不展示**思考块(2026-11-05),此表只服务于「有内容时」
+   *  的时长结算,替代原先挂在空块上的 startedAt。initialCodexState 恒初始化。 */
+  reasoningStartedAt: Map<string, number>;
+};
+
+/** app-server 审批请求(前端渲染卡 + 响应路由 key)。 */
+export type CodexPendingApproval = {
+  key: string;
+  method: string;
+  params: unknown;
 };
 
 export type CodexMessage = {
@@ -144,6 +200,7 @@ export const initialCodexState: CodexStreamState = {
   status: "idle",
   meta: {},
   terminatedReason: null,
+  reasoningStartedAt: new Map(),
 };
 
 /** 生成简易 id(非加密,仅前端去重用)。 */
@@ -300,6 +357,7 @@ export function applyEvent(state: CodexStreamState, payload: CodexEventPayload):
     ...state,
     messages: [...state.messages],
     itemIndex: new Map(state.itemIndex),
+    reasoningStartedAt: new Map(state.reasoningStartedAt),
     meta: { ...state.meta },
   };
 
@@ -309,8 +367,41 @@ export function applyEvent(state: CodexStreamState, payload: CodexEventPayload):
       next.terminatedReason = null;
       return next;
     }
+    case "user": {
+      // 手机经中继发来的用户消息回显(codex 原生事件不回显输入)。桌面端自己发的在
+      // `appendUserMessage` 已本地插入,后端不回显 → 这里只会收到手机来源的。
+      const msg = payload.message;
+      const raw = msg.content;
+      const texts: string[] = Array.isArray(raw)
+        ? raw
+            .filter((b): b is { type: string; text?: string } => !!b && typeof b === "object" && (b as { type?: string }).type === "text")
+            .map((b) => b.text ?? "")
+        : typeof raw === "string"
+          ? [raw]
+          : [];
+      const text = texts.filter((t) => t.length > 0).join("\n");
+      if (!text) return next;
+      const id = msg.id ?? genId("user");
+      if (next.messages.some((m) => m.id === id)) return next;
+      next.messages.push({
+        id,
+        role: "user",
+        blocks: [{ type: "text", text }],
+        timestamp: new Date().toISOString(),
+        streaming: false,
+      });
+      return next;
+    }
     case "item_started": {
       const item = payload.item;
+      // reasoning started:只记 started 时刻,**不建消息**——上游中转常不回可读 summary,
+      // 空思考块(「思考 · Ns」占位)用户要求不展示(2026-11-05);等 delta/completed 带
+      // 到真内容时才出现思考块,时长从这张表结算。
+      if (item.type === "reasoning") {
+        const rid = item.id ?? genId("reasoning");
+        next.reasoningStartedAt.set(rid, Date.now());
+        return next;
+      }
       if (!isToolItem(item.type)) return next;
       const itemId = item.id ?? genId("item");
       const name = toolNameOf(item);
@@ -342,6 +433,26 @@ export function applyEvent(state: CodexStreamState, payload: CodexEventPayload):
         return next;
       }
       if (itemType === "reasoning") {
+        // app-server 形态(item.summary 数组,流式 delta 与 started 计时都挂 `rs-${id}`
+        // 独立消息)→ completed 全量替换并结算 ms。**summary 为空 = 不展示**(不建消息;
+        // started 计时条目清掉),上游中转不回可读 summary 时消息流里无思考痕迹。exec
+        // 形态(item.text)→ 原逻辑挂最近 assistant 的 thinking(exec 无 delta/started,
+        // completed 一次性到,text 空同样跳过)。
+        const summaryText = Array.isArray(item.summary) ? item.summary.filter((s) => typeof s === "string").join("") : "";
+        const rid = item.id ?? genId("reasoning");
+        if (summaryText) {
+          const startedAt = next.reasoningStartedAt.get(rid);
+          next.reasoningStartedAt.delete(rid);
+          upsertAssistantMessage(next, `rs-${rid}`, (existing) => {
+            const prev = existing?.blocks.find((b) => b.type === "thinking");
+            // 时长优先取 started 时刻表;delta 先于 completed 建消息(无表项)时退回
+            // 流式下无法计时长(不显),真实历史场景 delta→completed 间隔毫秒级。
+            const ms = startedAt != null ? Date.now() - startedAt : undefined;
+            return [{ type: "thinking", text: summaryText, ...(ms != null ? { ms } : {}) }];
+          });
+          return next;
+        }
+        next.reasoningStartedAt.delete(rid);
         const text = item.text ?? "";
         if (!text) return next;
         const lastIdx = lastAssistantIdx(next.messages);
@@ -405,6 +516,58 @@ export function applyEvent(state: CodexStreamState, payload: CodexEventPayload):
     case "turn_started": {
       next.status = "running";
       next.terminatedReason = null;
+      // 计时表按轮清空:reasoning 条目属于单轮,残留(中断/丢 completed)会让下轮
+      // thinkingNow 误判「思考中」。
+      next.reasoningStartedAt.clear();
+      return next;
+    }
+    case "item_delta": {
+      // app-server 流式增量。agentMessage 按itemId 独立消息累计(completed 同 id 全量覆盖);
+      // reasoning 挂 `rs-${itemId}` 独立消息累计(completed summary 全量替换);commandOutput
+      // 忽略(聚合输出 completed 全量到,工具卡为整块渲染)。
+      const { itemId, itemType, field, delta } = payload;
+      if (!delta) return next;
+      if (itemType === "agentMessage" && field === "text") {
+        upsertAssistantMessage(next, itemId, (existing) => {
+          const prev = existing?.blocks.find((b) => b.type === "text");
+          const prevText = prev && prev.type === "text" ? prev.text : "";
+          return [{ type: "text", text: prevText + delta }];
+        });
+        return next;
+      }
+      if (itemType === "reasoning" && field === "summary") {
+        // 首个 summary delta 到达才建 `rs-${itemId}` 消息(此前 started 只记时刻不建消息,
+        // 空 summary 不展示);completed 同 id 全量替换 + 结算 ms。
+        upsertAssistantMessage(next, `rs-${itemId}`, (existing) => {
+          const prev = existing?.blocks.find((b) => b.type === "thinking");
+          const prevText = prev && prev.type === "thinking" ? prev.text : "";
+          return [{ type: "thinking", text: prevText + delta }];
+        });
+        return next;
+      }
+      return next;
+    }
+    case "usage_updated": {
+      // 权威用量(后端取 tokenUsage.last=最后一轮,ctx% 口径正确;total 是会话累计,
+      // 旧口径拿来做 ctx 会虚高超窗);contextWindow 回填 meta(exec 模式只能从 catalog
+      // 查,app-server 服务端直接给)。
+      const u = normalizeUsage(payload.usage);
+      if (u) next.lastUsage = u;
+      if (typeof payload.contextWindow === "number" && payload.contextWindow > 0) {
+        next.meta = { ...next.meta, contextWindow: payload.contextWindow };
+      }
+      return next;
+    }
+    case "approval_requested": {
+      const { key, method, params } = payload.request;
+      if (!key) return next;
+      next.pendingApproval = { key, method: method ?? "", params: params ?? null };
+      return next;
+    }
+    case "approval_resolved": {
+      // 后端 respond(或超时/他端决策)后的权威广播:无条件撤卡(响应路径本地也会清,
+      // 广播是兜底多视图同步)。
+      next.pendingApproval = undefined;
       return next;
     }
     case "turn_completed": {
@@ -412,6 +575,8 @@ export function applyEvent(state: CodexStreamState, payload: CodexEventPayload):
       if (payload.usage) {
         next.lastUsage = payload.usage;
       }
+      // 计时表按轮清空(残留条目防 thinkingNow 误判,同 turn_started)。
+      next.reasoningStartedAt.clear();
       // 全量扫兜底:轮次结束,孤儿工具卡(item.completed 丢失/中断)不再转圈。
       // 引用保持:blocks 无变化且非 streaming 的消息保留原对象(避免每轮整树 reconcile);
       // usage 仅回填最近一条 assistant(同 claude result 语义,行尾 token 显示用)。
@@ -429,7 +594,8 @@ export function applyEvent(state: CodexStreamState, payload: CodexEventPayload):
       return next;
     }
     case "terminated": {
-      // normal(每轮 exec 正常 EOF)/interrupted(用户中断):idle 不显错误;其余(spawn failed 等):error。
+      // normal(exec 每轮正常 EOF)/interrupted(用户中断):idle 不显错误;exit(长进程崩溃)/
+      // 其余(spawn failed 等):error(重发消息时后端 ensure 重拉进程 + thread/resume 续接)。
       if (payload.reason === "normal" || payload.reason === "interrupted") {
         next.status = "idle";
         next.terminatedReason = null;
@@ -437,6 +603,10 @@ export function applyEvent(state: CodexStreamState, payload: CodexEventPayload):
         next.status = "error";
         next.terminatedReason = payload.reason;
       }
+      // 中断/进程退出后审批请求不再可答(进程死了或轮已断),撤卡防悬空。
+      next.pendingApproval = undefined;
+      // 计时表清空(轮已断,残留条目防 thinkingNow 误判)。
+      next.reasoningStartedAt.clear();
       for (let i = 0; i < next.messages.length; i++) {
         const m = next.messages[i];
         if (m.role !== "assistant") continue;

@@ -18,10 +18,10 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "./Tooltip";
 /** 单条菜单项:label 主文案;hint 右侧浅色注释(如命令原文 /compact);glyph 图标字符。 */
 export type PaneToolsMenuItem = { label: string; hint?: string; glyph?: string; onClick: () => void };
 
-/** 分组 tone 决定组内 glyph tile 的底/前景色(资源=violet、会话=accent、定位=muted)。 */
+/** 分组 tone 决定组内 glyph tile 的底/前景色(资源=claude、会话=accent、定位=muted)。 */
 export type PaneToolsMenuGroup = {
   label?: string;
-  tone?: "violet" | "accent" | "muted";
+  tone?: "claude" | "violet" | "accent" | "muted";
   items: PaneToolsMenuItem[];
 };
 
@@ -30,6 +30,7 @@ export type PaneToolsMenuGroup = {
 export const TOOL_SIDEBAR_MIN_PANE_W = 960;
 
 const TONE_TILE: Record<NonNullable<PaneToolsMenuGroup["tone"]>, string> = {
+  claude: "bg-[var(--mx-claude-soft)] text-[var(--mx-claude)]",
   violet: "bg-[var(--mx-violet-soft)] text-[var(--mx-violet)]",
   accent: "bg-[var(--mx-accent-soft)] text-[var(--mx-accent)]",
   muted: "bg-[var(--mx-hover-bg)] text-[var(--mx-muted)]",

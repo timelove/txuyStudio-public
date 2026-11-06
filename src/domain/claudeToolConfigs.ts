@@ -99,6 +99,16 @@ export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
     defaultOpen: true,
   },
 
+  // Windows 端 CLI 的命令工具名就是 PowerShell(与 Bash 同构:input.command/description),
+  // 漏注册会落到 Default 通用卡 —— 命令埋在 input JSON 里看不到(用户环境实证)。
+  PowerShell: {
+    label: "PowerShell",
+    variant: "bash",
+    getValue: (input) => strField(input, "command") ?? "",
+    getSecondary: (input) => strField(input, "description"),
+    defaultOpen: true,
+  },
+
   // —— 文件操作 ——
   Read: {
     label: "Read",
@@ -265,7 +275,7 @@ export function getToolConfig(name: string): ToolDisplayConfig {
 /** 工具分类(决定左色条颜色)。 */
 export function getToolCategory(name: string): ToolCategory {
   if (["Edit", "Write", "MultiEdit"].includes(name)) return "edit";
-  if (name === "Bash") return "bash";
+  if (name === "Bash" || name === "PowerShell") return "bash";
   if (["Grep", "Glob"].includes(name)) return "search";
   if (["TodoWrite", "TodoRead"].includes(name)) return "todo";
   if (["Task", "TaskCreate", "TaskUpdate", "TaskList", "TaskGet"].includes(name)) return "task";

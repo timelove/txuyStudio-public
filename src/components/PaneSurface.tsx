@@ -31,6 +31,10 @@ const HtmlPreviewPane = lazy(() =>
 const NotesPane = lazy(() =>
   import("./NotesPane").then((m) => ({ default: m.NotesPane })),
 );
+// 图谱 pane(AI 工作轨迹力导向星系图)按需懒加载,与 SessionBrowser 同组 AI 配套视图。
+const GraphPane = lazy(() =>
+  import("./GraphPane").then((m) => ({ default: m.GraphPane })),
+);
 
 type PaneSurfaceProps = {
   paneTree: PaneNode;
@@ -195,6 +199,16 @@ function renderNode(
       return (
         <Suspense fallback={lazyFallback}>
           <SessionBrowserPane {...paneProps} onResumeSession={onResumeSession} />
+        </Suspense>
+      );
+    }
+    // graph:AI 工作轨迹图谱(模型→会话→文件三层力导向,Canvas 手写不走 PTY;plan:
+    // .work/design/20261021-graph-pane)。收标准 paneProps(tab 条含 × 关 tab —— v1 曾漏传
+    // 导致存量 graph tab 关不了,2026-10-23 补齐),数据自轮询。
+    if (activeTab?.shellKind === "graph") {
+      return (
+        <Suspense fallback={lazyFallback}>
+          <GraphPane {...paneProps} />
         </Suspense>
       );
     }

@@ -45,7 +45,22 @@ export const SHELL_KIND_META: Record<
   // 笔记:纯 UI 面板(不走 PTY),Typora 式 md 编辑(左源码右实时预览),存项目根 .note 文件
   // (可 git、可被 claude/codex 读写联动)。一个 tab = 一篇笔记(tab.cwd 存文件绝对路径)。
   notes: { accent: "#a3e635", glyph: "✎", label: "shellkind.notes", defaultTitle: "shellkind.notes" },
+  // 图谱:纯 UI 面板(不走 PTY),AI 工作轨迹力导向星系图(模型→会话→文件三层,Canvas 手写;
+  // plan: .work/design/20261021-graph-pane)。✦ 星形表星系观感。
+  graph: { accent: "#e879f9", glyph: "✦", label: "shellkind.graph", defaultTitle: "shellkind.graph" },
 };
+
+/**
+ * 存量 tab title 归一:shell 中性化改名(→「终端」)之前创建的 tab,持久化在
+ * state.json 的 title 是旧值("PowerShell" 等),t() 回退原样 → tab 名一直显示旧名。
+ * 显示层统一经此归一(数据不动,用户新建/保存 tab 自然消化)。空 title 回 defaultTitle。
+ */
+const LEGACY_SHELL_TITLES = new Set(["PowerShell", "powershell", "pwsh"]);
+export function normalizeTabTitle(title: string | undefined, kind: ShellKind): string {
+  const meta = SHELL_KIND_META[kind] ?? SHELL_KIND_META.shell;
+  if (kind === "shell" && LEGACY_SHELL_TITLES.has(title ?? "")) return meta.defaultTitle;
+  return title || meta.defaultTitle;
+}
 
 /**
  * 新建菜单 / 分屏菜单的分组结构(单一真源)。
@@ -64,6 +79,10 @@ export const NEW_SHELL_GROUPS: { title: string; kinds: ShellKind[] }[] = [
   { title: "AI CLI", kinds: ["claudepane", "codexpane"] },
   // 会话列表:AI 历史会话浏览/恢复,与 AI 主体配套保留(工作台对 AI 工作流定位的一环)。
   { title: "shellgroup.session", kinds: ["sessionbrowser"] },
+  // graph(AI 工作轨迹图谱)2026-10-21 用户试用后搁置(「感觉也不好看,等看到其他炫酷
+  // 效果再说」):从新建入口移除,组件/后端命令/渲染分发全保留(同 filetree 先例)——存量
+  // graph tab 仍可渲染/可关。恢复:把 "graph" 加回上面 session 组即可。
+  // { title: "shellgroup.session", kinds: ["graph"] },
   // 2026-09-22 工具收敛:lazygit/yazi/fresh/filetree/htmlpreview/notes 从新建入口移除
   // (长期使用基本用不到)。组件与渲染逻辑保留——存量 pane 树中这类 tab 仍正常渲染/可关,
   // 仅不再能从 + / ▥ 菜单新建。恢复入口:把这组加回下方即可。

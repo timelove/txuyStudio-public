@@ -1,6 +1,6 @@
 [package]
 name = "txuy-studio"
-version = "0.2.8"
+version = "0.2.13"
 description = "AI CLI terminal workspace for Windows developers"
 authors = ["txuyStudio Contributors"]
 edition = "2021"
@@ -13,6 +13,8 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+# 业务核心(P0 抽出):state/pty/proc 纯逻辑,path 依赖不建 workspace(构建路径零变动)。
+txuy-core = { path = "../crates/txuy-core" }
 tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-opener = "2"
 tauri-plugin-log = "2"
@@ -29,6 +31,17 @@ sysinfo = "0.32"
 dirs = "6"
 notify = "6"
 base64 = "0.22"
+toml_edit = "0.22"
+chrono = "0.4"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+# 移动伴侣出站中继(relay/):wss 客户端 + E2E 加密(ChaCha20-Poly1305,协议见 .work/design/20261023-mobile-relay)
+tokio-tungstenite = { version = "0.27", features = ["rustls-tls-webpki-roots"] }
+chacha20poly1305 = "0.10"
+# vault 密码保险箱:PBKDF2-HMAC-SHA256 派生密钥(与 Dart cryptography/手机端同参数)
+pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
+sha2 = "0.10"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+if-addrs = "0.15.0"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.61", features = ["Win32_UI_HiDpi", "Win32_Foundation"] }

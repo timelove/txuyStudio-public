@@ -24,6 +24,7 @@ use std::process::{Child, ChildStdin};
 use std::sync::Mutex;
 
 pub mod commands;
+pub mod providers_mirror;
 
 /// 启动配置(供 `start_claude_session` 重启时复用 mode/cwd)。allowedTools 不存——重启时从
 /// `AppState` 读最新项目持久化 allowlist(「批准且不再问」累积)。Phase 1-2 由 transport 显式
@@ -64,6 +65,9 @@ pub struct ClaudeSession {
     /// 选择器时调 `claude_settings_changed` 比对当前哈希,变了则重启进程拾取新配置。
     pub settings_env_hash: Mutex<Option<u64>>,
     pub killed: Mutex<bool>,
+    /// 后台任务最后快照(`background_tasks_changed` 时更新;手机 chat_status 补齐断线
+    /// 重连期间错过的快照——事件只在变化时推,不存就得等下次变化才看得到)。
+    pub background_tasks: Mutex<Vec<BackgroundTaskInfo>>,
 }
 
 /// claude 会话状态(前端状态栏 + 输入框可用性 + busy 判断)。
@@ -118,6 +122,19 @@ pub enum ClaudeEventPayload {
     Assistant { message: serde_json::Value },
     /// `user` message(含 tool_result)。透传 message,前端用 tool_use_id 配对回填工具结果。
     User { message: serde_json::Value },
+    /// `control_request subtype=can_use_tool`(--permission-prompt-tool stdio):CLI 在执行
+    /// 需授权工具**前**问宿主。前端据此弹确认卡,用户决策经 `respond_claude_permission`
+    /// 回 control_response{behavior:allow/deny},随后 **CLI 自己执行并续跑该轮**。
+    /// `tool_use_id` 与 assistant 的 tool_use block id 一致(spike 实测),可精确挂卡。
+    PermissionRequest {
+        request_id: String,
+        tool_use_id: Option<String>,
+        tool_name: String,
+        display_name: Option<String>,
+        input: serde_json::Value,
+        description: Option<String>,
+        reason_type: Option<String>,
+    },
     /// `system subtype=thinking_tokens` 攒批后的聚合文本(200 token 或 50ms 一批)。
     /// 原始逐 token 事件高频刷屏,后端节流避免 IPC 风暴。
     Thinking { text: String },
@@ -168,6 +185,11 @@ pub enum ClaudeEventPayload {
         status: String,
         summary: String,
     },
+    /// control_response(P2,#137):`get_context_usage` 的 CLI 权威上下文账本。透传
+    /// `response.response` 全量(categories(kind: used/buffer/free)/totalTokens/maxTokens/
+    /// autoCompactThreshold/messageBreakdown/memoryFiles/…)。请求由前端
+    /// `request_claude_context_usage` 发起,响应广播式回推(前端一次一个 inflight,收到即消费)。
+    ContextUsage { data: serde_json::Value },
 }
 
 /// 后台任务信息(`background_tasks_changed.tasks[]` 项,camelCase 对齐前端)。

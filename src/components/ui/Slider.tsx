@@ -32,7 +32,7 @@ const SliderTrack = React.forwardRef<
   <SliderPrimitive.Track
     ref={ref}
     className={cn(
-      "relative h-1.5 w-full grow overflow-hidden rounded-[var(--mx-radius-full)] bg-[var(--mx-border-strong)]",
+      "relative h-1.5 w-full grow overflow-hidden rounded-[var(--mx-radius-full)] bg-[color-mix(in_srgb,var(--mx-text)_14%,transparent)]",
       className,
     )}
     {...props}

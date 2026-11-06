@@ -30,12 +30,14 @@ export type ProjectRecord = {
   paneTree?: PaneNode;
 };
 
-/** 原生窗口大小/位置。 */
+/** 原生窗口大小/位置(逻辑像素)。maximized 单独记忆:最大化期间只更新标志
+ *  (width=0 表示仅标志条目);与后端 `state::WindowBounds` 镜像。 */
 export type WindowBounds = {
   x: number;
   y: number;
   width: number;
   height: number;
+  maximized?: boolean;
 };
 
 /** `hydrate_window` 等命令返回的应用快照。 */

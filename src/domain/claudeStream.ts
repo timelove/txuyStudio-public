@@ -17,7 +17,9 @@
 // `isPermissionDenied` 用于 hasPendingApproval 判定(审批被拒的 tool_use)。claudeToolConfigs 仅
 // `import type` 依赖本文件(类型擦除),故此处值 import 无运行时循环。
 import { isPermissionDenied } from "./claudeToolConfigs";
-import { liftContextWindow, totalInputTokens } from "./contextMeter";
+import { liftContextWindow } from "./contextMeter";
+// 运行时仅引纯函数(contextUsage 对本文件只有 import type,擦除后无环)。
+import { usableContextWindow } from "../lib/contextUsage";
 
 /** 后端 emit 的 claude-event 事件外壳。 */
 export type ClaudeEvent = {
@@ -37,7 +39,73 @@ export type ClaudeEventPayload =
   | { kind: "compact_status"; status: string | null; result: string | null; error: string | null }
   | { kind: "compact_boundary"; metadata: CompactMetadata }
   | { kind: "background_tasks_changed"; tasks: BackgroundTaskInfo[] }
-  | { kind: "task_notification"; taskId: string; toolUseId?: string; status: string; summary: string };
+  | { kind: "task_notification"; taskId: string; toolUseId?: string; status: string; summary: string }
+  | { kind: "context_usage"; data: Record<string, unknown> }
+  | {
+      kind: "permission_request";
+      requestId: string;
+      toolUseId?: string | null;
+      toolName: string;
+      displayName?: string | null;
+      input: unknown;
+      description?: string | null;
+      reasonType?: string | null;
+    };
+
+/**
+ * CLI 权限确认请求(--permission-prompt-tool stdio 的 `can_use_tool` 控制请求)。
+ * CLI 在执行需授权工具**前**发来,前端弹确认卡;用户决策经 transport.respondPermission
+ * 回 control_response{behavior:allow/deny},随后 **CLI 自己执行并续跑该轮**。
+ * `toolUseId` 与 assistant 的 tool_use block id 一致(spike 实测),用于把卡片挂到对应步骤。
+ */
+export type PendingPermission = {
+  requestId: string;
+  toolUseId: string | null;
+  toolName: string;
+  displayName: string | null;
+  input: unknown;
+  description: string | null;
+  reasonType: string | null;
+};
+
+/**
+ * CLI 权威上下文账本(P2,#137):control_request `get_context_usage` 的回包归一。
+ * spike 实测(.work/spikes/get-context-usage-spike.mjs):categories 三档 kind 与 baocode
+ * 消费端同构(used/buffer/free);`autoCompactThreshold` 是权威压缩分母(window − buffer)。
+ */
+export type ClaudeContextUsage = {
+  /** 已用 tokens(categories kind=used 段合计,CLI 账本)。 */
+  totalTokens: number;
+  /** 窗口上限(CLI 报的 maxTokens)。 */
+  maxTokens: number;
+  /** 权威压缩分母(CLI 报 autoCompactThreshold;缺失回退 maxTokens − 33k 建模)。 */
+  autoCompactThreshold?: number;
+  /** 分类明细(System prompt / System tools / Memory files / Skills / Messages / …)。 */
+  categories: { name: string; tokens: number; kind: "used" | "buffer" | "free" | string }[];
+};
+
+/** 把 control_response.response 的原始 data 归一成 ClaudeContextUsage(字段缺失逐项兜底)。 */
+export function normalizeContextUsage(data: Record<string, unknown> | null | undefined): ClaudeContextUsage | null {
+  if (!data || typeof data !== "object") return null;
+  const totalTokens = typeof data.totalTokens === "number" ? data.totalTokens : 0;
+  const maxTokens = typeof data.maxTokens === "number" ? data.maxTokens : 0;
+  if (totalTokens <= 0 && maxTokens <= 0) return null;
+  const categories = Array.isArray(data.categories)
+    ? data.categories
+        .filter((c): c is Record<string, unknown> => !!c && typeof c === "object")
+        .map((c) => ({
+          name: typeof c.name === "string" ? c.name : "?",
+          tokens: typeof c.tokens === "number" ? c.tokens : 0,
+          kind: typeof c.kind === "string" ? c.kind : "used",
+        }))
+    : [];
+  return {
+    totalTokens,
+    maxTokens,
+    autoCompactThreshold: typeof data.autoCompactThreshold === "number" ? data.autoCompactThreshold : undefined,
+    categories,
+  };
+}
 
 /** 后台任务信息(claude `system subtype=background_tasks_changed` 快照项)。 */
 export type BackgroundTaskInfo = {
@@ -138,9 +206,9 @@ export type ClaudeMessage = {
   compactKind?: "boundary" | "summary";
   /** compact boundary 的压缩比信息(仅 kind:"boundary" 有)。 */
   compactMeta?: CompactMeta;
-  /** notice 节点的载荷(仅 role:"notice" 有):后台任务完成/失败/停止、历史回填等系统级轻提示。 */
+  /** notice 节点的载荷(仅 role:"notice" 有):后台任务完成/失败/停止、历史回填、添加工作目录等系统级轻提示。 */
   notice?: {
-    kind: "bg_done" | "bg_failed" | "bg_stopped" | "history_resumed";
+    kind: "bg_done" | "bg_failed" | "bg_stopped" | "history_resumed" | "add_dir";
     summary: string;
     /** history_resumed 专用:回填元信息(条数/是否截断/是否失败)。summary 留空,文案由
      *  ClaudePane 渲染时按 history 字段 i18n 本地化(transport 层无 i18n 上下文)。 */
@@ -151,24 +219,24 @@ export type ClaudeMessage = {
   model?: string;
   /** 该消息是否仍在流式中(assistant 收到对应 result 前为 true)。 */
   streaming: boolean;
-  /** assistant 消息的 token 用量(从 message.usage 提取,用于行尾 token 显示)。 */
+  /** assistant 消息的 token 用量(行尾 token 显示 + ctx 口径,#133 底层权威直取)。
+   *  来源二选一:官方 claude 流式 message.usage(本轮快照)/ glm 流式全 0 时由 result
+   *  事件回填 payload.usage(实测 glm-5.3 为本轮口径:第二轮 48+27264 ≈ 当前上下文)。
+   *  两者均本轮口径,computeContextInfo 直接取最近值,不再做任何累计差分。 */
   usage?: ClaudeUsage;
-  /** usage 口径标记:true = result 回填的**会话累计**(claude code result.usage 官方语义是
-   *  多轮之和;glm 流式 usage 恒 {0,0} 只能靠它回填),当前上下文须与前一轮累计差分;
-   *  undefined = 流式 assistant 快照(本轮值,直接用)。 */
-  usageCumulative?: boolean;
-  /** true = 流式全 0 轮经 diffCumulativeUsage 差分回填的本轮值(纯全 0 代理场景)。
-   *  值本身是本轮口径(ctx/Σ 可直接用),但**不算流式快照**——diffCumulativeUsage 的
-   *  混合域判定(序列是否出现过真流式快照)须排除它,否则纯全 0 域第 2 轮起会因
-   *  自己的回填被误判混合域而停止差分,ctx 冻结在首轮。 */
-  usageDiffed?: boolean;
   /** 本轮耗时(result 事件回填,assistant 末行显示 ⏱ 时长)。 */
   durationMs?: number;
 };
 
 export type ClaudeBlock =
   | { type: "text"; text: string }
-  | { type: "thinking"; text: string }
+  | {
+      type: "thinking";
+      text: string;
+      /** 思考耗时毫秒(codex 折叠形状适配保留真实计时;claude 流不产此字段,tallySteps
+       *  优先用它,缺失才按字数粗估)。 */
+      ms?: number;
+    }
   | {
       type: "tool_use";
       id: string;
@@ -197,7 +265,16 @@ export type ClaudeStreamState = {
   /** tool_use id → {msgIdx, blockIdx}(配对 tool_result 回填用)。 */
   toolUseIndex: Map<string, { msgIdx: number; blockIdx: number }>;
   status: ClaudeRunStatus;
-  meta: { model?: string; cwd?: string; claudeSessionId?: string; slashCommands?: string[]; contextWindow?: number; effort?: string };
+  meta: {
+    model?: string;
+    cwd?: string;
+    claudeSessionId?: string;
+    slashCommands?: string[];
+    contextWindow?: number;
+    effort?: string;
+    /** CLI 权威上下文账本(P2 get_context_usage 回包,result/compact 后刷新;undefined=尚未拿到)。 */
+    contextUsage?: ClaudeContextUsage;
+  };
   lastResult?: {
     success: boolean;
     durationMs: number;
@@ -219,6 +296,8 @@ export type ClaudeStreamState = {
   /** API error 自动重试状态(非 null=重试中,含第几次/上限/下次重试时刻)。非 applyEvent 事件驱动,
    *  由 ClaudeTransport.scheduleRetry/cancelRetry 维护,emit 时覆写。null=不在重试。 */
   retry: { attempt: number; maxAttempts: number; nextRetryAt: number } | null;
+  /** 待用户决策的 CLI 权限请求(can_use_tool;CLI 正阻塞等待答复)。result/terminated 清空。 */
+  pendingPermissions: PendingPermission[];
 };
 
 export const initialClaudeState: ClaudeStreamState = {
@@ -233,6 +312,7 @@ export const initialClaudeState: ClaudeStreamState = {
   expectingCompactSummary: false,
   backgroundTasks: [],
   retry: null,
+  pendingPermissions: [],
 };
 
 /** 把 tool_result 的 content(可能是 string / block 数组)压成展示用字符串,截断防超长。 */
@@ -367,6 +447,7 @@ export function applyEvent(state: ClaudeStreamState, payload: ClaudeEventPayload
     messageIndex: new Map(state.messageIndex),
     toolUseIndex: new Map(state.toolUseIndex),
     meta: { ...state.meta },
+    pendingPermissions: [...state.pendingPermissions],
   };
 
   switch (payload.kind) {
@@ -430,12 +511,8 @@ export function applyEvent(state: ClaudeStreamState, payload: ClaudeEventPayload
           timestamp: oldMsg.timestamp,
           model: msg.model ?? oldMsg.model,
           streaming: true,
+          // 流式全 0(glm)时保留旧值(resume 重放场景旧值是上轮 result 回填/历史回填的本轮口径)。
           usage: hasUsage(msg.usage) ? msg.usage : (oldMsg.usage ?? msg.usage),
-          // usage 取旧值(resume 重放全 0 流式)时,口径标记须随旧值一起保留——
-          // 否则 result 回填的累计值丢标记后被当流式快照直接用,ctx 显示成「拉总的」;
-          // 差分回填(usageDiffed)同理,丢了会污染混合域判定。
-          usageCumulative: hasUsage(msg.usage) ? undefined : oldMsg.usageCumulative,
-          usageDiffed: hasUsage(msg.usage) ? undefined : oldMsg.usageDiffed,
         };
       } else {
         next.messages.push({
@@ -554,12 +631,15 @@ export function applyEvent(state: ClaudeStreamState, payload: ClaudeEventPayload
         // tool_result 不改 state.status(claude 可能继续处理)。
         return next;
       }
-      // 纯用户文本(stream-json 一般不回显,兜底):追加 user 消息。
+      // 纯用户文本(stream-json 一般不回显;手机经中继发的消息由后端补发,此时才走到这里)。
       const textParts = normalizedContent
         .filter((b) => b.type === "text")
         .map((b) => (b as { type: "text"; text: string }).text);
       if (textParts.length > 0) {
         const id = msg.id ?? genId("user");
+        // 幂等:同一 id 重复到达(重连补发/手机侧与后端同时推)不能插两条。
+        // 本分支此前没做去重——桌面端靠乐观插入,回显只在手机来源时出现,那时才需要。
+        if (next.messageIndex.has(id)) return next;
         next.messages.push({
           id,
           role: "user",
@@ -596,6 +676,8 @@ export function applyEvent(state: ClaudeStreamState, payload: ClaudeEventPayload
     }
     case "result": {
       next.status = payload.success ? "done" : "error";
+      // 轮次结束:CLI 已不再阻塞等待,任何残留的权限请求作废(否则卡片永挂)。
+      if (next.pendingPermissions.length > 0) next.pendingPermissions = [];
       next.lastResult = {
         success: payload.success,
         durationMs: payload.durationMs ?? 0,
@@ -623,13 +705,14 @@ export function applyEvent(state: ClaudeStreamState, payload: ClaudeEventPayload
       // 本轮全部 assistant 消息置 streaming=false + 最近一条回填耗时。**全量扫,不能只扫
       // 末条**:glm 等代理同轮拆多条 assistant 消息(thinking 段与 text/tool 段分属不同
       // message.id),只置末条会让前面消息的 ThinkingBlock 永显「思考中」不落「已思考」
-      // (与上方 finalizePendingTools 全量扫同因同修)。**usage 优先保留流式快照**:
-      // claude code 的 result.usage 官方语义是**会话累计**(多轮之和),而流式 assistant 事件
-      // 的 usage 是本轮快照(jsonl 实测 98% 带真实值,互斥语义)——累计值直接回填会把
-      // ctx/行尾 token 显示成「拉总的」(长会话累计轻松 3m,超模型真实窗口,显示必错)。
-      // 流式全 0 轮(旧版 glm/偶发抽风)**仅纯全 0 代理场景**才用 diffCumulativeUsage 差分
-      // 回填;混合域(序列已有流式快照)一律不回填——差分 Σ 缺一轮就虚高几 m,ctx 直接取
-      // 最近真实快照(「根据当前会话,绝不瞎统计」),成本显示另有 totalCostUsd 权威兜底。
+      // (与上方 finalizePendingTools 全量扫同因同修)。
+      //
+      // **usage 底层权威直取(#133,不再差分)**:实测 glm-5.3 的 result.usage 是**本轮口径**
+      // (两轮实测:首轮 19351+7936=27287;resume 后 48+27264=27312 ≈ 当前上下文,绝非累计)。
+      // 流式全 0(headless 管道下 glm 恒 0)→ 直接回填 payload.usage,ctx/行尾 token 即权威值。
+      // 官方 claude 流式 message.usage 有真实本轮快照 → 保留流式值不覆盖(其 result.usage
+      // 是会话累计,回填会把长会话显示成拉总的)。保险丝:单轮总输入 >2m 必是旧代理的
+      // 累计语义混入,丢弃防「拉总的」上屏(宁可没有,不可瞎统计)。
       // 引用保持:非 streaming 消息不换对象,避免每轮结束整树 reconcile(长会话大帧)。
       let finalizedLast = false;
       for (let i = next.messages.length - 1; i >= 0; i--) {
@@ -637,20 +720,14 @@ export function applyEvent(state: ClaudeStreamState, payload: ClaudeEventPayload
         if (prev.role !== "assistant") continue;
         if (!finalizedLast) {
           const usedStream = hasUsage(prev.usage);
-          const backfill =
-            !usedStream && payload.usage && hasUsage(payload.usage)
-              ? diffCumulativeUsage(next.messages, i, payload.usage)
+          const resultUsage =
+            payload.usage && hasUsage(payload.usage) && resultTurnInputWithinFuse(payload.usage)
+              ? payload.usage
               : null;
           next.messages[i] = {
             ...prev,
             streaming: false,
-            usage: usedStream ? prev.usage : (backfill ?? prev.usage),
-            // 差分回填已是本轮口径(与流式快照同语义),不再产生累计标记;
-            // usageCumulative 仅作为历史存量兼容(computeContextInfo 兜底路径)。
-            usageCumulative: undefined,
-            // 标记差分回填(非真流式快照):供 diffCumulativeUsage 混合域判定区分,防纯全 0
-            // 域被自己的回填误判混合域而冻结(见 ClaudeMessage.usageDiffed)。
-            usageDiffed: usedStream ? undefined : (backfill ? true : undefined),
+            usage: usedStream ? prev.usage : (resultUsage ?? prev.usage),
             // 回填本轮耗时(assistant 末行显示 ⏱)。durationMs 仅 result 有,流式中不显示。
             durationMs: payload.durationMs ?? prev.durationMs,
           };
@@ -668,6 +745,8 @@ export function applyEvent(state: ClaudeStreamState, payload: ClaudeEventPayload
         next.status = "idle";
         next.terminatedReason = null;
         next.compactRunning = false;
+        // 中断即 kill 进程:等待中的权限请求作废。
+        if (next.pendingPermissions.length > 0) next.pendingPermissions = [];
         // 被中断的轮 assistant 可能还在 streaming,置 false 避免永久转圈。
         // 同时兜底:全部 assistant 消息里仍 pending 的 tool_use 标记 done(中断后不会再有
         // tool_result,且孤儿 tool_use 可能不在末条消息,只扫末条会跨轮转圈),停止 spinner。
@@ -685,6 +764,8 @@ export function applyEvent(state: ClaudeStreamState, payload: ClaudeEventPayload
       next.status = "error";
       next.terminatedReason = payload.reason;
       next.compactRunning = false;
+      // 进程终止:等待中的权限请求作废(CLI 已死,回包也写不进去)。
+      if (next.pendingPermissions.length > 0) next.pendingPermissions = [];
       // 兜底:全部 assistant 消息仍 pending 的 tool_use 标记 done(进程终止后不会再有 tool_result;
       // 孤儿 tool_use 可能不在末条消息,只扫末条会跨轮转圈),停止 spinner。
       for (let i = 0; i < next.messages.length; i++) {
@@ -777,6 +858,41 @@ export function applyEvent(state: ClaudeStreamState, payload: ClaudeEventPayload
         streaming: false,
       });
       next.messageIndex.set(noticeId, next.messages.length - 1);
+      return next;
+    }
+    case "context_usage": {
+      // P2:get_context_usage 的 CLI 权威账本回包 → meta.contextUsage。computeContextInfo
+      // 优先用它(totalTokens/autoCompactThreshold 都是 CLI 实账,估算只在拿不到时兜底)。
+      // 不追加消息、不动状态;内容没变时原样返回(保持引用稳定)。
+      const usage = normalizeContextUsage(payload.data);
+      if (!usage) return state;
+      if (
+        next.meta.contextUsage &&
+        next.meta.contextUsage.totalTokens === usage.totalTokens &&
+        next.meta.contextUsage.maxTokens === usage.maxTokens &&
+        next.meta.contextUsage.autoCompactThreshold === usage.autoCompactThreshold
+      ) {
+        return state;
+      }
+      next.meta = { ...next.meta, contextUsage: usage };
+      return next;
+    }
+    case "permission_request": {
+      // can_use_tool:CLI 正阻塞等待用户答复,入列 pendingPermissions(状态栏转「等待确认」,
+      // 对应 tool_use 步骤卡换成确认框)。同 requestId 幂等(重放/重复投递不叠加)。
+      if (next.pendingPermissions.some((p) => p.requestId === payload.requestId)) return state;
+      next.pendingPermissions = [
+        ...next.pendingPermissions,
+        {
+          requestId: payload.requestId,
+          toolUseId: payload.toolUseId ?? null,
+          toolName: payload.toolName,
+          displayName: payload.displayName ?? null,
+          input: payload.input,
+          description: payload.description ?? null,
+          reasonType: payload.reasonType ?? null,
+        },
+      ];
       return next;
     }
     default: {
@@ -927,6 +1043,9 @@ export function hasPendingPlan(state: ClaudeStreamState): boolean {
  * 作为参数传入;summarize 在 registry/StatusBar 路径(无组件态)传 undefined -> 跳过此判定。
  */
 export function hasPendingApproval(state: ClaudeStreamState, resolvedApprovals?: Set<string>): boolean {
+  // CLI 正阻塞等待答复(can_use_tool 控制通道,见 PermissionRequest)——最高优先,
+  // 与消息内容无关:不置等待态的话,状态栏会一边转圈一边等用户。
+  if (state.pendingPermissions.length > 0) return true;
   if (state.messages.length === 0) return false;
   const last = state.messages[state.messages.length - 1];
   if (last.role !== "assistant") return false;
@@ -978,128 +1097,85 @@ export function inferContextWindow(model?: string): number {
   return DEFAULT_CONTEXT_WINDOW;
 }
 
-/**
- * result 累计 usage 差分回本轮真实值(仅**纯全 0 代理**场景使用)。
- * 数学:turn_N = cum_N - cum_K - Σ_{K<i<N} turn_i——K 为最近一次累计回填锚点,中间的
- * 流式快照/已差分回填消息均为本轮口径直接求和(claude 计费累计跨 compact 单调连续,
- * 故跨 boundary 扫描;历史回放消息的 jsonl 快照同为本轮口径,一并入 Σ)。
- * glm 同轮常拆多条 assistant 消息且携带**相同**快照,相邻(跳过非 assistant 消息)
- * 同值只计一次,防一轮被重复扣减。
- *
- * **混合域(序列已有任何流式快照)一律放弃差分**:差分正确性依赖 Σ 完整覆盖中间所有轮,
- * 混合域里 Σ 缺一轮(回放 jsonl 快照本身全 0 的轮、快照丢失等)缺失部分就直接变成
- * turn 的虚高——几 m 的「拉总的」混进快照序列,ctx 又显示 3m/1m(实测复现)。全 0 轮
- * 的 ctx 由 computeContextInfo 取最近一条真实快照兜底(上轮真实上下文,差一轮增量,
- * 远好于任何形式的累计)。任一字段差为负(计费域断裂)或单轮 input 超 2m(真实单轮
- * 实测峰值 ~1.07m,超界必是累计混入)同样返回 null——宁可没有,不可瞎统计。
+/** claude 链路总输入(Anthropic 官方互斥语义三段纯和,#133):input + cache_creation +
+ *  cache_read 三段不重叠。实测 glm-5.3 同为互斥(轮2: 净新增 48 + 命中 27264 = 27312 ≈
+ * 上轮总和+增量;重叠语义下 input 应≈总量 27312 而非 48)。**不做** totalInputTokens 的
+ * 重叠判别——它的「input ≥ 95% 缓存和视为重叠」在互斥语义的低命中率轮(首轮/compact 后
+ * 冷启动)必然误判,漏算 cache_read(实测 19351+7936 被算成 19351)。重叠兼容仅用于
+ * codex(openai 字段语义,见 contextMeter)。
  */
-function diffCumulativeUsage(
-  messages: ClaudeMessage[],
-  endIndex: number,
-  cum: ClaudeUsage,
-): ClaudeUsage | null {
-  const KEYS = [
-    "input_tokens",
-    "cache_creation_input_tokens",
-    "cache_read_input_tokens",
-    "output_tokens",
-  ] as const;
-  let base: ClaudeUsage | undefined; // 最近累计锚点 cum_K(找到即停,更早的已含在 base 内)
-  const sum: ClaudeUsage = {}; // 锚点之后本轮口径快照之和(真流式 + 差分回填都算)
-  let prevSnapshot: ClaudeUsage | undefined; // 相邻同值去重参照
-  let anySnapshot = false; // 是否出现过**真**流式快照(混合域判定;差分回填不算)
-  for (let i = endIndex - 1; i >= 0; i--) {
-    const m = messages[i];
-    if (m.role !== "assistant") continue;
-    const u = m.usage;
-    if (m.usageCumulative) {
-      if (hasUsage(u)) base = u;
-      break;
-    }
-    if (!hasUsage(u)) continue;
-    if (!m.usageDiffed) anySnapshot = true;
-    // hasUsage 已保证 u 非空(非对象或全 0 均返回 false),此处安全非空。
-    if (prevSnapshot && KEYS.every((k) => (u![k] ?? 0) === (prevSnapshot![k] ?? 0))) continue;
-    prevSnapshot = u;
-    for (const k of KEYS) sum[k] = (sum[k] ?? 0) + (u![k] ?? 0);
-  }
-  // 混合域:已有流式快照就不再从累计倒推(见函数头注释),ctx 走最近快照。
-  if (anySnapshot) return null;
-  const turn: ClaudeUsage = {};
-  let anyPositive = false;
-  for (const k of KEYS) {
-    const v = (cum[k] ?? 0) - (base?.[k] ?? 0) - (sum[k] ?? 0);
-    if (v < 0) return null;
-    if (v > 0) anyPositive = true;
-    turn[k] = v;
-  }
-  if (!anyPositive) return null;
-  // 保险丝:真实单轮输入实测峰值 ~1.07m,超 2m 必是计费域断裂后的累计混入——丢弃。
-  const turnInput =
-    (turn.input_tokens ?? 0) +
-    (turn.cache_creation_input_tokens ?? 0) +
-    (turn.cache_read_input_tokens ?? 0);
-  if (turnInput > 2_000_000) return null;
-  return turn;
+export function claudeInputTokens(u: ClaudeUsage): number {
+  return (u.input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0);
 }
 
 /**
- * 当前上下文用量(公共口径,ctx 显示/占用%共用;曾双份实现漂移后收敛于此):
- * **根据当前会话,不拉总**——优先取最近一次 compact boundary 后、最近一条**流式快照口径**
- * (usageCumulative undefined)的 assistant usage,它就是本轮完整输入 ≈ 当前上下文;
- * 流式全 0 的轮(glm 偶发)自动跳过,ctx 落到上一轮真实快照(差一轮增量)。
- * 混入的累计回填消息(历史存量 usageCumulative=true)不直接采用(长会话累计轻松超窗口,
- * 显示成 3m/1m 必错);段内只剩累计回填时(旧存量兼容)与**前一条累计跨 boundary 差分**
- * (claude 计费累计跨 compact 单调连续,compact 后首轮 = cum_after - cum_before 恰是
- * 压缩后的真实输入),差不出正值返回 null——累计本身绝不上屏(宁可没有,不可瞎统计)。
- * totalInputTokens 兼容互斥/重叠网关语义;glm 全 0 流式 usage 由 hasUsage 过滤。
- * window:meta.contextWindow(result.modelUsage 权威值)优先不抬升;兜底 infer + ctx 峰值
- * 动态抬升(liftContextWindow;boundary 停扫保证不跨 compact 累计)。
+ * result.usage 保险丝(#133):单轮总输入 >2m 判为旧代理的累计语义混入(真实单轮
+ * 实测峰值 ~1.07m),丢弃不回填——宁可 ctx 没有,不可「拉总的」上屏。
+ */
+function resultTurnInputWithinFuse(u: ClaudeUsage): boolean {
+  return claudeInputTokens(u) <= 2_000_000;
+}
+
+
+/**
+ * 当前上下文用量(#133 底层权威直取,不再统计/差分消息流):
+ * 最近一次 compact boundary 后、最近一条有真实 usage 的 assistant 即答案——
+ * usage 来源:官方 claude 流式快照(本轮口径)或 glm 流式全 0 时的 result.usage 回填
+ * (实测本轮口径,本轮完整输入 ≈ 当前上下文)。boundary 停扫:压缩前的旧快照不代表
+ * 当前上下文。全 0 usage 由 hasUsage 过滤(流式中 glm 恒 0,轮末 result 回填后即有值)。
+ * window:meta.contextWindow(result.modelUsage 权威值,如 glm [1m] 报 1000000)优先
+ * 不抬升;缺失时 infer + ctx 峰值动态抬升兜底(liftContextWindow)。
+ *
+ * pct 分母用**可压缩前可用窗口**(window − autocompact buffer,见 contextUsage.ts):
+ * CLI 逼近窗口尾部就自动压缩,按原始窗口算百分比会偏乐观。
+ * compact 刚完成时:boundary 自带 CLI 报的 post_tokens(压缩后真实上下文),直接回填,
+ * 不必等下一个 assistant 快照(此前压缩后到下一轮之间占用条直接消失)。
  */
 export function computeContextInfo(
   state: ClaudeStreamState,
   fallbackWindow: number,
 ): { ctx: number; window: number; pct: number } | null {
-  const used = (u: ClaudeUsage) =>
-    totalInputTokens(u.input_tokens ?? 0, u.cache_creation_input_tokens ?? 0, u.cache_read_input_tokens ?? 0);
-  // 倒序扫(boundary 停扫:快照口径下压缩前的旧快照不代表当前上下文):
-  // 首个流式快照即答案;顺路记段内最近一条累计回填(全 0 代理的差分兜底素材)。
-  let last: ClaudeMessage | undefined;
-  let lastCum: ClaudeMessage | undefined;
+  // P2:CLI 权威账本优先(get_context_usage 回包,result/compact 后刷新,新鲜度与估算同级;
+  // totalTokens/autoCompactThreshold 都是 CLI 实账,含 system prompt/tools/MCP 固定开销,
+  // 分母就是真实压缩阈值)。拿不到才走下面的快照估算。
+  const auth = state.meta?.contextUsage;
+  if (auth && auth.totalTokens > 0) {
+    const window = auth.maxTokens || state.meta?.contextWindow || fallbackWindow;
+    const usable =
+      auth.autoCompactThreshold && auth.autoCompactThreshold > 0
+        ? auth.autoCompactThreshold
+        : usableContextWindow(window);
+    return {
+      ctx: auth.totalTokens,
+      window,
+      pct: Math.min(100, (auth.totalTokens / usable) * 100),
+    };
+  }
   for (let i = state.messages.length - 1; i >= 0; i--) {
     const m = state.messages[i];
-    if (m.role === "compact" && m.compactKind === "boundary") break;
-    if (m.role !== "assistant" || !hasUsage(m.usage)) continue;
-    if (!m.usageCumulative) {
-      last = m;
+    if (m.role === "compact" && m.compactKind === "boundary") {
+      const post = m.compactMeta?.postTokens;
+      if (post && post > 0) {
+        const window = state.meta?.contextWindow ?? liftContextWindow(fallbackWindow, post);
+        return {
+          ctx: post,
+          window,
+          pct: Math.min(100, (post / usableContextWindow(window)) * 100),
+        };
+      }
       break;
     }
-    if (!lastCum) lastCum = m;
+    if (m.role !== "assistant" || !hasUsage(m.usage)) continue;
+    const ctx = claudeInputTokens(m.usage!);
+    if (ctx <= 0) return null;
+    const window = state.meta?.contextWindow ?? liftContextWindow(fallbackWindow, ctx);
+    return {
+      ctx,
+      window,
+      pct: Math.min(100, (ctx / usableContextWindow(window)) * 100),
+    };
   }
-  if (!last && !lastCum) return null;
-  let ctx: number;
-  if (last) {
-    ctx = used(last.usage!);
-  } else {
-    // 段内只剩累计回填(旧存量兼容;新回填已就地差分为本轮口径标 undefined,不走此分支):
-    // 与前一条累计差分,差不出正值就返回 null——**累计本身绝不上屏**(宁可没有,不可瞎统计)。
-    const lastUsed = used(lastCum!.usage!);
-    let prev: ClaudeMessage | undefined;
-    for (let i = state.messages.indexOf(lastCum!) - 1; i >= 0; i--) {
-      const m = state.messages[i];
-      if (m.role === "assistant" && m.usageCumulative && hasUsage(m.usage)) {
-        prev = m;
-        break;
-      }
-    }
-    if (!prev) return null;
-    const diff = lastUsed - used(prev.usage!);
-    if (diff <= 0) return null;
-    ctx = diff;
-  }
-  if (ctx <= 0) return null;
-  const window = state.meta?.contextWindow ?? liftContextWindow(fallbackWindow, ctx);
-  return { ctx, window, pct: Math.min(100, (ctx / window) * 100) };
+  return null;
 }
 
 export function summarize(
