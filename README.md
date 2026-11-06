@@ -70,6 +70,8 @@ txuyStudio is a desktop workbench (built with Tauri + Rust + React + xterm.js) f
 | Terminal | `@xterm/xterm` + `@xterm/addon-fit` |
 | Styling | Tailwind CSS v4 (`@tailwindcss/vite`) |
 | PTY | `portable-pty` (Windows ConPTY) |
+| Relay (self-hostable) | Go (`coder/websocket` + modernc sqlite, no CGO) |
+| Mobile companion | Flutter (mobile web) |
 | Package manager | Bun |
 
 ### Project Layout
@@ -88,6 +90,8 @@ src-tauri/
     state/        # AppState, persistence (state.json), pane-tree commands, window-aware hydrate
     system/       # Read-only env queries (memory %, git branch, tool-install detection)
     lib.rs        # Tauri entry; registers plugins, commands & global window-event listener
+relay/            # Self-hostable relay server (Go): routes encrypted frames, never decrypts
+companion/app/    # Mobile companion (Flutter web): a second view of desktop sessions
 docs/             # Theme guide + screenshot assets
 ```
 
@@ -137,6 +141,17 @@ The frontend dev server is pinned to port `:1420` (`strictPort`) — Tauri depen
 ### Architecture Note
 
 Terminal IO is decoupled behind a `TerminalTransport` interface (`src/domain/terminalTransport.ts`). `TerminalPane` depends only on this interface — it never calls Tauri PTY commands directly. Swapping backends means adding a new transport implementation; UI components stay unchanged.
+
+**Desktop ↔ Relay ↔ Companion.** txuyStudio ships as three parts in one repo: the desktop app (this project), an optional relay server, and a mobile companion.
+
+```
+desktop (Tauri, all business logic) ──outbound WSS──> relay (dumb pipe) <── your phone (companion)
+```
+
+- The relay is a **dumb pipe**: it routes encrypted frames between your desktop and phone by (user, device) and holds an encrypted snapshot for reconnects. It **never decrypts anything** — E2E encryption happens between the desktop and the phone; the auth boundary is a token check plus payload encryption.
+- **Self-host the relay.** It's ~4 Go files with no web framework (pure-Go sqlite, no CGO) — see [`relay/README.md`](relay/README.md) for deployment (systemd + TLS reverse proxy). Your code and tokens stay on machines you control.
+- The desktop makes **outbound-only** connections and listens on no port — the only thing exposed to the public internet is your own relay.
+- The companion (Flutter web) is a **second view** of the same desktop sessions: streaming AI conversations, approvals, usage stats, and a read-only shell mirror.
 
 ### Roadmap
 
@@ -212,6 +227,8 @@ txuyStudio 是一个桌面工作台(基于 Tauri + Rust + React + xterm.js),用�
 | 终端 | `@xterm/xterm` + `@xterm/addon-fit` |
 | 样式 | Tailwind CSS v4(`@tailwindcss/vite`) |
 | PTY | `portable-pty`(Windows ConPTY) |
+| 中继(可自建) | Go(`coder/websocket` + modernc sqlite,免 CGO) |
+| 移动伴侣 | Flutter(移动网页端) |
 | 包管理 | Bun |
 
 ### 目录结构
@@ -230,6 +247,8 @@ src-tauri/
     state/        # AppState、持久化(state.json)、pane-tree 命令、按窗口 hydrate
     system/       # 只读环境查询(内存%、git 分支、工具安装检测)
     lib.rs        # Tauri 入口;注册插件、命令与全局窗口事件监听
+relay/            # 可自建中继服务(Go):只路由密文帧,永不解密
+companion/app/    # 移动伴侣(Flutter 网页端):桌面会话的第二视图
 docs/             # 主题扩展指南 + 截图资源
 ```
 
@@ -279,6 +298,17 @@ cargo check          # 后端类型/编译检查(在 src-tauri/ 下执行)
 ### 架构说明
 
 终端 IO 通过 `TerminalTransport` 接口解耦(`src/domain/terminalTransport.ts`)。`TerminalPane` 只依赖该接口,**不直接调用 Tauri PTY 命令**。替换后端只需新增一个 transport 实现,UI 组件无需改动。
+
+**桌面端 ↔ 中继 ↔ 手机伴侣。** txuyStudio 一仓三端:桌面应用(本仓主体)、可选的中继服务、移动伴侣。
+
+```
+桌面端(Tauri,全部业务逻辑) ──出站 WSS──> 中继(哑管道) <── 手机(伴侣)
+```
+
+- 中继是**哑管道**:按 (user, device) 在桌面端与手机之间路由**密文帧**,断线期间暂存一份加密快照,**永不解密**——端到端加密发生在桌面端与手机之间;鉴权边界 = token 校验 + 载荷加密。
+- **中继可自建**:约 4 个 Go 文件、无 Web 框架(纯 Go sqlite,免 CGO),部署见 [`relay/README.md`](relay/README.md)(systemd + TLS 反代)。代码与 token 全部留在你自己的机器上。
+- 桌面端**纯出站连接、不监听任何端口**——暴露在公网的只有你自己的中继。
+- 伴侣(Flutter 网页端)是同一批桌面会话的**第二视图**:流式 AI 对话、审批、用量统计、shell 只读镜像。
 
 ### 路线图
 
