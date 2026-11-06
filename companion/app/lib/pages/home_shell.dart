@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import '../app_update.dart';
 import '../relay/account.dart';
 import '../relay/client.dart';
 import '../relay/credentials.dart';
@@ -46,6 +47,8 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   late final RelayClient _client;
   int _index = 0;
   UserProfile? _profile;
+  final AppUpdateService _updateService = AppUpdateService();
+  AppRelease? _update;
   AccountSession? _account; // 登录会话(isAdmin → 更多菜单出现「用户管理」)
   String? _hostName; // 当前连的电脑名(pair.hello,「更多」菜单里展示)
   String? _deskLabel; // 当前电脑的自定义标签(本机;展示优先于 hostName)
@@ -58,6 +61,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     _client.connect();
     _loadProfile();
     _loadHost();
+    _checkAppUpdate();
     DeviceLabelStore.loadAll().then((m) {
       if (mounted) setState(() => _deskLabel = m[widget.cred.desktopDeviceId]);
     });
@@ -74,6 +78,18 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       final name = r?["name"];
       if (mounted && name is String && name.isNotEmpty) setState(() => _hostName = name);
     } catch (_) {/* 离线:回退 deviceId */}
+  }
+
+  /// 启动时检查 GitHub Releases;有新版本立即弹更新说明,失败静默避免干扰连接。
+  Future<void> _checkAppUpdate() async {
+    try {
+      final release = await _updateService.check();
+      if (!mounted || release == null) return;
+      setState(() => _update = release);
+      await showAppUpdateDialog(context, release, _updateService);
+    } catch (_) {
+      // 更新源不可达时不打断主流程;用户仍可在“我的”页手动检查。
+    }
   }
 
   /// 用户资料:身份锚点(userId/deviceId)来自配对,展示层来自本地存储。
@@ -108,6 +124,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
         cred: widget.cred,
         selfId: widget.selfId,
         profile: profile,
+        initialUpdate: _update,
         onUnpair: widget.onUnpair,
         onSwitchDesktop: () => widget.onCredentialsChanged(),
         onProfileChanged: (p) async {
@@ -183,27 +200,72 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     );
   }
 
-  void _showAbout() {
-    showAboutDialog(
+  /// 「关于」:应用信息 + 手动检查更新入口(2026-11-05 用户要求)。showAboutDialog
+  /// 不支持自定义 actions,换自定义 AlertDialog;版本号取自 package_info(原为硬编码)。
+  Future<void> _showAbout() async {
+    String version = "";
+    try {
+      version = await _updateService.currentVersion();
+    } catch (_) {}
+    if (!mounted) return;
+    await showDialog<void>(
       context: context,
-      applicationName: "txuyStudio 移动伴侣",
-      applicationVersion: "1.0.0",
-      applicationIcon: Container(
-        width: 34,
-        height: 34,
-        decoration: BoxDecoration(
-          gradient: Mx.brandGradient,
-          borderRadius: BorderRadius.circular(9),
+      builder: (ctx) => AlertDialog(
+        title: Row(children: [
+          Container(
+            width: 34,
+            height: 34,
+            decoration: BoxDecoration(
+              gradient: Mx.brandGradient,
+              borderRadius: BorderRadius.circular(9),
+            ),
+          ),
+          const SizedBox(width: 10),
+          const Expanded(child: Text("txuyStudio 移动伴侣")),
+        ]),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(version.isEmpty ? "版本未知" : "版本 v$version",
+                style: const TextStyle(fontSize: 12, color: Mx.muted)),
+            const SizedBox(height: 10),
+            const Text(
+              "这是 txuyStudio 的手机端。电脑上的 Claude / Codex 对话、项目与用量,"
+              "经你自己的中继端到端加密转发到这里;数据始终留在你那台电脑上,没有云端副本。",
+              style: TextStyle(fontSize: 12, height: 1.5),
+            ),
+          ],
         ),
+        actions: [
+          TextButton(onPressed: () => _checkUpdateFromAbout(ctx), child: const Text("检查更新")),
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("关闭")),
+        ],
       ),
-      children: const [
-        Text(
-          "这是 txuyStudio 的手机端。电脑上的 Claude / Codex 对话、项目与用量,"
-          "经你自己的中继端到端加密转发到这里;数据始终留在你那台电脑上,没有云端副本。",
-          style: TextStyle(fontSize: 12, height: 1.5),
-        ),
-      ],
     );
+  }
+
+  /// 关于弹窗里的手动检查更新:有新版关弹窗直接展示更新说明;已是最新 toast 提示。
+  Future<void> _checkUpdateFromAbout(BuildContext dialogCtx) async {
+    try {
+      final release = await _updateService.check();
+      if (!mounted) return;
+      if (dialogCtx.mounted) Navigator.pop(dialogCtx);
+      if (release != null) {
+        setState(() => _update = release);
+        await showAppUpdateDialog(context, release, _updateService);
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text("当前已是最新版本")),
+        );
+      }
+    } catch (_) {
+      if (!mounted) return;
+      if (dialogCtx.mounted) Navigator.pop(dialogCtx);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("检查更新失败,请稍后重试")),
+      );
+    }
   }
 
   @override
@@ -211,7 +273,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     final pages = [
       MessagesPage(client: _client),
       ProjectsPage(client: _client),
-      UsagePage(client: _client),
+      UsagePage(client: _client, active: _index == 2),
       SessionsPage(client: _client),
     ];
     return Scaffold(

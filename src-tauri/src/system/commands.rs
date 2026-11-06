@@ -856,9 +856,13 @@ fn scan_codex_usage_file(
         let get = |k: &str| last.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
         let acc = map.entry((date, "codex".into(), model)).or_default();
         acc.requests += 1;
-        // codex 口径:input_tokens 不含缓存,cached_input_tokens 是 cache 读,cache_write 是写;
+        // codex 口径:input_tokens **含**缓存(OpenAI 语义,cached_input_tokens 是其子集
+        // ——实测 rollout:input=143277, cached=143104),须减掉得 fresh input,否则四段
+        // 纯和把缓存重复计一遍(Hero 总量虚高,对齐 cc-switch fresh_input_sql 的减法)。
         // output 含 reasoning(reasoning_output_tokens 是其子集,不另计)。
-        acc.input += get("input_tokens");
+        let cached = get("cached_input_tokens") + get("cache_write_input_tokens");
+        let fresh_input = get("input_tokens").saturating_sub(cached);
+        acc.input += fresh_input;
         acc.output += get("output_tokens");
         acc.cache_read += get("cached_input_tokens");
         acc.cache_creation += get("cache_write_input_tokens");
@@ -1051,12 +1055,15 @@ fn scan_codex_request_log(path: &Path, cutoff_date: &str, out: &mut Vec<RequestL
             continue;
         }
         let get = |k: &str| last.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+        // codex input 含缓存(OpenAI 语义),投影为 fresh input,与 scan_codex_usage_file
+        // 同口径;否则明细行 estimateCost 把缓存按全价重复计费。
+        let fresh_input = get("input_tokens").saturating_sub(get("cached_input_tokens") + get("cache_write_input_tokens"));
         out.push(RequestLogEntry {
             ts,
             app: "codex".into(),
             model: if model.is_empty() { "unknown".into() } else { model.clone() },
             session_id: session_id.clone(),
-            input_tokens: get("input_tokens"),
+            input_tokens: fresh_input,
             output_tokens: get("output_tokens"),
             cache_read_tokens: get("cached_input_tokens"),
             cache_creation_tokens: get("cache_write_input_tokens"),
@@ -1272,7 +1279,10 @@ fn scan_codex_activity_file(path: &Path, cutoff_date: &str, acc: &mut ActivitySe
             None => continue,
         };
         let get = |k: &str| last.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
-        acc.tokens += get("input_tokens") + get("output_tokens") + get("cached_input_tokens") + get("cache_write_input_tokens");
+        // codex input 含缓存(OpenAI 语义),fresh = input - cached - cache_write;
+        // 四段和才是真实消耗,直接原始四段相加会把缓存重复计一遍(同 scan_codex_usage_file)。
+        let fresh_input = get("input_tokens").saturating_sub(get("cached_input_tokens") + get("cache_write_input_tokens"));
+        acc.tokens += fresh_input + get("output_tokens") + get("cached_input_tokens") + get("cache_write_input_tokens");
         acc.requests += 1;
         let m = if model.is_empty() { "unknown".to_string() } else { model.clone() };
         *acc.models.entry(m).or_insert(0) += 1;
@@ -1612,80 +1622,127 @@ fn parse_claude_messages(path: &Path) -> Result<Vec<AiCliSessionMessage>, String
     Ok(out)
 }
 
-/// 解析 Codex rollout 为消息流。以 event_msg 为主干(user_message/agent_message),
-/// response_item 只取 function_call(tool_use)/function_call_output(tool_result)。
-/// 跳过 developer/base_instructions。避免 event_msg 与 response_item.message 重复。
+/// 解析 Codex rollout 为消息流。**主干 = response_item**(两种 rollout 时代都稳定):
+/// message(role=user/assistant,文本在 content[].text)→ 对话文本;
+/// function_call / custom_tool_call → 工具卡;function_call_output / custom_tool_call_output
+/// → 按 call_id 回填上一张同名工具卡的结果。旧解析找 `event_msg/user_message`/
+/// `agent_message`,但 rollout 格式已迁移(0.166 时代 event_msg 只剩 item_completed,没有
+/// user_message/agent_message 事件)→ 文本全丢,只剩工具行(2026-11-04 用户报「恢复就一个
+/// 内容还是 wait」)。developer/system 角色跳过;event_msg 整类跳过(item_completed 与
+/// response_item 同内容)。
 fn parse_codex_messages(path: &Path) -> Result<Vec<AiCliSessionMessage>, String> {
     let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
     let reader = std::io::BufReader::new(file);
-    let mut out = Vec::new();
+    let mut out: Vec<AiCliSessionMessage> = Vec::new();
+    // call_id → out 下标(最近一张待配结果工具卡;同 id 重复调用覆盖,rollout 顺序即时间序)。
+    let mut pending_tools: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+
+    // message.content[] 的文本拼接(content[].text;空 content 容错)。
+    let content_text = |payload: &serde_json::Value| -> String {
+        payload
+            .get("content")
+            .and_then(|c| c.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|seg| seg.get("text").and_then(|x| x.as_str()))
+                    .collect::<Vec<_>>()
+                    .join("")
+            })
+            .unwrap_or_default()
+    };
 
     for line in reader.lines() {
         let line = match line { Ok(l) => l, Err(_) => continue };
         let trimmed = line.trim();
         if trimmed.is_empty() { continue; }
         let v: serde_json::Value = match serde_json::from_str(trimmed) { Ok(v) => v, Err(_) => continue };
-
-        let ty = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        if v.get("type").and_then(|t| t.as_str()) != Some("response_item") {
+            continue;
+        }
         let timestamp = v.get("timestamp").and_then(|x| x.as_str()).map(|s| s.to_string());
-        let payload = v.get("payload");
-
-        if ty == "event_msg" {
-            let sub = payload.and_then(|p| p.get("type")).and_then(|x| x.as_str()).unwrap_or("");
-            match sub {
-                "user_message" => {
-                    if let Some(msg) = payload.and_then(|p| p.get("message")).and_then(|x| x.as_str()) {
+        let payload = match v.get("payload") { Some(p) => p, None => continue };
+        let sub = payload.get("type").and_then(|x| x.as_str()).unwrap_or("");
+        match sub {
+            "message" => {
+                let role = payload.get("role").and_then(|x| x.as_str()).unwrap_or("");
+                match role {
+                    // user 文本 = 人类输入(developer/system 的 AGENTS.md 注入跳过;
+                    // 旧格式首条注入是 "# AGENTS.md instructions" 开头,一并跳过)。
+                    "user" => {
+                        let text = content_text(payload);
+                        let t = text.trim();
+                        if t.is_empty()
+                            || t.starts_with("<user_instructions>")
+                            || t.starts_with("<environment_context>")
+                            || t.starts_with("# AGENTS.md instructions")
+                        {
+                            continue;
+                        }
                         out.push(AiCliSessionMessage {
                             role: "user".into(),
                             timestamp,
-                            text: msg.trim().to_string(),
+                            text: t.to_string(),
                             tool_use: None,
                             tool_result: None,
                         });
                     }
-                }
-                "agent_message" => {
-                    if let Some(msg) = payload.and_then(|p| p.get("message")).and_then(|x| x.as_str()) {
-                        out.push(AiCliSessionMessage {
-                            role: "assistant".into(),
-                            timestamp,
-                            text: msg.trim().to_string(),
-                            tool_use: None,
-                            tool_result: None,
-                        });
+                    "assistant" => {
+                        let text = content_text(payload);
+                        if !text.trim().is_empty() {
+                            out.push(AiCliSessionMessage {
+                                role: "assistant".into(),
+                                timestamp,
+                                text,
+                                tool_use: None,
+                                tool_result: None,
+                            });
+                        }
                     }
+                    _ => {} // developer/system 跳过
                 }
-                _ => {} // token_count/task_started/task_complete 等跳过。
             }
-        } else if ty == "response_item" {
-            let sub = payload.and_then(|p| p.get("type")).and_then(|x| x.as_str()).unwrap_or("");
-            match sub {
-                "function_call" => {
-                    let name = payload.and_then(|p| p.get("name")).and_then(|x| x.as_str()).unwrap_or("").to_string();
-                    let args = payload.and_then(|p| p.get("arguments")).and_then(|x| x.as_str()).unwrap_or("");
-                    out.push(AiCliSessionMessage {
-                        role: "assistant".into(),
-                        timestamp,
-                        text: String::new(),
-                        tool_use: Some(ToolUseSummary {
-                            name,
-                            input_brief: truncate_chars(args.trim(), 200),
-                        }),
-                        tool_result: None,
-                    });
+            "function_call" | "custom_tool_call" => {
+                let name = payload.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                let args = payload
+                    .get("arguments")
+                    .or_else(|| payload.get("input"))
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("");
+                let call_id = payload.get("call_id").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                out.push(AiCliSessionMessage {
+                    role: "assistant".into(),
+                    timestamp,
+                    text: String::new(),
+                    tool_use: Some(ToolUseSummary {
+                        name,
+                        input_brief: truncate_chars(args.trim(), 200),
+                    }),
+                    tool_result: None,
+                });
+                if !call_id.is_empty() {
+                    pending_tools.insert(call_id, out.len() - 1);
                 }
-                "function_call_output" => {
-                    let output = payload.and_then(|p| p.get("output")).and_then(|x| x.as_str()).unwrap_or("");
-                    out.push(AiCliSessionMessage {
-                        role: "user".into(),
-                        timestamp,
-                        text: String::new(),
-                        tool_use: None,
-                        tool_result: Some(truncate_chars(output.trim(), 500)),
-                    });
-                }
-                _ => {} // message(role=developer/user/assistant)跳过(event_msg 已覆盖,避免重复)。
             }
+            "function_call_output" | "custom_tool_call_output" => {
+                // output 两形态:str 或 [{type,text}] 数组(新格式 function_call_output 实测)。
+                let output_text = match payload.get("output") {
+                    Some(serde_json::Value::String(s)) => s.clone(),
+                    Some(serde_json::Value::Array(arr)) => arr
+                        .iter()
+                        .filter_map(|seg| seg.get("text").and_then(|x| x.as_str()))
+                        .collect::<Vec<_>>()
+                        .join(""),
+                    _ => String::new(),
+                };
+                let call_id = payload.get("call_id").and_then(|x| x.as_str()).unwrap_or("");
+                if let Some(&idx) = pending_tools.get(call_id) {
+                    if let Some(slot) = out.get_mut(idx) {
+                        slot.tool_result = Some(truncate_chars(output_text.trim(), 500));
+                    }
+                    pending_tools.remove(call_id);
+                }
+            }
+            _ => {} // reasoning/message 之外(event_msg/token_usage_record 等)跳过
         }
     }
     Ok(out)

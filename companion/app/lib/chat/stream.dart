@@ -87,9 +87,54 @@ class ChatStream {
   int usageInput = 0; // claude: input + cacheRead + cacheCreation 三段纯和
   int usageOutput = 0;
 
-  /// 后台任务快照(claude `backgroundTasksChanged` 权威替换,[] = 无;chat.status
+  /// 后台任务快照(claude `background_tasks_changed` 权威替换,[] = 无;chat.status
   /// 断线重连补齐同写这里)。桌面端「后台 ×N」同源。
   List<Map<String, String>> backgroundTasks = [];
+
+  /// 装载期实时事件缓冲(2026-11-05 竞态修复)。
+  ///
+  /// `_bootstrap` 拉历史期间(round-trip 数秒),桌面端的实时事件已在到达;若直接归并,
+  /// 随后 `_applyHistoryPayload` 的 `clear()` 重建会把它们洗掉——用户实测「新消息凭空消失」。
+  /// 置 `buffering` 后 `applyLive` 把事件存进这里,历史落地后 `replayBuffered` 按序重放:
+  /// 归并按 msgId/toolId 去重,与历史重叠部分幂等吸收,重叠之外的是真正的新消息。
+  final List<Map<String, dynamic>> _liveBuffer = [];
+  bool _buffering = false;
+
+  /// 进入装载期:实时事件改走缓冲(见 _liveBuffer)。
+  void beginBuffering() {
+    _buffering = true;
+  }
+
+  /// 结束缓冲并按序重放积压事件(无积压时零开销)。
+  void replayBuffered() {
+    _buffering = false;
+    if (_liveBuffer.isEmpty) return;
+    final pending = List<Map<String, dynamic>>.of(_liveBuffer);
+    _liveBuffer.clear();
+    for (final p in pending) {
+      final provider = p.remove("provider") as String? ?? "claude";
+      if (provider == "claude") {
+        applyClaude(p);
+      } else {
+        applyCodex(p);
+      }
+    }
+  }
+
+  /// 实时事件入口:装载期缓冲,装载完成后直接归并。
+  ///
+  /// claude/codex 共用一个缓冲(同 tab 不会双 provider 混流),重放时按帧内 provider 分流。
+  void applyLive(String provider, Map<String, dynamic> payload) {
+    if (_buffering) {
+      _liveBuffer.add({"provider": provider, ...payload});
+      return;
+    }
+    if (provider == "claude") {
+      applyClaude(payload);
+    } else {
+      applyCodex(payload);
+    }
+  }
 
   void clear() {
     messages.clear();
@@ -165,8 +210,10 @@ class ChatStream {
           if (p["result"] == "failed") terminatedReason = _nonEmpty(p["error"]);
         }
         break;
-      case "backgroundTasksChanged":
+      case "background_tasks_changed":
         // 后台任务列表权威快照(任务启动/完成/变化时推;清空即无)。
+        // kind 是 snake_case(与 Rust enum rename_all 对齐):曾误写 camelCase 恒不匹配,
+        // 列表只能靠 chat.status 填一次、完成后清不掉(2026-11-05 用户实测卡死)。
         backgroundTasks = [
           for (final t in (p["tasks"] as List<dynamic>? ?? const []))
             if (t is Map)
@@ -177,7 +224,7 @@ class ChatStream {
               },
         ];
         break;
-      case "taskNotification":
+      case "task_notification":
         // 后台任务完成/失败通知:插一条轻提示消息(与桌面消息流同位)。
         final summary = _nonEmpty(p["summary"]) ?? "后台任务更新";
         messages.add(ChatMessage(
@@ -236,6 +283,29 @@ class ChatStream {
         _absorbCodexUsage(p["usage"]);
         _finalizeTools();
         break;
+      case "approval_requested":
+        // app-server 实时审批帧(request 外壳 = {key, method, params})。复用 claude
+        // 审批卡结构渲染;应答走 `chat.codexApproval`(key + approved,decision 枚举
+        // 由桌面端按 method 代际分派,手机端不感知协议代际)。
+        final req = (p["request"] as Map?)?.cast<String, dynamic>() ?? const {};
+        final key = req["key"] as String? ?? "";
+        if (key.isNotEmpty) {
+          final rp = (req["params"] as Map?)?.cast<String, dynamic>() ?? const {};
+          permissions.removeWhere((a) => a.requestId == key);
+          permissions.add(PermissionAsk(
+            requestId: key,
+            toolName: _codexApprovalLabel(req["method"] as String? ?? ""),
+            inputBrief: (rp["command"] as String?) ?? (rp["reason"] as String?) ?? "",
+            input: rp,
+          ));
+        }
+        break;
+      case "approval_resolved":
+        // 后端 respond(或超时/他端决策)后的权威广播:无条件撤卡(多视图同步兜底;
+        // 手机自己应答的本地清除在 _answer,先到先生效)。
+        final rid = p["requestId"] as String? ?? "";
+        permissions.removeWhere((a) => a.requestId == rid);
+        break;
       case "terminated":
         // normal = 每轮 exec 正常 EOF(设计如此,当 idle);interrupted = 用户中断。
         final reason = p["reason"] as String? ?? "";
@@ -246,11 +316,22 @@ class ChatStream {
           status = "error";
           terminatedReason = reason;
         }
+        // 轮已断(进程死/中断),审批请求不再可答,撤卡防悬空(桌面同语义)。
+        permissions.clear();
         _finalizeTools();
         break;
       default:
         break;
     }
+  }
+
+  /// codex 审批帧 method → 可读标签(桌面端按 command/reason 渲染细节,手机端
+  /// 卡标题给动作类型)。覆盖 0.166 两代 method 名;未知 method 退「审批请求」。
+  static String _codexApprovalLabel(String method) {
+    if (method.contains("fileChange") || method.contains("applyPatch")) return "修改文件";
+    if (method.contains("permissions")) return "提升权限";
+    if (method.contains("commandExecution") || method.contains("execCommand")) return "执行命令";
+    return "审批请求";
   }
 
   /// claude result.usage → 当前上下文口径,整体覆盖(空段跳过防误清零)。
@@ -267,15 +348,23 @@ class ChatStream {
     usageOutput = output;
   }
 
-  /// codex turn_completed.usage → 本轮用量,累计(cached_input 计入 input 侧)。
+  /// codex turn_completed.usage → 本轮用量,累计。
+  /// input 已含 cached(OpenAI 重叠语义,桌面 contextMeter.totalInputTokens 同款
+  /// 95% 判别),直接加 cached 会双倍;当前桌面 turn/completed 恒不带 usage
+  /// (权威用量走 usage_updated),此路径是防御性兜底。
   void _absorbCodexUsage(Object? raw) {
     final u = (raw as Map?)?.cast<String, dynamic>();
     if (u == null) return;
     final input = (u["input_tokens"] as num?)?.toInt() ?? 0;
     final cached = (u["cached_input_tokens"] as num?)?.toInt() ?? 0;
+    final cacheWrite = (u["cache_write_input_tokens"] as num?)?.toInt() ?? 0;
     final output = (u["output_tokens"] as num?)?.toInt() ?? 0;
-    if (input + cached + output <= 0) return;
-    usageInput += input + cached;
+    final cacheSum = cached + cacheWrite;
+    if (input + cacheSum + output <= 0) return;
+    final totalIn = (cacheSum > 0 && input >= cacheSum * 0.95)
+        ? (input > cacheSum ? input : cacheSum)
+        : input + cacheSum;
+    usageInput += totalIn;
     usageOutput += output;
   }
 

@@ -19,6 +19,8 @@ use std::process::Stdio;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use serde_json::json;
+
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use super::{
@@ -1670,6 +1672,120 @@ fn take_killed_flag(app: &AppHandle, project_id: &str, tab_id: &str) -> bool {
 
 /// 历史回填事件上限:大会话(数千行)只回填最近部分,防一次性注入巨量消息卡 UI。
 const HISTORY_MAX_EVENTS: usize = 400;
+
+/// 手机端裁剪上限(仅 `slim_event_for_mobile` 消费):
+/// text/thinking 是正文与思考,给足余量截 16K 字符;tool_result 全文截 2K;
+/// tool_use.input 只产一句话摘要(200 字)。
+const HISTORY_SLIM_TEXT_MAX: usize = 16_000;
+const HISTORY_SLIM_RESULT_MAX: usize = 2_048;
+const HISTORY_SLIM_INPUT_MAX: usize = 200;
+
+fn truncate_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max).collect();
+    out.push('…');
+    out
+}
+
+/// 手机端 tool_use.input 摘要:与 companion `stream.dart _briefInput` 同款取法
+/// (取首个路径/命令类字段),产 String 让手机端 `_briefInput` 直通截断展示。
+fn brief_input_for_mobile(input: Option<&serde_json::Value>) -> String {
+    let Some(v) = input else {
+        return String::new();
+    };
+    match v {
+        serde_json::Value::String(s) => truncate_chars(s, HISTORY_SLIM_INPUT_MAX),
+        serde_json::Value::Object(m) => {
+            for k in ["command", "file_path", "path", "pattern", "url", "query", "prompt", "description"] {
+                if let Some(serde_json::Value::String(s)) = m.get(k) {
+                    if !s.is_empty() {
+                        return truncate_chars(s, HISTORY_SLIM_INPUT_MAX);
+                    }
+                }
+            }
+            let joined = m
+                .iter()
+                .map(|(k, x)| format!("{k}={x}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            truncate_chars(&joined, HISTORY_SLIM_INPUT_MAX)
+        }
+        other => truncate_chars(&other.to_string(), HISTORY_SLIM_INPUT_MAX),
+    }
+}
+
+/// 手机端 chat.history 载荷裁剪(2026-11-05 方案 1):历史回填的 message 是**完整** JSON
+/// (tool_use 完整 input、tool_result 全文,单条可达数百 KB),400 条序列化 + E2E 加密 +
+/// 公网转发轻松数 MB,手机首开秒等。手机渲染(`stream.dart applyClaude`)只消费
+/// text/thinking 全文、tool_use 的 name + input 一句话摘要、tool_result content 回填,
+/// 据此投影:text/thinking 截 16K、tool_use.input 摘要 200 字、tool_result.content 截 2K、
+/// 其余 block(redacted_thinking 等)与顶层大字段(usage 等)丢弃。
+/// 仅 relay `chat_history`(手机)走此路径;桌面 tauri command 回溯回填保持全量。
+pub fn slim_event_for_mobile(v: &ClaudeEventPayload) -> ClaudeEventPayload {
+    let message = match v {
+        ClaudeEventPayload::User { message } | ClaudeEventPayload::Assistant { message } => message,
+        other => return other.clone(),
+    };
+    let mut slim = serde_json::Map::new();
+    // 前端归并只用 id(同 id 覆盖)+ role;content 见下。
+    for k in ["id", "role"] {
+        if let Some(x) = message.get(k) {
+            slim.insert(k.to_string(), x.clone());
+        }
+    }
+    let mut out: Vec<serde_json::Value> = Vec::new();
+    if let Some(serde_json::Value::Array(blocks)) = message.get("content") {
+        for b in blocks {
+            match b.get("type").and_then(|t| t.as_str()).unwrap_or("") {
+                "text" => {
+                    let t = b.get("text").and_then(|t| t.as_str()).unwrap_or("");
+                    out.push(json!({ "type": "text", "text": truncate_chars(t, HISTORY_SLIM_TEXT_MAX) }));
+                }
+                "thinking" => {
+                    // thinking block 另有 signature(base64,可达数 KB)一并丢弃。
+                    let t = b.get("thinking").and_then(|t| t.as_str()).unwrap_or("");
+                    out.push(json!({ "type": "thinking", "thinking": truncate_chars(t, HISTORY_SLIM_TEXT_MAX) }));
+                }
+                "tool_use" => out.push(json!({
+                    "type": "tool_use",
+                    "id": b.get("id"),
+                    "name": b.get("name"),
+                    "input": brief_input_for_mobile(b.get("input")),
+                })),
+                "tool_result" => {
+                    // content 是 str 或 block 数组(取 text 拼接),统一拍平成截断字符串,
+                    // 手机端 `_flattenResult` 对 String 直通。
+                    let flat = match b.get("content") {
+                        Some(serde_json::Value::String(s)) => s.clone(),
+                        Some(serde_json::Value::Array(items)) => items
+                            .iter()
+                            .map(|c| c.get("text").and_then(|t| t.as_str()).unwrap_or("").to_string())
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                        _ => String::new(),
+                    };
+                    out.push(json!({
+                        "type": "tool_result",
+                        "tool_use_id": b.get("tool_use_id"),
+                        "is_error": b.get("is_error"),
+                        "content": truncate_chars(&flat, HISTORY_SLIM_RESULT_MAX),
+                    }));
+                }
+                // redacted_thinking / image / document 等手机不渲染,直接丢。
+                _ => {}
+            }
+        }
+    }
+    slim.insert("content".to_string(), json!(out));
+    let message = serde_json::Value::Object(slim);
+    match v {
+        ClaudeEventPayload::User { .. } => ClaudeEventPayload::User { message },
+        ClaudeEventPayload::Assistant { .. } => ClaudeEventPayload::Assistant { message },
+        _ => unreachable!(),
+    }
+}
 
 /// `read_claude_history_events` 返回:events(最多上限条,取**末尾**段=最近上下文)+ total(全会话
 /// 命中事件数,total > events.len 时前端提示「仅回填最近部分」)。camelCase 对齐前端。

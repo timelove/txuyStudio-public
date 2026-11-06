@@ -20,11 +20,12 @@ class _DigestItem {
   final String tabTitle;
   final String kind; // claude | codex
   final bool busy;
+  final bool started; // 进程在线(claude 长进程启动后恒 true;旧桌面无此字段为 false)
   final String lastText;
   final String lastTs; // ISO8601,可能为空
   const _DigestItem({
     required this.projectId, required this.projectName, required this.tabId,
-    required this.tabTitle, required this.kind, required this.busy,
+    required this.tabTitle, required this.kind, required this.busy, required this.started,
     required this.lastText, required this.lastTs,
   });
 }
@@ -150,17 +151,29 @@ class _MessagesPageState extends State<MessagesPage> {
             textAlign: TextAlign.center, style: TextStyle(fontSize: 13, height: 1.7, color: Mx.muted)),
       );
     }
-    // 按项目分组(保持 digest 项目顺序),组内保持 tab 顺序。
+    // 按项目分组后**在线优先**重排(与项目页同口径):含 busy 的项目组最前,次之含
+    // 在线(started)会话;组内 busy > started > 其余。分桶拼接而非 sort——Dart 的
+    // List.sort 不稳定,同档要保持 digest 原顺序。
     final groups = <String, List<_DigestItem>>{};
     for (final it in _items) {
       groups.putIfAbsent(it.projectName, () => []).add(it);
     }
+    int grpRank(List<_DigestItem> g) => g.any((i) => i.busy)
+        ? 0
+        : g.any((i) => i.started)
+            ? 1
+            : 2;
+    final gBuckets = [for (var i = 0; i < 3; i++) <MapEntry<String, List<_DigestItem>>>[]];
+    for (final e in groups.entries) {
+      gBuckets[grpRank(e.value)].add(e);
+    }
+    final orderedGroups = gBuckets.expand((b) => b).toList();
     return RefreshIndicator(
       onRefresh: () => _reload(),
       child: ListView(
         physics: const AlwaysScrollableScrollPhysics(),
         children: [
-          for (final entry in groups.entries) ...[
+          for (final entry in orderedGroups) ...[
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
               child: Row(children: [
@@ -173,12 +186,21 @@ class _MessagesPageState extends State<MessagesPage> {
                 const Expanded(child: Divider(height: 1)),
               ]),
             ),
-            for (final it in entry.value) _tile(it),
+            for (final it in _sortedGroup(entry.value)) _tile(it),
           ],
           const SizedBox(height: 12),
         ],
       ),
     );
+  }
+
+  /// 组内在线优先(busy > started > 其余;分桶保序)。
+  List<_DigestItem> _sortedGroup(List<_DigestItem> g) {
+    final buckets = [for (var i = 0; i < 3; i++) <_DigestItem>[]];
+    for (final it in g) {
+      buckets[it.busy ? 0 : (it.started ? 1 : 2)].add(it);
+    }
+    return buckets.expand((b) => b).toList();
   }
 
   Widget _tile(_DigestItem it) {
@@ -258,6 +280,7 @@ class _DigestItemMapper {
         tabTitle: j["tabTitle"] ?? "",
         kind: j["kind"] ?? "claude",
         busy: j["busy"] == true,
+        started: j["started"] == true,
         lastText: j["lastText"] ?? "",
         lastTs: j["lastTs"] ?? "",
       );

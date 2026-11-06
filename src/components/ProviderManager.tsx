@@ -45,6 +45,7 @@ import {
   notifyCodexProviderChanged,
   readCurrentCodexInfo,
   saveCodexProviders,
+  type CodexModelEntry,
   type CodexProvider,
   type CodexProviderInfo,
 } from "../domain/codexProviders";
@@ -58,6 +59,10 @@ import { Button } from "./ui/Button";
 import { CopyButton } from "./ui/CopyButton";
 import { Popover, PopoverContent, PopoverTrigger } from "./ui/Popover";
 
+/** codex 模型条目默认上下文窗口(2026-11-04 用户定调:新增/导入/预设都给 272k;
+ *  手动逐行可改,只是不用再手敲)。 */
+const DEFAULT_CODEX_CTX = 272_000;
+
 /** 编辑表单投影(两 kind 字段并集;按 kind 决定哪些输入框渲染/保存哪些字段)。 */
 type Draft = {
   id: string;
@@ -65,10 +70,17 @@ type Draft = {
   baseUrl: string;
   token: string;
   model: string;
-  /** codex: model_reasoning_effort(空 = 保留 config.toml 现值)。 */
-  reasoningEffort: string;
+  /** 上游接口格式。codex: wire_api(responses/chat;旧数据缺省 responses);claude:
+   *  anthropic/openai(旧数据缺省 anthropic)。 */
+  wireApi: string;
+  apiFormat: string;
+  /** claude: auth_token(Bearer 头)/ api_key(x-api-key 头);codex 无认证字段概念
+   *  (恒 config 段 experimental_bearer_token,2026-11-04 用户定调)。 */
+  authStyle: string;
   /** claude: 其余 env 键(编辑已有条目保住,新增为空)。 */
   extraEnv: Record<string, string>;
+  /** codex: 供应商级模型列表(cc-switch modelCatalog 对齐;claude 不用)。 */
+  models: CodexModelEntry[];
 };
 
 /** 列表条目的统一视图(provider 原始对象 + 展示字段提取;保存时原样回写原对象)。 */
@@ -83,6 +95,31 @@ type ProviderKind = "claude" | "codex";
 /** 「一键设置」铺的档位:claude 的四个内置别名(与 env 里 ANTHROPIC_DEFAULT_* 对应)。 */
 const MODEL_TIERS = ["OPUS", "SONNET", "HAIKU", "FABLE"] as const;
 
+/** 四档映射占用的 8 个 env 键(模型映射区结构化编辑;其余 env 键仍走下方裸键值行)。 */
+const TIER_ENV_KEYS = MODEL_TIERS.flatMap((t) => [
+  `ANTHROPIC_DEFAULT_${t}_MODEL`,
+  `ANTHROPIC_DEFAULT_${t}_MODEL_NAME`,
+]);
+
+/** extraEnv 拆两组:四档映射键(tier 键序稳定)与其余键(裸行区保序)。 */
+function splitTierEnv(env: Record<string, string>): {
+  tiers: Record<(typeof MODEL_TIERS)[number], { model: string; display: string }>;
+  rest: Record<string, string>;
+} {
+  const tiers = {} as Record<(typeof MODEL_TIERS)[number], { model: string; display: string }>;
+  for (const t of MODEL_TIERS) {
+    tiers[t] = {
+      model: env[`ANTHROPIC_DEFAULT_${t}_MODEL`] ?? "",
+      display: env[`ANTHROPIC_DEFAULT_${t}_MODEL_NAME`] ?? "",
+    };
+  }
+  const rest: Record<string, string> = {};
+  for (const [k, v] of Object.entries(env)) {
+    if (!TIER_ENV_KEYS.includes(k)) rest[k] = v;
+  }
+  return { tiers, rest };
+}
+
 /** 把模型 m 铺到四档别名的 extraEnv(原表其余键保留):`_MODEL` 写原名、`_NAME` 写去方括号
  *  标记的显示名——本机 env 里 _MODEL 带 `[1M]`、_NAME 不带,claude CLI 用 _NAME 作界面
  *  显示名,两套键各按各自口径填。 */
@@ -96,8 +133,51 @@ function spreadModelToTiers(extraEnv: Record<string, string>, m: string): Record
   return next;
 }
 
+/** 取出 extraEnv 里的四档映射键(与 splitTierEnv().rest 配对,裸行区写回时保住映射键)。 */
+function pickTierEnv(env: Record<string, string>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const k of TIER_ENV_KEYS) {
+    if (env[k] !== undefined) out[k] = env[k];
+  }
+  return out;
+}
+
 /** 端点探测结果(Rust probe_provider_endpoint 镜像)。 */
 type ProbeResult = { latencyMs: number; status: number; models: string[]; error: string | null };
+
+/**
+ * 表单字段:label + 输入(label 化,比纯 placeholder 可扫读)。
+ *
+ * **必须在模块顶层定义**(2026-11-02 教训,IME 丢字根因):曾定义在 ProviderManager
+ * render 体内——每次输入(setDraft)重渲染时 Field 都是新的函数引用,React 视为不同
+ * 组件类型,表单全部控件整体 remount。IME 提交(compositionend)瞬间正撞上 remount,
+ * 中文文本丢失(实测模型输入框打不出中文);焦点随 remount 漂移,还出现「焦点自己
+ * 跳到别的输入框」。探针证据:focus() FROM commitMount(react-dom)。
+ */
+function Field({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <label className="block">
+      <span className="mb-1 block text-[10px] uppercase tracking-wide text-[var(--mx-faint)]">{label}</span>
+      {children}
+    </label>
+  );
+}
+
+/** 余额查询结果(Rust query_provider_balance 镜像;null = 供应商不在白名单,不显示)。 */
+type BalanceEntry = { label: string; remaining: number; unit: string };
+type QuotaTier = { name: string; usedPct: number; resetMs: number | null };
+type QuotaInfo = { tiers: QuotaTier[]; level: string | null };
+type BalanceResult = { entries: BalanceEntry[]; error: string | null; quota: QuotaInfo | null };
+
+/** 重置时间(Unix 毫秒)→ 相对时长("2h31m" / "3d12h"(≥48h 转天)/ "18m";已过期给 "0m")。 */
+function fmtReset(ms: number): string {
+  const d = ms - Date.now();
+  if (d <= 0) return "0m";
+  const h = Math.floor(d / 3_600_000);
+  const m = Math.floor((d % 3_600_000) / 60_000);
+  if (h >= 48) return `${Math.floor(h / 24)}d${h % 24}h`;
+  return h > 0 ? `${h}h${m}m` : `${m}m`;
+}
 
 type ProbeState =
   | { phase: "idle" }
@@ -140,11 +220,15 @@ function useAdapter(kind: ProviderKind) {
       };
 }
 
-/** 与 claudeProviders.providerEnv 同拼装逻辑(配置预览用;空 token/模型省键的语义一致)。 */
+/** 与 claudeProviders.providerEnv 同拼装逻辑(配置预览用;空 token/模型省键的语义一致;
+ *  token 键按认证字段落 AUTH_TOKEN / API_KEY)。 */
 function draftEnvJson(draft: Draft): string {
   const env: Record<string, string> = { ...draft.extraEnv };
   if (draft.baseUrl.trim()) env.ANTHROPIC_BASE_URL = draft.baseUrl.trim();
-  if (draft.token.trim()) env.ANTHROPIC_AUTH_TOKEN = draft.token.trim();
+  if (draft.token.trim()) {
+    if (draft.authStyle === "api_key") env.ANTHROPIC_API_KEY = draft.token.trim();
+    else env.ANTHROPIC_AUTH_TOKEN = draft.token.trim();
+  }
   if (draft.model.trim()) env.ANTHROPIC_MODEL = draft.model.trim();
   return JSON.stringify(env, null, 2);
 }
@@ -152,16 +236,20 @@ function draftEnvJson(draft: Draft): string {
 /** 与后端 apply_codex_provider 的段写法对齐(config.toml provider 段预览)。 */
 function draftToml(draft: Draft): string {
   const name = draft.name.trim() || "(名称)";
+  // codex 无「默认模型」字段后,config.toml 的 model = 模型列表首项(claude 的 models
+  // 恒空数组,自然回退 draft.model 的 ANTHROPIC 语义——本函数只服务 codex 预览)。
+  const model = draft.models[0]?.id.trim() || draft.model.trim();
   const lines = [
     `# ~/.codex/config.toml(provider 段;mcp_servers 等其余部分原样保留)`,
     `model_provider = "custom"`,
-    draft.model.trim() ? `model = "${draft.model.trim()}"` : `# model = (保留现值)`,
-    draft.reasoningEffort.trim() ? `model_reasoning_effort = "${draft.reasoningEffort.trim()}"` : `# model_reasoning_effort = (保留现值)`,
+    model ? `model = "${model}"` : `# model = (保留现值)`,
+    `# model_reasoning_effort = (不进供应商配置,保留现值;会话内可按轮覆盖)`,
     ``,
     `[model_providers.custom]`,
     `name = "${name}"`,
     `base_url = "${draft.baseUrl.trim() || "(未填)"}"`,
-    `wire_api = "responses"`,
+    `wire_api = "${draft.wireApi || "responses"}"`,
+    `requires_openai_auth = false`,
     draft.token.trim() ? `experimental_bearer_token = "${draft.token.trim()}"` : `# experimental_bearer_token = (未填)`,
   ];
   return lines.join("\n");
@@ -177,6 +265,9 @@ export function ProviderManager({ kind }: { kind: ProviderKind }) {
   const [applyError, setApplyError] = useState<string | null>(null);
   // 端点探测(编辑表单内;draft 关闭即重置)、Token 显隐、折叠区开关。
   const [probe, setProbe] = useState<ProbeState>({ phase: "idle" });
+  // 余额行(cc-switch 口径:域名白名单,不支持/未填 token 不渲染)。sig = baseUrl|token,
+  // 编辑保存后签名变了自动重查;同签名不重复查(effect 依赖 balances 但 sig 命中即跳过)。
+  const [balances, setBalances] = useState<Record<string, { sig: string; state: BalanceResult | null }>>({});
   // 模型下拉(拉取到的目录收进下拉,点开才展示;换编辑对象即重置)。
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
   const [modelQuery, setModelQuery] = useState("");
@@ -202,6 +293,30 @@ export function ProviderManager({ kind }: { kind: ProviderKind }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [kind]);
 
+  // 余额自动查询:providers 变化(挂载/保存)时对每条查一次;null(白名单外)记为
+  // 「不支持」不再渲染;失败保留 error 文案(行内 title 展示,不弹窗)。静默并发,
+  // 不阻塞列表渲染(余额行渐进出现)。
+  useEffect(() => {
+    for (const p of providers) {
+      const sig = `${p.baseUrl.trim()}|${p.token.trim()}`;
+      if (!p.baseUrl.trim() || balances[p.id]?.sig === sig) continue;
+      setBalances((prev) => ({ ...prev, [p.id]: { sig, state: null } }));
+      void invoke<BalanceResult | null>("query_provider_balance", {
+        baseUrl: p.baseUrl.trim(),
+        token: p.token.trim() || null,
+      })
+        .then((r) =>
+          setBalances((prev) =>
+            prev[p.id]?.sig === sig ? { ...prev, [p.id]: { sig, state: r ?? null } } : prev,
+          ),
+        )
+        .catch(() => {
+          /* 查询异常与不支持同形:不显示 */
+        });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [providers, balances]);
+
   const persist = (next: (ClaudeProvider | CodexProvider)[]) => {
     setProviders(next);
     // 适配器 save 的入参类型与 next 收敛后一致(同一 kind 的数组)。
@@ -217,11 +332,25 @@ export function ProviderManager({ kind }: { kind: ProviderKind }) {
       adapter.kind === "claude"
         ? raw.id === claudeActiveId
         : isCodexProviderActive(raw as CodexProvider, current as CodexProviderInfo | null);
-    const draftFrom: Draft = { id: raw.id, name: raw.name, baseUrl: raw.baseUrl, token: raw.token, model: raw.model, reasoningEffort: "", extraEnv: {} };
+    const draftFrom: Draft = {
+      id: raw.id,
+      name: raw.name,
+      baseUrl: raw.baseUrl,
+      token: raw.token,
+      model: raw.model,
+      wireApi: "responses",
+      apiFormat: "anthropic",
+      authStyle: "auth_token",
+      extraEnv: {},
+      models: [],
+    };
     if (adapter.kind === "claude") {
       draftFrom.extraEnv = (raw as ClaudeProvider).extraEnv;
+      draftFrom.authStyle = (raw as ClaudeProvider).authStyle ?? "auth_token";
+      draftFrom.apiFormat = (raw as ClaudeProvider).apiFormat ?? "anthropic";
     } else {
-      draftFrom.reasoningEffort = (raw as CodexProvider).reasoningEffort;
+      draftFrom.wireApi = (raw as CodexProvider).wireApi ?? "responses";
+      draftFrom.models = (raw as CodexProvider).models ?? [];
     }
     return { raw, draft: draftFrom, active };
   });
@@ -307,11 +436,34 @@ export function ProviderManager({ kind }: { kind: ProviderKind }) {
   /** 表单 → provider 对象(保存与「应用」共用;未改名返回 null)。 */
   const draftToProvider = (): ClaudeProvider | CodexProvider | null => {
     if (!draft || !draft.name.trim()) return null;
-    const prev = providers.find((p) => p.id === draft.id);
-    const base: Draft = { ...draft, name: draft.name.trim(), baseUrl: draft.baseUrl.trim(), token: draft.token.trim(), model: draft.model.trim(), reasoningEffort: draft.reasoningEffort.trim() };
+    const base: Draft = { ...draft, name: draft.name.trim(), baseUrl: draft.baseUrl.trim(), token: draft.token.trim(), model: draft.model.trim() };
     return adapter.kind === "claude"
-      ? { id: draft.id || newProviderId(), name: base.name, baseUrl: base.baseUrl, token: base.token, model: base.model, extraEnv: draft.extraEnv }
-      : { id: draft.id || newCodexProviderId(), name: base.name, baseUrl: base.baseUrl, token: base.token, model: base.model, reasoningEffort: draft.id && prev ? (prev as CodexProvider).reasoningEffort : base.reasoningEffort };
+      ? {
+          id: draft.id || newProviderId(),
+          name: base.name,
+          baseUrl: base.baseUrl,
+          token: base.token,
+          model: base.model,
+          apiFormat: base.apiFormat === "openai" ? "openai" : "anthropic",
+          authStyle: base.authStyle === "api_key" ? "api_key" : "auth_token",
+          extraEnv: draft.extraEnv,
+        }
+      : (() => {
+          // codex 无「默认模型」字段(2026-11-04 对齐 cc-switch):config.toml 的 model =
+          // 模型列表首项(空列表 = 不覆盖 config 现值);列表为模型的唯一配置入口。
+          const models = (draft.models ?? [])
+            .filter((m) => m.id.trim())
+            .map((m) => ({ ...m, id: m.id.trim() }));
+          return {
+            id: draft.id || newCodexProviderId(),
+            name: base.name,
+            baseUrl: base.baseUrl,
+            token: base.token,
+            model: models[0]?.id ?? "",
+            wireApi: base.wireApi === "chat" ? "chat" : "responses",
+            models,
+          };
+        })();
   };
 
   /** 保存并落列表(不切换生效)。 */
@@ -327,17 +479,16 @@ export function ProviderManager({ kind }: { kind: ProviderKind }) {
     closeDraft();
   };
 
-  /** 「应用」= 保存 + 立即生效:写盘 + 广播(活跃会话重启拾取新配置),表单保持打开
-   *  (previous 只有列表 hover ▶ 能生效,用户得先保存再回列表找,多一步且易漏)。 */
+  /** 「应用并生效」= 保存 + 立即生效:写盘 + 广播(活跃会话重启拾取新配置)。成功后
+   *  返回列表页(active 徽章挪到该行即结果反馈);失败留在表单,底部就地报错。 */
   const handleApplyDraft = async () => {
     const next = draftToProvider();
     if (!next) return;
     upsertProvider(next);
-    const ok = await applyOne(next);
-    if (ok) setDraft({ ...draft!, id: next.id });
+    if (await applyOne(next)) closeDraft();
   };
 
-  const emptyDraft = (): Draft => ({ id: "", name: "", baseUrl: "", token: "", model: "", reasoningEffort: "", extraEnv: {} });
+  const emptyDraft = (): Draft => ({ id: "", name: "", baseUrl: "", token: "", model: "", wireApi: "responses", apiFormat: "anthropic", authStyle: "auth_token", extraEnv: {}, models: [] });
 
   const [quickSetupMsg, setQuickSetupMsg] = useState<string | null>(null);
 
@@ -365,6 +516,40 @@ export function ProviderManager({ kind }: { kind: ProviderKind }) {
     }
     setDraft({ ...draft, model: m, extraEnv: spreadModelToTiers(draft.extraEnv, m) });
     setQuickSetupMsg(t("settings.providers.quickSetupDone", { count: MODEL_TIERS.length * 2 }));
+  };
+
+  /** codex 供应商级模型列表行编辑(cc-switch modelCatalog 对齐;slug 必填其余可空,
+   *  空行保存时剔除)。 */
+  const setModelEntry = (idx: number, patch: Partial<CodexModelEntry>) => {
+    if (!draft) return;
+    setDraft({ ...draft, models: draft.models.map((m, i) => (i === idx ? { ...m, ...patch } : m)) });
+  };
+  const addModelEntry = () => {
+    if (!draft) return;
+    setDraft({ ...draft, models: [...draft.models, { id: "", contextWindow: DEFAULT_CODEX_CTX }] });
+  };
+  const removeModelEntry = (idx: number) => {
+    if (!draft) return;
+    setDraft({ ...draft, models: draft.models.filter((_, i) => i !== idx) });
+  };
+  /** 探测结果一键铺进列表(已有 id 跳过;显示名暂用 slug;ctx 给 codex 默认 272k)。 */
+  const importProbedModels = () => {
+    if (!draft) return;
+    const kept = draft.models.filter((m) => m.id.trim());
+    const known = new Set(kept.map((m) => m.id.trim()));
+    const fresh = fetchedModels.filter((id) => !known.has(id)).map((id) => ({ id, displayName: id, contextWindow: DEFAULT_CODEX_CTX }));
+    setDraft({ ...draft, models: [...kept, ...fresh] });
+  };
+
+  /** 模型映射行写回:值清空 = 删键(不落空值键);仅映射区(高级区)渲染期间被调用。 */
+  const setTierEnv = (tier: string, part: "model" | "display", value: string) => {
+    if (!draft) return;
+    const key = part === "model" ? `ANTHROPIC_DEFAULT_${tier}_MODEL` : `ANTHROPIC_DEFAULT_${tier}_MODEL_NAME`;
+    const v = value.trim();
+    const next = { ...draft.extraEnv };
+    if (!v) delete next[key];
+    else next[key] = v;
+    setDraft({ ...draft, extraEnv: next });
   };
 
   /** 「支持 1M」开关:切换模型名尾部 `[1M]` 标记并同步铺别名。约定 `_MODEL` 带标记、
@@ -398,37 +583,62 @@ export function ProviderManager({ kind }: { kind: ProviderKind }) {
     setDraft(next);
   };
 
+  /** 卡片额度(编程套餐的 5 小时/周窗口已用百分比 + 重置倒计时;按量账户/不支持为 null
+   *  不渲染)。渲染在名称行右侧**上下两行**(用户 2026-11-04:5h/7d 竖排,横排太长挤名称),
+   *  右对齐;已用 ≥85% 红、≥60% 金,提醒离限还剩多少。 */
+  const quotaLine = (id: string) => {
+    const q = balances[id]?.state?.quota;
+    if (!q || q.tiers.length === 0) return null;
+    return (
+      <div className="flex shrink-0 flex-col items-end gap-px font-mono text-[10px] leading-tight">
+        {q.tiers.map((tier) => {
+          const label = tier.name === "fiveHour" ? t("settings.providers.quota5h") : t("settings.providers.quotaWeekly");
+          const rel = tier.resetMs != null ? fmtReset(tier.resetMs) : null;
+          return (
+            <span
+              key={tier.name}
+              className={tier.usedPct >= 85
+                ? "text-[var(--mx-danger)]"
+                : tier.usedPct >= 60
+                  ? "text-[var(--mx-warning)]"
+                  : "text-[var(--mx-success)]"}
+            >
+              {label} {tier.usedPct.toFixed(0)}%{rel ? ` · ${rel}` : ""}
+            </span>
+          );
+        })}
+        {q.level && (
+          <span className="max-w-[140px] truncate text-[var(--mx-faint)]" title={q.level}>{q.level}</span>
+        )}
+      </div>
+    );
+  };
+
   const inputCls =
     "w-full rounded-[var(--mx-radius-md)] border border-[var(--mx-border-strong)] bg-[var(--mx-surface-2)] px-2 py-1 text-[12px] text-[var(--mx-text)] outline-none transition-colors placeholder:text-[var(--mx-faint)] focus-visible:border-[var(--mx-accent)] focus-visible:ring-1 focus-visible:ring-[var(--mx-accent)]";
-
-  /** 表单字段:label + 输入(label 化,比纯 placeholder 可扫读)。 */
-  const Field = ({ label, children }: { label: string; children: ReactNode }) => (
-    <label className="block">
-      <span className="mb-1 block text-[10px] uppercase tracking-wide text-[var(--mx-faint)]">{label}</span>
-      {children}
-    </label>
-  );
 
   const previewText = draft ? (kind === "claude" ? draftEnvJson(draft) : draftToml(draft)) : "";
   /** 拉取到的模型目录(没拉过/失败为空数组;下拉只在这个非空时可用)。 */
   const fetchedModels = probe.phase === "done" ? probe.result.models : [];
 
-  return (
-    <div className="grid max-h-[520px] grid-cols-[240px_1fr] gap-3">
-      {/* 左栏:当前生效摘要 + 列表(master;点行选中进右栏编辑,hover 出现「启用」)。 */}
-      <div className="flex min-h-0 flex-col">
-        <div className="mb-2 rounded-[var(--mx-radius-md)] border border-[var(--mx-accent)]/30 bg-[var(--mx-card-inner)] px-2.5 py-1.5">
-          <div className="mb-1 flex items-center gap-1.5 text-[10px] uppercase tracking-wide text-[var(--mx-faint)]">
+  // 二级页面:列表页(全宽,点行进入编辑)↔ 编辑页(占满 tab 内容区,保存/应用后返回)。
+  // 原 240px 左栏 + 右栏表单的双栏把编辑框挤得很小(用户 2026-11-02),改互斥两页后
+  // 表单拿到全部宽度,长 baseUrl/token/model 不再在小列里受罪。
+  if (!draft) {
+    return (
+      <div className="flex max-h-[520px] min-h-[380px] flex-col">
+        {/* 当前生效摘要:全宽列表页里改单行横排(圆点 + 标题 + baseUrl · model)。 */}
+        <div className="mb-2 flex items-center gap-2 rounded-[var(--mx-radius-md)] border border-[var(--mx-accent)]/30 bg-[var(--mx-card-inner)] px-2.5 py-1.5">
+          <span className="flex shrink-0 items-center gap-1.5 text-[10px] uppercase tracking-wide text-[var(--mx-faint)]">
             <span className="h-1.5 w-1.5 rounded-full bg-[var(--mx-accent)] shadow-[0_0_4px_var(--mx-accent)]" />
             {t("settings.providers.currentTitle")}
-          </div>
+          </span>
           {current ? (
-            <div className="space-y-0.5 truncate font-mono text-[10px] text-[var(--mx-muted)]" title={`${summary.baseUrl}\n${summary.model}`}>
-              <div className="truncate">{summary.baseUrl || "—"}</div>
-              <div className="truncate">{summary.model || "—"}</div>
-            </div>
+            <span className="min-w-0 flex-1 truncate font-mono text-[10px] text-[var(--mx-muted)]" title={`${summary.baseUrl}\n${summary.model}`}>
+              {summary.baseUrl || "—"} · {summary.model || "—"}
+            </span>
           ) : (
-            <div className="text-[10px] text-[var(--mx-faint)]">{t("settings.providers.currentUnknown")}</div>
+            <span className="text-[10px] text-[var(--mx-faint)]">{t("settings.providers.currentUnknown")}</span>
           )}
         </div>
 
@@ -454,7 +664,6 @@ export function ProviderManager({ kind }: { kind: ProviderKind }) {
             </div>
           )}
           {rows.map((row) => {
-            const selected = draft?.id === row.draft.id && (draft?.id !== "" || draft != null);
             return (
               <div
                 key={row.draft.id}
@@ -462,39 +671,77 @@ export function ProviderManager({ kind }: { kind: ProviderKind }) {
                 tabIndex={0}
                 onClick={() => openDraft({ ...row.draft })}
                 onKeyDown={(e) => e.key === "Enter" && openDraft({ ...row.draft })}
-                className={`group cursor-pointer rounded-[var(--mx-radius-md)] border px-2.5 py-1.5 transition-colors ${
-                  selected
-                    ? "border-[var(--mx-accent)]/60 bg-[var(--mx-accent-soft)]/40"
-                    : "border-[var(--mx-border)] bg-[var(--mx-card-inner)] hover:border-[var(--mx-border-strong)]"
-                }`}
+                className="flex cursor-pointer items-center gap-1.5 rounded-[var(--mx-radius-md)] border border-[var(--mx-border)] bg-[var(--mx-card-inner)] px-2.5 py-1.5 transition-colors hover:border-[var(--mx-border-strong)] hover:bg-[var(--mx-hover-bg)]"
               >
-                <div className="flex items-center gap-1.5">
-                  {row.active && <span aria-hidden className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--mx-accent-bright)] shadow-[0_0_4px_var(--mx-accent)]" />}
-                  <span className={`min-w-0 truncate text-[12px] font-medium ${row.active ? "text-[var(--mx-text)]" : "text-[var(--mx-text)]"}`}>{row.draft.name}</span>
-                  {!row.active && (
-                    <button
-                      type="button"
-                      title={t("settings.providers.apply")}
-                      aria-label={t("settings.providers.apply")}
-                      disabled={applyingId === row.draft.id}
-                      className="ml-auto hidden shrink-0 rounded-[4px] px-1 py-0.5 text-[10px] text-[var(--mx-accent-bright)] hover:bg-[var(--mx-accent-soft)] group-hover:block"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        void handleApply(row);
-                      }}
-                    >
-                      {applyingId === row.draft.id ? "…" : "▶"}
-                    </button>
-                  )}
-                  {row.active && (
-                    <span className="ml-auto shrink-0 rounded-full bg-[var(--mx-accent-soft)] px-1.5 py-px text-[9px] font-medium text-[var(--mx-accent-bright)]">
-                      {t("settings.providers.activeBadge")}
-                    </span>
-                  )}
+                {/* 左列(名称 + meta)flex-1;额度/操作挂在卡片级右侧,随整卡垂直居中
+                    (用户 2026-11-04:额度竖排三行后仍要垂直居中)。 */}
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-1.5">
+                    {row.active && <span aria-hidden className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--mx-accent-bright)] shadow-[0_0_4px_var(--mx-accent)]" />}
+                    <span className="min-w-0 flex-1 truncate text-[12px] font-medium text-[var(--mx-text)]">{row.draft.name}</span>
+                  </div>
+                  <div className="mt-0.5 truncate font-mono text-[10px] text-[var(--mx-faint)]" title={`${row.draft.baseUrl}${row.draft.model ? ` · ${row.draft.model}` : ""}`}>
+                    {row.draft.model || row.draft.baseUrl || "—"}
+                  </div>
                 </div>
-                <div className="mt-0.5 truncate font-mono text-[10px] text-[var(--mx-faint)]" title={`${row.draft.baseUrl}${row.draft.model ? ` · ${row.draft.model}` : ""}`}>
-                  {row.draft.model || row.draft.baseUrl || "—"}
-                </div>
+                {quotaLine(row.draft.id)}
+                {/* 删除(2026-11-04 用户:列表页此前无删除入口,只能进编辑页删):就地删
+                    + 落盘;活跃条目也可删——删的只是配置记录,config.toml/settings.json
+                    现值不动,下一轮进程照常读现配置。 */}
+                <button
+                  type="button"
+                  title={t("common.delete")}
+                  aria-label={t("common.delete")}
+                  className="shrink-0 rounded-[4px] p-0.5 text-[var(--mx-faint)] transition-colors hover:bg-[var(--mx-hover-bg)] hover:text-[var(--mx-danger)]"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    persist(providers.filter((x) => x.id !== row.draft.id));
+                  }}
+                >
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                    <path d="M3 6h18" />
+                    <path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2" />
+                    <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+                  </svg>
+                </button>
+                {/* 显式编辑入口:整行本就可点进编辑,但常显铅笔让「能编辑」一眼可见
+                    (用户 2026-11-02:只靠点行发现不了)。 */}
+                <button
+                  type="button"
+                  title={t("common.edit")}
+                  aria-label={t("common.edit")}
+                  className="shrink-0 rounded-[4px] p-0.5 text-[var(--mx-faint)] transition-colors hover:bg-[var(--mx-hover-bg)] hover:text-[var(--mx-text)]"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    openDraft({ ...row.draft });
+                  }}
+                >
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                    <path d="M12 20h9" />
+                    <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z" />
+                  </svg>
+                </button>
+                {/* 启用按钮常显(用户 2026-11-04:别藏在 hover 里)。 */}
+                {!row.active && (
+                  <button
+                    type="button"
+                    title={t("settings.providers.apply")}
+                    aria-label={t("settings.providers.apply")}
+                    disabled={applyingId === row.draft.id}
+                    className="shrink-0 rounded-[4px] px-1 py-0.5 text-[10px] text-[var(--mx-accent-bright)] hover:bg-[var(--mx-accent-soft)]"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void handleApply(row);
+                    }}
+                  >
+                    {applyingId === row.draft.id ? "…" : "▶"}
+                  </button>
+                )}
+                {row.active && (
+                  <span className="shrink-0 rounded-full bg-[var(--mx-accent-soft)] px-1.5 py-px text-[9px] font-medium text-[var(--mx-accent-bright)]">
+                    {t("settings.providers.activeBadge")}
+                  </span>
+                )}
               </div>
             );
           })}
@@ -504,32 +751,45 @@ export function ProviderManager({ kind }: { kind: ProviderKind }) {
           {t(kind === "claude" ? "settings.providers.hint" : "settings.providers.hintCodex")}
         </div>
       </div>
+    );
+  }
 
-      {/* 右栏:详情(detail;选中项编辑表单或空态)。原「列表顶部插入卡片」改双栏,
-          编辑不再把列表顶下去,点哪条看哪条(cc-switch 弹窗编辑的 IDE 化替代)。 */}
-      <div className="min-h-0 overflow-y-auto pr-0.5">
-        {draft ? (
-          <div className="space-y-2 rounded-[var(--mx-radius-md)] border border-[var(--mx-accent)]/50 bg-[var(--mx-card-inner)] p-3 shadow-[0_0_12px_rgba(0,0,0,0.12)]">
-            {/* 顶部行:名称回显 + 删除(编辑已有条目时)。 */}
-            <div className="flex items-center gap-2 border-b border-[var(--mx-border)] pb-2">
-              <span className="min-w-0 truncate text-[12px] font-semibold text-[var(--mx-text)]">
-                {draft.name || t("settings.providers.fldName")}
-              </span>
-              {draft.id && (
-                <Button
-                  size="xs"
-                  variant="ghost"
-                  className="ml-auto shrink-0 text-[var(--mx-danger)]"
-                  onClick={() => {
-                    persist(providers.filter((x) => x.id !== draft.id));
-                    closeDraft();
-                  }}
-                >
-                  {t("common.delete")}
-                </Button>
-              )}
-            </div>
+  // 编辑页:顶部「← 返回」+ 名称回显 + 删除;中部滚动表单;底部固定操作行。
+  // 「保存」「应用并生效」成功后都返回列表页(active 徽章挪到该行即结果反馈)。
+  return (
+    <div className="flex max-h-[520px] min-h-[420px] flex-col">
+      <div className="flex items-center gap-2 border-b border-[var(--mx-border)] pb-2">
+        <button
+          type="button"
+          title={t("settings.providers.backToList")}
+          aria-label={t("settings.providers.backToList")}
+          className="flex h-6 w-6 shrink-0 items-center justify-center rounded-[var(--mx-radius-sm)] text-[var(--mx-muted)] transition-colors hover:bg-[var(--mx-hover-bg)] hover:text-[var(--mx-text)]"
+          onClick={closeDraft}
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+            <path d="M19 12H5" />
+            <path d="M12 19l-7-7 7-7" />
+          </svg>
+        </button>
+        <span className="min-w-0 truncate text-[13px] font-semibold text-[var(--mx-text)]">
+          {draft.name || t("settings.providers.fldName")}
+        </span>
+        {draft.id && (
+          <Button
+            size="xs"
+            variant="ghost"
+            className="ml-auto shrink-0 text-[var(--mx-danger)]"
+            onClick={() => {
+              persist(providers.filter((x) => x.id !== draft.id));
+              closeDraft();
+            }}
+          >
+            {t("common.delete")}
+          </Button>
+        )}
+      </div>
 
+      <div className="min-h-0 flex-1 space-y-2.5 overflow-y-auto py-2.5 pr-0.5">
             <Field label={t("settings.providers.presetLabel")}>
               <div className="flex items-center gap-1.5">
                 <select
@@ -538,12 +798,26 @@ export function ProviderManager({ kind }: { kind: ProviderKind }) {
                   onChange={(e) => {
                     const preset = allPresets.find((p) => p.name === e.target.value);
                     if (preset) {
-                      setDraft({
-                        ...draft,
-                        name: draft.name.trim() || preset.name,
-                        baseUrl: preset.baseUrl,
-                        model: draft.model.trim() || preset.model || "",
-                      });
+                      if (kind === "codex") {
+                        // codex 无「默认模型」字段(2026-11-04 对齐 cc-switch):预设模型进列表
+                        // 首项(主模型);列表已有内容不覆盖。
+                        setDraft({
+                          ...draft,
+                          name: draft.name.trim() || preset.name,
+                          baseUrl: preset.baseUrl,
+                          models:
+                            draft.models.length > 0 || !preset.model
+                              ? draft.models
+                              : [{ id: preset.model, contextWindow: DEFAULT_CODEX_CTX }],
+                        });
+                      } else {
+                        setDraft({
+                          ...draft,
+                          name: draft.name.trim() || preset.name,
+                          baseUrl: preset.baseUrl,
+                          model: draft.model.trim() || preset.model || "",
+                        });
+                      }
                     }
                   }}
                 >
@@ -581,23 +855,26 @@ export function ProviderManager({ kind }: { kind: ProviderKind }) {
               </div>
             </Field>
 
-            <Field label={t("settings.providers.fldName")}>
-              <input
-                className={inputCls}
-                value={draft.name}
-                onChange={(e) => setDraft({ ...draft, name: e.target.value })}
-                autoFocus
-              />
-            </Field>
+            <div className="grid grid-cols-2 gap-2.5">
+              <Field label={t(kind === "claude" ? "settings.providers.fldName" : "settings.providers.fldNameCodex")}>
+                <input
+                  className={inputCls}
+                  value={draft.name}
+                  onChange={(e) => setDraft({ ...draft, name: e.target.value })}
+                  autoFocus
+                />
+              </Field>
+              <Field label={t(kind === "claude" ? "settings.providers.fldBaseUrl" : "settings.providers.fldBaseUrlCodex")}>
+                <input
+                  className={`${inputCls} font-mono`}
+                  value={draft.baseUrl}
+                  onChange={(e) => setDraft({ ...draft, baseUrl: e.target.value })}
+                />
+              </Field>
+            </div>
 
-            <Field label={t("settings.providers.fldBaseUrl")}>
-              <input
-                className={`${inputCls} font-mono`}
-                value={draft.baseUrl}
-                onChange={(e) => setDraft({ ...draft, baseUrl: e.target.value })}
-              />
-            </Field>
-
+            {/* Token 全宽(推理力度不进供应商配置:2026-11-04 删字段,力度完全交给
+                config.toml 现值 + 会话内每轮参数)。 */}
             <Field label={t("settings.providers.fldToken")}>
               <div className="relative">
                 <input
@@ -630,7 +907,17 @@ export function ProviderManager({ kind }: { kind: ProviderKind }) {
               </div>
             </Field>
 
-            <Field label={t("settings.providers.fldModel")}>
+            {/* 不用 `<Field>`(它是 <label>):这里内部还有「1M」checkbox 的 label 与多个
+                控件,label 嵌 label + 多 labelable 是非法 HTML,点击命中与焦点行为在
+                WebView2 上有怪异(含 IME 态),改普通 div + span 手写同款样式。 */}
+            {/* claude 专属:默认模型(ANTHROPIC_MODEL)+ 下拉 + 1M + 拉取。codex 无默认模型
+                字段(2026-11-04 对齐 cc-switch):下方模型列表是唯一配置入口(config.toml 的
+                model = 列表首项),拉取按钮挪列表区。 */}
+            {kind === "claude" && (
+            <div>
+              <span className="mb-1 block text-[10px] uppercase tracking-wide text-[var(--mx-faint)]">
+                {t("settings.providers.fldModel")}
+              </span>
               <div className="flex gap-1.5">
                 {/* 不用 `<input list>`(原生 datalist):WebView2/Chromium 的下拉建议会抢 compose
                     输入,中文候选框打不出字(用户实测「模型名只能输入英文」)。自带建议列表走
@@ -733,26 +1020,134 @@ export function ProviderManager({ kind }: { kind: ProviderKind }) {
                   {probe.phase === "loading" ? t("settings.providers.fetching") : t("settings.providers.fetchModels")}
                 </Button>
               </div>
-            </Field>
-            {probe.phase === "done" && (
+            </div>
+            )}
+            {kind === "claude" && probe.phase === "done" && (
               <div className="-mt-1 text-[10px] text-[var(--mx-faint)]">
                 {probe.result.models.length > 0
                   ? t("settings.providers.probeSummary", { count: probe.result.models.length, ms: probe.result.latencyMs, status: probe.result.status })
                   : t("settings.providers.probeEmpty", { ms: probe.result.latencyMs })}
               </div>
             )}
-            {probe.phase === "error" && (
+            {kind === "claude" && probe.phase === "error" && (
               <div className="-mt-1 text-[10px] break-all text-[var(--mx-danger)]">{probe.message}</div>
             )}
 
+            {/* codex 供应商级模型列表(cc-switch modelCatalog 对齐,2026-11-04 起为模型的
+                唯一配置入口——「默认模型」字段已删,config.toml 的 model = 列表首项):
+                获取(探测 /v1/models 一键导入)/手动添加/逐行配置(显示名/思考档位/上下文),
+                空行保存时剔除;会话内模型菜单以该列表为数据源(未配置退全局 catalog)。 */}
             {kind === "codex" && (
-              <Field label={t("settings.providers.fldEffort")}>
-                <input
-                  className={`${inputCls} font-mono`}
-                  value={draft.reasoningEffort}
-                  onChange={(e) => setDraft({ ...draft, reasoningEffort: e.target.value })}
-                />
-              </Field>
+              <div className="rounded-[var(--mx-radius-md)] border border-[var(--mx-border)] p-2">
+                <div className="mb-1.5 flex items-center gap-2">
+                  <span className="text-[10px] uppercase tracking-wide text-[var(--mx-faint)]">
+                    {t("settings.providers.modelsTitle")}
+                  </span>
+                  <span className="tabular-nums text-[10px] text-[var(--mx-faint)]">{draft.models.length}</span>
+                  <span className="min-w-0 flex-1" />
+                  <Button
+                    size="xs"
+                    variant="outline"
+                    disabled={!draft.baseUrl.trim() || probe.phase === "loading"}
+                    onClick={() => void handleFetchModels()}
+                  >
+                    {probe.phase === "loading" ? t("settings.providers.fetching") : t("settings.providers.fetchModels")}
+                  </Button>
+                  {fetchedModels.length > 0 && (
+                    <Button size="xs" variant="outline" onClick={importProbedModels}>
+                      {t("settings.providers.modelsImportProbe")}
+                    </Button>
+                  )}
+                  <Button size="xs" variant="outline" onClick={addModelEntry}>
+                    {t("settings.providers.modelsAdd")}
+                  </Button>
+                </div>
+                {draft.models.length === 0 ? (
+                  <p className="px-1 text-[10px] leading-relaxed text-[var(--mx-faint)]">
+                    {t("settings.providers.modelsEmptyHint")}
+                  </p>
+                ) : (
+                  <div className="space-y-1">
+                    <div className="grid grid-cols-[1.1fr_0.9fr_1.1fr_56px_18px] items-center gap-1 px-0.5 text-[9px] uppercase tracking-wide text-[var(--mx-faint)]">
+                      <span>{t("settings.providers.modelsHeadSlug")}</span>
+                      <span>{t("settings.providers.modelsHeadDisplay")}</span>
+                      <span>{t("settings.providers.modelsHeadLevels")}</span>
+                      <span className="text-right">{t("settings.providers.modelsHeadCtx")}</span>
+                      <span />
+                    </div>
+                    {draft.models.map((m, idx) => {
+                      // 首项即主模型(应用后写 config.toml 的 model);slug 空的行不标。
+                      const primary = idx === 0 && !!m.id.trim();
+                      return (
+                        <div
+                          key={idx}
+                          className={`grid grid-cols-[1.1fr_0.9fr_1.1fr_56px_18px] items-center gap-1 rounded-l border-l-2 pr-0.5 ${
+                            primary ? "border-[var(--mx-accent)]" : "border-transparent"
+                          }`}
+                        >
+                          <input
+                            className={`${inputCls} px-1.5 py-0.5 font-mono text-[11px]`}
+                            value={m.id}
+                            onChange={(e) => setModelEntry(idx, { id: e.target.value })}
+                            placeholder="gpt-5.6"
+                            spellCheck={false}
+                            title={primary ? t("settings.providers.modelsPrimaryTitle") : undefined}
+                          />
+                          <input
+                            className={`${inputCls} px-1.5 py-0.5 text-[11px]`}
+                            value={m.displayName ?? ""}
+                            onChange={(e) => setModelEntry(idx, { displayName: e.target.value || undefined })}
+                            placeholder={t("settings.providers.modelsPhDisplay")}
+                            spellCheck={false}
+                          />
+                          <input
+                            className={`${inputCls} px-1.5 py-0.5 font-mono text-[11px]`}
+                            value={m.reasoningLevels?.join(",") ?? ""}
+                            onChange={(e) =>
+                              setModelEntry(idx, {
+                                reasoningLevels: e.target.value.split(/[,，\s]+/).map((s) => s.trim()).filter(Boolean),
+                              })
+                            }
+                            placeholder="none,low,medium,high"
+                            spellCheck={false}
+                          />
+                          <input
+                            className={`${inputCls} px-1.5 py-0.5 text-right font-mono text-[11px] tabular-nums`}
+                            value={m.contextWindow ?? ""}
+                            onChange={(e) => {
+                              const n = Number(e.target.value);
+                              setModelEntry(idx, { contextWindow: e.target.value && Number.isFinite(n) && n > 0 ? n : undefined });
+                            }}
+                            placeholder="272000"
+                            inputMode="numeric"
+                            spellCheck={false}
+                          />
+                          <button
+                            type="button"
+                            aria-label="remove model"
+                            className="flex h-5 w-5 items-center justify-center rounded text-[var(--mx-faint)] transition-colors hover:bg-[var(--mx-hover-bg)] hover:text-[var(--mx-danger)]"
+                            onClick={() => removeModelEntry(idx)}
+                          >
+                            <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" aria-hidden>
+                              <path d="M18 6L6 18M6 6l12 12" />
+                            </svg>
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+                {probe.phase === "done" && (
+                  <div className="mt-1.5 text-[10px] text-[var(--mx-faint)]">
+                    {probe.result.models.length > 0
+                      ? t("settings.providers.probeSummary", { count: probe.result.models.length, ms: probe.result.latencyMs, status: probe.result.status })
+                      : t("settings.providers.probeEmpty", { ms: probe.result.latencyMs })}
+                  </div>
+                )}
+                {probe.phase === "error" && (
+                  <div className="mt-1.5 text-[10px] break-all text-[var(--mx-danger)]">{probe.message}</div>
+                )}
+              </div>
             )}
 
             {kind === "claude" && (
@@ -766,31 +1161,117 @@ export function ProviderManager({ kind }: { kind: ProviderKind }) {
                   {t("settings.providers.advancedSection")}
                 </button>
                 {showAdvanced && (
-                  <div className="space-y-1.5 border-t border-[var(--mx-border)] px-2.5 py-2">
+                  <div className="space-y-2.5 border-t border-[var(--mx-border)] px-2.5 py-2">
+                    {/* 上游格式 + 认证字段(cc-switch 口径):上游格式 anthropic 是 claude CLI
+                        原生协议,openai 选项仅作标记(直连写法相同,需端点自身兼容);认证
+                        字段决定 token 放 AUTH_TOKEN(Bearer 头)还是 API_KEY(x-api-key),
+                        写 settings.json 时只落选中的一个键,另一键不残留。 */}
+                    <div className="grid grid-cols-2 gap-2.5">
+                      <Field label={t("settings.providers.fldApiFormat")}>
+                        <select
+                          className={inputCls}
+                          value={draft.apiFormat}
+                          onChange={(e) => setDraft({ ...draft, apiFormat: e.target.value })}
+                        >
+                          <option value="anthropic">{t("settings.providers.apiAnthropic")}</option>
+                          <option value="openai">{t("settings.providers.apiOpenai")}</option>
+                        </select>
+                      </Field>
+                      <Field label={t("settings.providers.fldAuthStyle")}>
+                        <select
+                          className={inputCls}
+                          value={draft.authStyle}
+                          onChange={(e) => setDraft({ ...draft, authStyle: e.target.value })}
+                        >
+                          <option value="auth_token">{t("settings.providers.authAuthToken")}</option>
+                          <option value="api_key">{t("settings.providers.authApiKey")}</option>
+                        </select>
+                      </Field>
+                    </div>
+                    <div className="text-[10px] leading-relaxed text-[var(--mx-faint)]">
+                      {t("settings.providers.claudeApiFormatHint")}
+                    </div>
+                    {/* 模型映射(结构化四档,对齐 cc-switch):上游模型(_MODEL)+ 界面显示名
+                        (_NAME)逐档可配;值与 extraEnv 同源(存储 schema 不变,与「从当前
+                        导入」/cc-switch 手改 settings.json 的数据互通)。 */}
+                    <div>
+                      <div className="mb-1 flex items-center gap-1.5">
+                        <span className="min-w-0 flex-1 truncate text-[10px] uppercase tracking-wide text-[var(--mx-faint)]">
+                          {t("settings.providers.mappingSection")}
+                        </span>
+                        {/* 一键设置:把模型字段当前值铺到四档(中转供应商通常要求全部指向
+                            同一模型,手敲 8 个键极易漏)。 */}
+                        <Button
+                          size="xs"
+                          variant="accent"
+                          disabled={!draft.model.trim()}
+                          title={t("settings.providers.quickSetupHint")}
+                          onClick={handleQuickSetup}
+                        >
+                          ⚡ {t("settings.providers.quickSetup")}
+                        </Button>
+                      </div>
+                      <div className="space-y-1">
+                        {MODEL_TIERS.map((tier) => (
+                          <MappingRow
+                            key={tier}
+                            tier={tier}
+                            model={draft.extraEnv[`ANTHROPIC_DEFAULT_${tier}_MODEL`] ?? ""}
+                            display={draft.extraEnv[`ANTHROPIC_DEFAULT_${tier}_MODEL_NAME`] ?? ""}
+                            onModel={(v) => setTierEnv(tier, "model", v)}
+                            onDisplay={(v) => setTierEnv(tier, "display", v)}
+                          />
+                        ))}
+                      </div>
+                      <div className="mt-1 truncate text-[10px] text-[var(--mx-faint)]">
+                        {quickSetupMsg ?? t("settings.providers.quickSetupHint")}
+                      </div>
+                    </div>
+                    {/* 其余 env(四档映射键已上收进映射区,裸行区不再重复出现)。 */}
                     <div className="text-[10px] leading-relaxed text-[var(--mx-faint)]">
                       {t("settings.providers.advancedEnvHint")}
                     </div>
-                    {/* 一键设置:把模型字段当前值铺到默认档 + Opus/Sonnet/Haiku/Fable 各档别名
-                        (中转供应商通常要求全部指向同一模型,手敲 8~9 个键极易漏)。 */}
-                    <div className="flex items-center gap-1.5">
-                      <Button
-                        size="xs"
-                        variant="accent"
-                        disabled={!draft.model.trim()}
-                        title={t("settings.providers.quickSetupHint")}
-                        onClick={handleQuickSetup}
-                      >
-                        ⚡ {t("settings.providers.quickSetup")}
-                      </Button>
-                      <span className="min-w-0 flex-1 truncate text-[10px] text-[var(--mx-faint)]">
-                        {quickSetupMsg ?? t("settings.providers.quickSetupHint")}
-                      </span>
-                    </div>
                     <EnvRows
-                      value={draft.extraEnv}
-                      onChange={(extraEnv) => setDraft({ ...draft, extraEnv })}
+                      value={splitTierEnv(draft.extraEnv).rest}
+                      onChange={(rest) => setDraft({ ...draft, extraEnv: { ...pickTierEnv(draft.extraEnv), ...rest } })}
                       addLabel={t("settings.providers.addEnvRow")}
                     />
+                  </div>
+                )}
+              </div>
+            )}
+
+            {kind === "codex" && (
+              <div className="rounded-[var(--mx-radius-md)] border border-[var(--mx-border)]">
+                <button
+                  type="button"
+                  className="flex w-full items-center gap-1.5 px-2.5 py-1.5 text-left text-[10px] uppercase tracking-wide text-[var(--mx-faint)] hover:text-[var(--mx-muted)]"
+                  onClick={() => setShowAdvanced(!showAdvanced)}
+                >
+                  <span aria-hidden>{showAdvanced ? "▾" : "▸"}</span>
+                  {t("settings.providers.advancedSection")}
+                </button>
+                {showAdvanced && (
+                  <div className="space-y-1.5 border-t border-[var(--mx-border)] px-2.5 py-2">
+                    {/* 上游接口格式(wire_api):responses 是 OpenAI Responses API(现主流中转
+                        支持);chat 走 /v1/chat/completions(旧式 OpenAI 兼容端点)。认证无
+                        字段概念:恒为 config.toml 段 experimental_bearer_token(2026-11-04
+                        用户定调,cc-switch 式 auth.json 形态不在 UI 暴露)。 */}
+                    <div className="grid grid-cols-2 gap-2.5">
+                      <Field label={t("settings.providers.fldWireApi")}>
+                        <select
+                          className={inputCls}
+                          value={draft.wireApi}
+                          onChange={(e) => setDraft({ ...draft, wireApi: e.target.value })}
+                        >
+                          <option value="responses">{t("settings.providers.wireResponses")}</option>
+                          <option value="chat">{t("settings.providers.wireChat")}</option>
+                        </select>
+                      </Field>
+                    </div>
+                    <div className="text-[10px] leading-relaxed text-[var(--mx-faint)]">
+                      {t("settings.providers.advancedCodexHint")}
+                    </div>
                   </div>
                 )}
               </div>
@@ -820,38 +1301,83 @@ export function ProviderManager({ kind }: { kind: ProviderKind }) {
               )}
             </div>
 
-            <div className="flex justify-end gap-1.5 border-t border-[var(--mx-border)] pt-2">
-              <Button size="xs" variant="outline" onClick={closeDraft}>
-                {t("common.cancel")}
-              </Button>
-              <Button
-                size="xs"
-                variant="outline"
-                disabled={!draft.name.trim() || applyingId != null}
-                title={t("settings.providers.applyNowHint")}
-                onClick={() => void handleApplyDraft()}
-              >
-                {applyingId ? t("settings.providers.applying") : t("settings.providers.applyNow")}
-              </Button>
-              <Button size="xs" disabled={!draft.name.trim()} onClick={handleSaveDraft}>
-                {t("common.save")}
-              </Button>
-            </div>
           </div>
-        ) : (
-          <div className="flex h-full min-h-[360px] flex-col items-center justify-center gap-1.5 rounded-[var(--mx-radius-md)] border border-dashed border-[var(--mx-border-strong)] text-center">
-            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="text-[var(--mx-faint)]" aria-hidden>
-              <rect x="3" y="4" width="18" height="16" rx="2" />
-              <path d="M12 4v16" />
-              <path d="M8 10h.01M8 14h.01" />
-            </svg>
-            <div className="text-[11px] text-[var(--mx-faint)]">{t("settings.providers.pickToEdit")}</div>
-          </div>
-        )}
+
+      {/* 底部固定操作行:应用失败就地报错(留在表单可改),保存/应用成功都返回列表。 */}
+      <div className="flex items-center gap-1.5 border-t border-[var(--mx-border)] pt-2">
+        <span className="min-w-0 flex-1 truncate text-[10px] text-[var(--mx-danger)]" title={applyError ?? undefined}>
+          {applyError}
+        </span>
+        <Button
+          size="xs"
+          variant="outline"
+          disabled={!draft.name.trim() || applyingId != null}
+          title={t("settings.providers.applyNowHint")}
+          onClick={() => void handleApplyDraft()}
+        >
+          {applyingId ? t("settings.providers.applying") : t("settings.providers.applyNow")}
+        </Button>
+        <Button size="xs" disabled={!draft.name.trim()} onClick={handleSaveDraft}>
+          {t("common.save")}
+        </Button>
       </div>
     </div>
   );
 
+}
+
+/** 高级区窄输入(键值行 / 模型映射行共用)。 */
+const envCellCls =
+  "w-full min-w-0 rounded-[var(--mx-radius-sm)] border border-[var(--mx-border)] bg-[var(--mx-surface-2)] px-1.5 py-0.5 font-mono text-[10px] text-[var(--mx-text)] outline-none focus-visible:border-[var(--mx-accent)]";
+
+/** 模型映射行(cc-switch 形态,模块顶层定义——IME 教训同 Field):档位 + 上游模型
+ *  (ANTHROPIC_DEFAULT_*_MODEL,带 1M 开关)+ 界面显示名(*_MODEL_NAME)。 */
+function MappingRow({
+  tier,
+  model,
+  display,
+  onModel,
+  onDisplay,
+}: {
+  tier: string;
+  model: string;
+  display: string;
+  onModel: (v: string) => void;
+  onDisplay: (v: string) => void;
+}) {
+  const { t } = useTranslation();
+  return (
+    <div className="flex items-center gap-1">
+      <span className="w-11 shrink-0 text-[10px] uppercase tracking-wide text-[var(--mx-faint)]">{tier}</span>
+      <input
+        className={`${envCellCls} min-w-0 flex-1`}
+        value={model}
+        placeholder={t("settings.providers.mappingModel")}
+        spellCheck={false}
+        onChange={(e) => onModel(e.target.value)}
+      />
+      <label
+        className="flex shrink-0 cursor-pointer select-none items-center gap-1 text-[10px] text-[var(--mx-muted)] transition-colors hover:text-[var(--mx-text)]"
+        title={t("settings.providers.model1MHint")}
+      >
+        <input
+          type="checkbox"
+          checked={/\[1M\]$/i.test(model)}
+          disabled={!model.trim()}
+          onChange={() => onModel(/\[1M\]$/i.test(model) ? model.replace(/\[1M\]$/i, "").trim() : `${model}[1M]`)}
+          className="h-3 w-3 accent-[var(--mx-accent)]"
+        />
+        1M
+      </label>
+      <input
+        className={`${envCellCls} min-w-0 flex-1`}
+        value={display}
+        placeholder={t("settings.providers.mappingDisplay")}
+        spellCheck={false}
+        onChange={(e) => onDisplay(e.target.value)}
+      />
+    </div>
+  );
 }
 
 /** extraEnv 键值行编辑(高级配置):每行 key/value + 删除,底部「+ 添加变量」。 */
@@ -866,14 +1392,12 @@ function EnvRows({
 }) {
   const { t } = useTranslation();
   const entries = Object.entries(value);
-  const cellCls =
-    "w-full min-w-0 rounded-[var(--mx-radius-sm)] border border-[var(--mx-border)] bg-[var(--mx-surface-2)] px-1.5 py-0.5 font-mono text-[10px] text-[var(--mx-text)] outline-none focus-visible:border-[var(--mx-accent)]";
   return (
     <div className="space-y-1">
       {entries.map(([k, v]) => (
         <div key={k} className="flex items-center gap-1">
           <input
-            className={`${cellCls} shrink-0 basis-[48%]`}
+            className={`${envCellCls} shrink-0 basis-[48%]`}
             value={k}
             spellCheck={false}
             onChange={(e) => {
@@ -883,7 +1407,7 @@ function EnvRows({
             }}
           />
           <input
-            className={`${cellCls} min-w-0 flex-1`}
+            className={`${envCellCls} min-w-0 flex-1`}
             value={v}
             spellCheck={false}
             onChange={(e) => onChange({ ...value, [k]: e.target.value })}

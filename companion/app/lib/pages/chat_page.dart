@@ -6,6 +6,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../chat/stream.dart';
 import '../models.dart';
+import '../page_cache.dart';
 import '../relay/client.dart';
 import '../theme.dart';
 
@@ -39,6 +40,8 @@ class ChatPage extends StatefulWidget {
 class _ChatPageState extends State<ChatPage> {
   final _input = TextEditingController();
   final _scroll = ScrollController();
+  final _messageListKey = GlobalKey();
+  final _currentPromptKey = GlobalKey();
   final _stream = ChatStream();
   StreamSubscription<Map<String, dynamic>>? _sub;
   StreamSubscription<RelayConnState>? _connSub;
@@ -57,6 +60,15 @@ class _ChatPageState extends State<ChatPage> {
   bool _sending = false;
   String _provider = "claude";
 
+  /// —— 快捷指令面板数据(按 tab 缓存)——
+  ///
+  /// 2026-11-05 用户定调:点 ⌘ 先弹面板再加载(原来 await 整个公网 round-trip 才弹,
+  /// 体感「非常慢」)。chat.models 后台拉,到了 setState 刷新(面板是 showModalBottomSheet
+  /// 的 builder,吃同一个 state)。数据按 tabId 缓存重启可用;切换供应商后重进面板即见新表。
+  /// 只缓「可选清单」,「当前模型/推理档」仍以 chat.status 实时值为准。
+  final Map<String, List<Map<String, dynamic>>> _modelsCache = {};
+  final Map<String, List<Map<String, dynamic>>> _groupsCache = {};
+
   /// —— 快捷指令状态 ——
   ///
   /// claude 的 model/effort 是**启动 flag**,改它就是重启进程,所以后端 `chat.command`
@@ -68,8 +80,44 @@ class _ChatPageState extends State<ChatPage> {
   /// (不传 `model_reasoning_effort`,让 config.toml 决定);其余为具体档位。
   /// 用空串做哨兵是因为「没选过」和「选了 auto」在 `chat.status` 回填后无法区分。
   String? _reasoningOverride;
+  /// codex 权限档/沙箱档(每轮参数,随 `chat.send` 带;app-server per-turn override
+  /// 下一轮即生效,无需重启)。`null` = 还没选过(允许被 `chat.status` 回填——后端
+  /// 回的是最近一轮实际用的值)。权限四档与沙箱三档联动归档,语义与桌面 CodexPane
+  /// 状态栏一致(setSandboxMode 的推导规则)。
+  String? _codexPermission;
+  String? _codexSandbox;
+  /// claude 权限模式(`--permission-mode` 启动 flag)。`null` = 还没选过(允许被
+  /// `chat.status` 回填——后端回的是启动时的值);切换走 `chat.command` mode(重启进程)。
+  String? _claudeMode;
   /// 「新会话」:置一次,随下一条 send 传 `newSession=true` 后清掉(等价桌面 `newSession()`)。
   bool _newSessionNext = false;
+  bool _currentPromptHidden = false;
+  bool _currentPromptExpanded = false;
+  String? _currentPromptId;
+
+  /// 当前问题横幅单行判定缓存(key = 可用宽度 + 文本,流式 rebuild 时免重复排版)。
+  String? _promptOneLineKey;
+  bool _promptOneLine = false;
+
+  /// 当前问题收起态单行是否放得下(放得下就不显示展开箭头,与桌面端同口径)。
+  /// 按横幅内文本区可用宽度用 TextPainter 排版一次:横幅宽 = Stack 宽 - 24(Positioned
+  /// left/right 12),扣掉内边距 22、左图标 13 + 间距 7;箭头隐藏时文本反而更宽,
+  /// 所以按「无箭头」口径测,自洽。
+  bool _promptFitsOneLine(String text) {
+    final avail = MediaQuery.of(context).size.width - 24 - 22 - 13 - 7;
+    final key = "$avail\u0000$text";
+    if (_promptOneLineKey == key) return _promptOneLine;
+    final tp = TextPainter(
+      text: TextSpan(text: text, style: const TextStyle(fontSize: 12, color: Mx.text)),
+      textDirection: TextDirection.ltr,
+      maxLines: 1,
+    );
+    tp.layout(maxWidth: avail);
+    _promptOneLine = !tp.didExceedMaxLines;
+    _promptOneLineKey = key;
+    tp.dispose();
+    return _promptOneLine;
+  }
 
   /// 生效的 codex 推理档位:`auto` 表示下一轮不传 `model_reasoning_effort`。
   String get _effectiveReasoning =>
@@ -85,6 +133,7 @@ class _ChatPageState extends State<ChatPage> {
   void initState() {
     super.initState();
     _rememberLast();
+    _scroll.addListener(_scheduleCurrentPromptCheck);
     _sub = widget.client.events.listen(_onEvent);
     _connSub = widget.client.stateStream.listen(_onConn);
     _poll = Timer.periodic(const Duration(seconds: 8), (_) {
@@ -99,9 +148,57 @@ class _ChatPageState extends State<ChatPage> {
     _poll?.cancel();
     _sub?.cancel();
     _connSub?.cancel();
+    _scroll.removeListener(_scheduleCurrentPromptCheck);
     _input.dispose();
     _scroll.dispose();
     super.dispose();
+  }
+
+  ChatMessage? get _currentPromptMessage {
+    for (final m in _stream.messages.reversed) {
+      if (m.role != "user") continue;
+      final text = m.blocks
+          .where((b) => b.type == "text" && b.text.trim().isNotEmpty)
+          .map((b) => b.text.trim())
+          .join("\n");
+      if (text.isNotEmpty) return m;
+    }
+    return null;
+  }
+
+  void _scheduleCurrentPromptCheck() {
+    WidgetsBinding.instance.addPostFrameCallback((_) => _updateCurrentPromptOverlay());
+  }
+
+  void _updateCurrentPromptOverlay() {
+    if (!mounted) return;
+    final prompt = _currentPromptMessage;
+    var hidden = false;
+    if (prompt != null) {
+      final promptContext = _currentPromptKey.currentContext;
+      final listContext = _messageListKey.currentContext;
+      final promptObject = promptContext?.findRenderObject();
+      final listObject = listContext?.findRenderObject();
+      if (promptContext == null ||
+          listContext == null ||
+          promptObject is! RenderBox ||
+          listObject is! RenderBox) {
+        // reverse ListView 懒加载:当前问题被裁剪时同样视为离开视口。
+        hidden = true;
+      } else {
+        final top = promptObject.localToGlobal(Offset.zero, ancestor: listObject).dy;
+        final bottom = top + promptObject.size.height;
+        hidden = bottom <= 12 || top >= listObject.size.height - 12;
+      }
+    }
+    final changed =
+        hidden != _currentPromptHidden || _currentPromptId != (prompt?.id ?? "");
+    if (!changed) return;
+    setState(() {
+      _currentPromptHidden = hidden;
+      if (_currentPromptId != (prompt?.id ?? "")) _currentPromptExpanded = false;
+      _currentPromptId = prompt?.id ?? "";
+    });
   }
 
   /// 断线期间桌面端可能已经跑完一轮(甚至需要审批):重连后重拉 status + 历史。
@@ -128,11 +225,32 @@ class _ChatPageState extends State<ChatPage> {
       _loading = true;
       _error = null;
     });
-    // 顺序有讲究:**先历史、后状态**。history 里的 `result` 事件会把 status 归到 done,
-    // 若先取状态再归并历史,状态就被过期快照盖住了;反过来则是服务端现况最后落地。
-    await _loadHistory();
-    await _refreshStatus();
-    if (mounted) setState(() => _loading = false);
+    // 开缓冲:拉历史期间到达的实时事件先攒着,历史落地重建后按序重放(见 ChatStream._liveBuffer)。
+    _stream.beginBuffering();
+    try {
+      // 先渲染缓存的历史(SWR:归并是幂等重建,回填覆盖即可),网络到了再替换。
+      // 400 条事件可达数 MB,公网 round-trip 秒级——没有缓存每进页都盯 spinner。
+      await _loadCachedHistory();
+      // 顺序有讲究:**先历史、后状态**。history 里的 `result` 事件会把 status 归到 done,
+      // 若先取状态再归并历史,状态就被过期快照盖住了;反过来则是服务端现况最后落地。
+      await _loadHistory();
+      await _refreshStatus();
+    } finally {
+      // 缓冲重放要在 setState 外做(applyClaude 改 state,重放后统一刷一次 UI)。
+      _stream.replayBuffered();
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  /// 历史缓存 key:按 tab 隔离,读写都是「全量 events/messages」原始 JSON。
+  String get _historyCacheKey => "chat.history.${widget.projectId}.${widget.tabId}";
+
+  Future<void> _loadCachedHistory() async {
+    try {
+      final cached = await PageCache.readObject(_historyCacheKey);
+      if (cached == null || !mounted) return;
+      _applyHistoryPayload(cached);
+    } catch (_) {}
   }
 
   /// `quiet` = 后台轮询:失败不弹错误条(网络抖一下不该打扰用户,断线本身有横幅)。
@@ -160,6 +278,14 @@ class _ChatPageState extends State<ChatPage> {
           if (_reasoningOverride == null && status.reasoningEffort != null) {
             _reasoningOverride = status.reasoningEffort;
           }
+          if (_codexPermission == null && status.permission != null) {
+            _codexPermission = status.permission;
+          }
+          if (_codexSandbox == null && status.sandbox != null) {
+            _codexSandbox = status.sandbox;
+          }
+        } else if (_claudeMode == null && status.permissionMode != null) {
+          _claudeMode = status.permissionMode;
         }
       });
     } catch (e) {
@@ -174,33 +300,40 @@ class _ChatPageState extends State<ChatPage> {
         "tabId": widget.tabId,
       });
       final result = (resp["result"] as Map).cast<String, dynamic>();
-      final provider = result["provider"] as String? ?? _provider;
-      // 历史是权威真源:每次重载都重建(事件可能已归并过,重复归并幂等)。
-      // 但**待审批卡不能丢**——历史里没有 permission_request,清掉的话桌面端那一轮会
-      // 一直等审批(手机重连/重载后卡片消失 = 死锁)。所以先存后放。
-      final pendingAsks = List<PermissionAsk>.of(_stream.permissions);
-      _stream.clear();
-      _stream.permissions.addAll(pendingAsks);
-      if (provider == "claude") {
-        for (final e in (result["events"] as List<dynamic>? ?? const [])) {
-          _stream.applyClaude((e as Map).cast<String, dynamic>());
-        }
-      } else {
-        // codex 只有扁平文本历史(role/text/timestamp),逐条转成纯文本消息。
-        for (final m in (result["messages"] as List<dynamic>? ?? const [])) {
-          final msg = (m as Map).cast<String, dynamic>();
-          _stream.appendPlain(
-            user: (msg["role"] as String? ?? "") == "user",
-            text: msg["text"] as String? ?? "",
-          );
-        }
-      }
-      // 状态不在这里定:历史里的 result 事件会把它归成 done,紧接着的 `_refreshStatus`
-      // 才是权威现况(见 `_bootstrap` 的顺序说明)。
-      if (mounted) setState(() {});
+      // 写缓存失败不影响主流程(裁剪后的 payload,几十~几百 KB)。
+      unawaited(PageCache.write(_historyCacheKey, result));
+      if (mounted) _applyHistoryPayload(result);
     } catch (e) {
       if (mounted) setState(() => _error = "历史加载失败: $e");
     }
+  }
+
+  /// 历史与实时事件同构,同一套归并(缓存与网络回填共用;重复归并幂等)。
+  void _applyHistoryPayload(Map<String, dynamic> result) {
+    final provider = result["provider"] as String? ?? _provider;
+    // 历史是权威真源:每次重载都重建(事件可能已归并过,重复归并幂等)。
+    // 但**待审批卡不能丢**——历史里没有 permission_request,清掉的话桌面端那一轮会
+    // 一直等审批(手机重连/重载后卡片消失 = 死锁)。所以先存后放。
+    final pendingAsks = List<PermissionAsk>.of(_stream.permissions);
+    _stream.clear();
+    _stream.permissions.addAll(pendingAsks);
+    if (provider == "claude") {
+      for (final e in (result["events"] as List<dynamic>? ?? const [])) {
+        _stream.applyClaude((e as Map).cast<String, dynamic>());
+      }
+    } else {
+      // codex 只有扁平文本历史(role/text/timestamp),逐条转成纯文本消息。
+      for (final m in (result["messages"] as List<dynamic>? ?? const [])) {
+        final msg = (m as Map).cast<String, dynamic>();
+        _stream.appendPlain(
+          user: (msg["role"] as String? ?? "") == "user",
+          text: msg["text"] as String? ?? "",
+        );
+      }
+    }
+    // 状态不在这里定:历史里的 result 事件会把它归成 done,紧接着的 `_refreshStatus`
+    // 才是权威现况(见 `_bootstrap` 的顺序说明)。
+    if (mounted) setState(() {});
   }
 
   void _onEvent(Map<String, dynamic> frame) {
@@ -210,12 +343,11 @@ class _ChatPageState extends State<ChatPage> {
     if (data["projectId"] != widget.projectId || data["tabId"] != widget.tabId) return;
     final payload = (data["payload"] as Map?)?.cast<String, dynamic>();
     if (payload == null) return;
+    final provider = data["provider"] as String? ?? "claude";
     setState(() {
-      if ((data["provider"] as String? ?? "claude") == "claude") {
-        _stream.applyClaude(payload);
-      } else {
-        _stream.applyCodex(payload);
-      }
+      // 装载期(拉历史 round-trip 中)事件先进缓冲,历史落地重建后重放,
+      // 否则 clear() 会把装载期到达的新消息洗掉(竞态,2026-11-05 用户实测)。
+      _stream.applyLive(provider, payload);
     });
     _scrollToBottom();
   }
@@ -258,6 +390,9 @@ class _ChatPageState extends State<ChatPage> {
           // 空串哨兵 = 显式 auto,不发该参数(后端 `filter(|s| !s.is_empty())` 也会吞掉,
           // 这里少发一次省得两端都靠约定)。
           if (_effectiveReasoning != "auto") "reasoningEffort": _effectiveReasoning,
+          // 权限/沙箱:每轮参数(per-turn override),面板里选过就随每轮带上。
+          if (_codexPermission != null) "permission": _codexPermission,
+          if (_codexSandbox != null) "sandbox": _codexSandbox,
           if (sendNewSession) "newSession": true,
         },
       });
@@ -294,15 +429,26 @@ class _ChatPageState extends State<ChatPage> {
     // 先本地移除(先答的口生效;另一端收到 result 后卡片也会消失)。
     setState(() => _stream.permissions.removeWhere((a) => a.requestId == requestId));
     try {
-      await widget.client.request("chat.permission", {
-        "projectId": widget.projectId,
-        "tabId": widget.tabId,
-        "requestId": requestId,
-        "behavior": allow ? "allow" : "deny",
-        // allow 必须带 updatedInput(CLI 认这个形态,spike 实测)。
-        if (allow) "updatedInput": ask.input,
-        if (!allow) "message": "用户在手机端拒绝了这个操作。",
-      });
+      if (_provider == "claude") {
+        await widget.client.request("chat.permission", {
+          "projectId": widget.projectId,
+          "tabId": widget.tabId,
+          "requestId": requestId,
+          "behavior": allow ? "allow" : "deny",
+          // allow 必须带 updatedInput(CLI 认这个形态,spike 实测)。
+          if (allow) "updatedInput": ask.input,
+          if (!allow) "message": "用户在手机端拒绝了这个操作。",
+        });
+      } else {
+        // codex app-server 实时审批:requestId 即审批帧的 request key;
+        // decision 枚举由桌面端按 method 代际分派,手机只给 allow/deny 意图。
+        await widget.client.request("chat.codexApproval", {
+          "projectId": widget.projectId,
+          "tabId": widget.tabId,
+          "key": requestId,
+          "approved": allow,
+        });
+      }
     } catch (e) {
       // 回传失败必须把卡片放回去:否则桌面端那一轮永远等不到答复(卡死),
       // 而手机端界面上「已处理」毫无提示。
@@ -321,6 +467,7 @@ class _ChatPageState extends State<ChatPage> {
   @override
   Widget build(BuildContext context) {
     final online = widget.client.state == RelayConnState.online;
+    WidgetsBinding.instance.addPostFrameCallback((_) => _updateCurrentPromptOverlay());
     return Scaffold(
       appBar: AppBar(
         title: Column(
@@ -359,12 +506,27 @@ class _ChatPageState extends State<ChatPage> {
                 Icon(Icons.cloud_off, size: 13, color: Mx.warning),
                 SizedBox(width: 6),
                 Expanded(
-                  child: Text("电脑离线 — 消息发不出去,恢复后自动可发",
+                  child: Text("连接已断开,正在重连 — 恢复后消息可正常发送",
                       style: TextStyle(fontSize: 11, color: Mx.warning)),
                 ),
               ]),
             ),
-          Expanded(child: _loading ? const Center(child: CircularProgressIndicator()) : _messageList()),
+          Expanded(
+            child: _loading
+                ? const Center(child: CircularProgressIndicator())
+                : Stack(
+                    key: _messageListKey,
+                    children: [
+                      Positioned.fill(child: _messageList()),
+                      if (_currentPromptHidden)
+                        Builder(builder: (context) {
+                          final prompt = _currentPromptMessage;
+                          if (prompt == null) return const SizedBox.shrink();
+                          return _currentPromptBanner(prompt);
+                        }),
+                    ],
+                  ),
+          ),
           _composer(online),
         ],
       ),
@@ -422,6 +584,7 @@ class _ChatPageState extends State<ChatPage> {
 
   Widget _messageList() {
     final lastIdx = _stream.messages.length - 1;
+    final currentPrompt = _currentPromptMessage;
     final n = _stream.messages.length + _stream.permissions.length;
     if (n == 0) {
       return const Center(
@@ -446,6 +609,7 @@ class _ChatPageState extends State<ChatPage> {
         }
         final m = _stream.messages[fromEnd];
         return Column(
+          key: currentPrompt?.id == m.id ? _currentPromptKey : null,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             _messageBubble(m),
@@ -456,6 +620,67 @@ class _ChatPageState extends State<ChatPage> {
           ],
         );
       },
+    );
+  }
+
+  Widget _currentPromptBanner(ChatMessage message) {
+    final text = message.blocks
+        .where((b) => b.type == "text" && b.text.trim().isNotEmpty)
+        .map((b) => b.text.trim())
+        .join("\n");
+    // 单行放得下且未展开:没有可展开的内容,不显示箭头。
+    final showChevron = _currentPromptExpanded || !_promptFitsOneLine(text);
+    return Positioned(
+      top: 8,
+      left: 12,
+      right: 12,
+      child: GestureDetector(
+        onTap: () => setState(() => _currentPromptExpanded = !_currentPromptExpanded),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 8),
+          decoration: BoxDecoration(
+            color: Mx.card.withValues(alpha: 0.97),
+            borderRadius: BorderRadius.circular(Mx.radiusMd),
+            border: Border.all(color: Mx.selectedBorder),
+            boxShadow: const [
+              BoxShadow(color: Color(0x26000000), blurRadius: 16, offset: Offset(0, 5)),
+            ],
+          ),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Icon(Icons.chat_bubble_outline, size: 13, color: Mx.accentBright),
+              const SizedBox(width: 7),
+              Expanded(
+                child: _currentPromptExpanded
+                    ? ConstrainedBox(
+                        constraints: const BoxConstraints(maxHeight: 220),
+                        child: SingleChildScrollView(
+                          child: Text(
+                            text,
+                            style: const TextStyle(fontSize: 12, height: 1.45, color: Mx.text),
+                          ),
+                        ),
+                      )
+                    : Text(
+                        text,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(fontSize: 12, color: Mx.text),
+                      ),
+              ),
+              if (showChevron) ...[
+                const SizedBox(width: 6),
+                AnimatedRotation(
+                  turns: _currentPromptExpanded ? 0.5 : 0,
+                  duration: const Duration(milliseconds: 140),
+                  child: const Icon(Icons.keyboard_arrow_down, size: 16, color: Mx.muted),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
     );
   }
 
@@ -618,7 +843,7 @@ class _ChatPageState extends State<ChatPage> {
               enabled: online,
               textInputAction: TextInputAction.newline,
               decoration: InputDecoration(
-                hintText: online ? "发消息给 ${_provider == "claude" ? "Claude" : "Codex"}…" : "电脑离线,无法发送",
+                hintText: online ? "发消息给 ${_provider == "claude" ? "Claude" : "Codex"}…" : "连接已断开,正在重连…",
                 contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
                 // 单行时撑到 44 与两侧按钮同高(多行不受限,底对齐下顶边平齐)。
                 constraints: const BoxConstraints(minHeight: 44),
@@ -697,38 +922,44 @@ class _ChatPageState extends State<ChatPage> {
   }
 
   Future<void> _openCommands() async {
-    // 模型列表现拉(cc-switch 切供应商后无需改手机端预置表)。
-    List<Map<String, dynamic>> models = const [];
-    // 供应商分组(claude;桌面 providers 镜像。空 = 老桌面未推镜像,退回扁平列表)。
-    List<Map<String, dynamic>> groups = const [];
-    String? activeModel;
-    try {
-      final resp = await widget.client.request("chat.models", {
-        "projectId": widget.projectId,
-        "tabId": widget.tabId,
-      });
-      models = ((resp["result"]?["models"] as List<dynamic>?) ?? const [])
-          .map((e) => (e as Map).cast<String, dynamic>())
-          .toList();
-      groups = ((resp["result"]?["groups"] as List<dynamic>?) ?? const [])
-          .map((e) => (e as Map).cast<String, dynamic>())
-          .toList();
-      activeModel = resp["result"]?["activeModel"] as String?;
-    } catch (_) {/* 拉不到就只显示「当前」,不挡其它指令 */}
-    if (!mounted) return;
+    // 先弹面板(用缓存或空清单),chat.models 后台拉——原来 await round-trip 才弹,
+    // 公网延迟全算在「点按钮→面板出现」上。拉到后 setState 刷新面板内容。
+    Future<void> fetchModels() async {
+      try {
+        final resp = await widget.client.request("chat.models", {
+          "projectId": widget.projectId,
+          "tabId": widget.tabId,
+        });
+        if (!mounted) return;
+        setState(() {
+          _modelsCache[widget.tabId] = ((resp["result"]?["models"] as List<dynamic>?) ?? const [])
+              .map((e) => (e as Map).cast<String, dynamic>())
+              .toList();
+          _groupsCache[widget.tabId] = ((resp["result"]?["groups"] as List<dynamic>?) ?? const [])
+              .map((e) => (e as Map).cast<String, dynamic>())
+              .toList();
+        });
+      } catch (_) {/* 拉不到就用缓存/空清单,不挡其它指令 */}
+    }
+    if (mounted) setState(() {});
+    unawaited(fetchModels());
 
     await showModalBottomSheet<void>(
       context: context,
       showDragHandle: true,
       backgroundColor: Mx.surface,
       isScrollControlled: true,
+      // 高度上限 75% 屏高,内容超出内部滚动(2026-11-05 用户定调)。
       builder: (ctx) => SafeArea(
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.fromLTRB(14, 0, 14, 16),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: _commandSheetRows(ctx, models, groups, activeModel),
+        child: ConstrainedBox(
+          constraints: BoxConstraints(maxHeight: MediaQuery.of(ctx).size.height * 0.75),
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.fromLTRB(14, 0, 14, 16),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: _commandSheetRows(ctx),
+            ),
           ),
         ),
       ),
@@ -740,9 +971,10 @@ class _ChatPageState extends State<ChatPage> {
   /// **桌面专属指令一律不出现**(`/folder` `/memory` `/agents` `/skills` `/mcp` `/plugins`
   /// `/config` `/export` `/doctor` `/rewind` `/add-dir` `/help`):它们要么打开电脑上的面板,
   /// 要么读本地文件,手机上点了没有任何反馈,只会让人以为坏了。
-  List<Widget> _commandSheetRows(
-      BuildContext sheetCtx, List<Map<String, dynamic>> models,
-      List<Map<String, dynamic>> groups, String? activeModel) {
+  List<Widget> _commandSheetRows(BuildContext sheetCtx) {
+    final models = _modelsCache[widget.tabId] ?? const [];
+    final groups = _groupsCache[widget.tabId] ?? const [];
+    final activeModel = _stream.model;
     final rows = <Widget>[
       Padding(
         padding: const EdgeInsets.fromLTRB(2, 0, 2, 8),
@@ -780,6 +1012,8 @@ class _ChatPageState extends State<ChatPage> {
         ..addAll(_modelChoices(models, sheetCtx, groups, activeModel))
         ..add(_sectionLabel("推理档位"))
         ..addAll(_effortChoices(sheetCtx))
+        ..add(_sectionLabel("权限模式"))
+        ..addAll(_claudeModeChoices(sheetCtx))
         ..add(_sectionLabel("进程"))
         ..add(_cmdTile(
           icon: Icons.restart_alt,
@@ -818,6 +1052,10 @@ class _ChatPageState extends State<ChatPage> {
       ..addAll(_codexModelChoices(models, sheetCtx))
       ..add(_sectionLabel("推理档位"))
       ..addAll(_codexReasoningChoices(models, sheetCtx))
+      ..add(_sectionLabel("权限"))
+      ..addAll(_codexPermissionChoices(sheetCtx))
+      ..add(_sectionLabel("沙箱"))
+      ..addAll(_codexSandboxChoices(sheetCtx))
       ..add(_sectionLabel("进程"))
       ..add(_cmdTile(
         icon: Icons.power_settings_new,
@@ -1088,6 +1326,109 @@ class _ChatPageState extends State<ChatPage> {
     ];
   }
 
+  /// claude 权限模式(`--permission-mode` 启动 flag,重启进程换):走 `chat.command`
+  /// mode(与 model/effort 同一 restart 机制,带上其余启动参数)。当前档由
+  /// `chat.status.permissionMode` 回读(启动时的值),切换后 `_refreshStatus` 校准。
+  List<Widget> _claudeModeChoices(BuildContext sheetCtx) {
+    const modes = [
+      ("acceptEdits", "自动接受编辑", "文件编辑自动通过,其余操作仍询问"),
+      ("plan", "计划模式", "只读调研,先提方案经你确认再动手"),
+      ("manual", "逐步确认", "每次操作都先问你(最稳)"),
+      ("bypassPermissions", "跳过所有权限", "全部放行不再询问(谨慎)"),
+    ];
+    final current = _claudeMode ?? "acceptEdits";
+    return [
+      for (final (id, title, desc) in modes)
+        _cmdTile(
+          icon: id == current ? Icons.check : Icons.verified_user_outlined,
+          title: "$title · $id",
+          subtitle: desc,
+          enabled: !_busy,
+          selected: id == current,
+          onTap: () => _runCommand("mode", value: id, closeSheet: sheetCtx),
+        ),
+    ];
+  }
+
+  /// codex 权限四档(桌面 CodexPane 状态栏同口径;每轮参数随 chat.send 带,
+  /// app-server per-turn override 下一轮即生效,无需重启)。approval 档联动 sandbox。
+  List<Widget> _codexPermissionChoices(BuildContext sheetCtx) {
+    const profiles = [
+      ("ask-for-approval", "每次询问", "工作区写入可用,敏感操作先问你"),
+      ("approve-for-me", "自动批准", "工作区内自动批准,不再询问"),
+      ("full-access", "完全访问", "全放行,不限工作区(谨慎)"),
+      ("read-only", "只读", "只读不写,最安全"),
+    ];
+    final current = _codexPermission ?? "ask-for-approval";
+    return [
+      for (final (id, title, desc) in profiles)
+        _cmdTile(
+          icon: id == current ? Icons.check : Icons.verified_user_outlined,
+          title: title,
+          subtitle: desc,
+          enabled: true,
+          selected: id == current,
+          onTap: () {
+            Navigator.pop(sheetCtx);
+            _setCodexPermission(id);
+            _toast("下一条消息权限:$title");
+          },
+        ),
+    ];
+  }
+
+  /// codex 沙箱三档(桌面 SANDBOX_MODES 同口径)。切沙箱时按桌面 setSandboxMode
+  /// 规则归档权限档,避免「权限显示与实际沙箱不一致」。
+  List<Widget> _codexSandboxChoices(BuildContext sheetCtx) {
+    const sandboxes = [
+      ("read-only", "只读", "不能写文件,只能看"),
+      ("workspace-write", "工作区写入", "只能写项目目录内"),
+      ("danger-full-access", "完全访问", "全盘可写(谨慎)"),
+    ];
+    final current = _codexSandbox ?? "workspace-write";
+    return [
+      for (final (id, title, desc) in sandboxes)
+        _cmdTile(
+          icon: id == current ? Icons.check : Icons.shield_outlined,
+          title: title,
+          subtitle: desc,
+          enabled: true,
+          selected: id == current,
+          onTap: () {
+            Navigator.pop(sheetCtx);
+            _setCodexSandbox(id);
+            _toast("下一条消息沙箱:$title");
+          },
+        ),
+    ];
+  }
+
+  /// codex 权限档切换(桌面 setPermissionMode 同语义:profile 决定 sandbox)。
+  void _setCodexPermission(String id) {
+    const profileSandbox = {
+      "ask-for-approval": "workspace-write",
+      "approve-for-me": "workspace-write",
+      "full-access": "danger-full-access",
+      "read-only": "read-only",
+    };
+    setState(() {
+      _codexPermission = id;
+      _codexSandbox = profileSandbox[id] ?? "workspace-write";
+    });
+  }
+
+  /// codex 沙箱档切换(桌面 setSandboxMode 同语义:反推权限档保联动一致)。
+  void _setCodexSandbox(String mode) {
+    setState(() {
+      _codexSandbox = mode;
+      _codexPermission = mode == "danger-full-access"
+          ? "full-access"
+          : mode == "read-only"
+              ? "read-only"
+              : (_codexPermission == "approve-for-me" ? "approve-for-me" : "ask-for-approval");
+    });
+  }
+
   Widget _cmdTile({
     required IconData icon,
     required String title,
@@ -1152,6 +1493,7 @@ class _ChatPageState extends State<ChatPage> {
         "clear" => "会话已清空",
         "model" => "模型已切换:${r?["model"] ?? value}",
         "effort" => "推理档位已切换:${r?["effort"] ?? value}",
+        "mode" => "权限模式已切换:${r?["permissionMode"] ?? value}",
         "restart" => "会话进程已重启",
         "exit" => "会话已结束",
         _ => "已执行 $command",

@@ -101,6 +101,8 @@ export function UsagePanel() {
   const [modelFilter, setModelFilter] = useState("");
   const [dateFrom, setDateFrom] = useState(localDateStr(new Date()));
   const [dateTo, setDateTo] = useState(localDateStr(new Date()));
+  // 趋势图指标(受控,2026-11-04 用户定调:点击顶部 Hero 格切换,图表内不再自带 pill)。
+  const [trendMetric, setTrendMetric] = useState<TrendMetric>("tokens");
 
   // 窗口不够时拉取(rollups+log 并发);force 绕过窗口判定(SWR 重开刷新)。
   // 结果写模块缓存(卸载后完成也不丢,下次直接可用);setState 对已卸载组件是 no-op(React 18)。
@@ -285,8 +287,13 @@ export function UsagePanel() {
 
   return (
     <div>
-      {/* 筛选带(cc-switch 布局):左 app 段选;右 供应商/模型/起止日期/重置。 */}
-      <div className="mb-2.5 flex flex-wrap items-center gap-2">
+      {/* 筛选带(cc-switch 布局):左 app 段选;右 供应商/模型/起止日期/重置。sticky 固定
+          在设置弹窗内容区顶部不随滚动(用户 2026-11-04)。Chromium 的 sticky 阈值相对滚动
+          容器 content box(容器 py-4=14px):top:0 会粘在 padding 之下、上缘露 14px 内容
+          (探针实测)。-top-3.5(-14px)把粘着点提到 padding box 顶;pt-[22px](14+8)让
+          粘住前后带内内容位置恒等(153.75+8 = 139.75+22),不跳动。-mx-5/px-5 让不透明
+          背景横贯内容区全宽(容器 px-5 的负外延)。 */}
+      <div className="sticky -top-[14px] z-10 -mx-5 flex flex-wrap items-center gap-2 bg-[var(--mx-card-inner)] px-5 pb-2.5 pt-[22px]">
         <SliderToggleGroup
           value={appFilter}
           onValueChange={(v) => {
@@ -331,14 +338,16 @@ export function UsagePanel() {
         <>
           {/* 概览常驻卡片块(2026-10-21 用户定调:不再是 tab,放请求日志/供应商/模型/定价
               4 个 tab 之上,一眼见汇总+趋势):Hero 格 + 趋势图,全吃筛选。 */}
-          <div className="mb-3 rounded-[var(--mx-radius-md)] border border-[var(--mx-border)] bg-[var(--mx-card-inner)] px-3 py-2.5">
-            {/* 常驻 4 格(用户点名的核心指标);其余(会话/输入/输出/模型数)收进「更多指标」
-                点击展开再显示(同日再定调:首屏只留最常看的)。 */}
+          <div className="mb-3 px-3 py-2.5">
+            {/* 常驻 4 格(用户点名的核心指标);点击切趋势图视角(2026-11-04 定调,
+                取代图表右上角 pill)。命中率格归 tokens 视角(看 cacheRead 堆叠段)。 */}
             <div className="mb-1.5 grid grid-cols-4 gap-1.5">
               <HeroCell
                 icon={IconZap}
                 label={t("settings.usage.requests")}
                 numeric={{ value: grand.requests, format: (n) => Math.round(n).toLocaleString() }}
+                onClick={() => setTrendMetric("requests")}
+                active={trendMetric === "requests"}
               />
               {/* tokens 组(2026-10-29 对齐 cc-switch):「真实消耗」= 四段全和
                   (新增输入+输出+缓存写入+缓存命中)——缓存命中虽按折扣计价,但 token
@@ -348,17 +357,23 @@ export function UsagePanel() {
                 label={t("settings.usage.total")}
                 numeric={{ value: grand.input + grand.output + grand.cacheRead + grand.cacheCreation, format: (n) => formatTokens(n) }}
                 title={t("settings.usage.totalHint")}
+                onClick={() => setTrendMetric("tokens")}
+                active={trendMetric === "tokens"}
               />
               <HeroCell
                 icon={IconTarget}
                 label={t("settings.usage.cacheHit")}
                 numeric={{ value: grand.cacheHitRate * 100, format: (n) => `${Math.round(n)}%` }}
+                onClick={() => setTrendMetric("tokens")}
+                active={trendMetric === "tokens"}
               />
               <HeroCell
                 icon={IconCost}
                 label={t("settings.usage.cost")}
                 numeric={{ value: grand.cost, format: (n) => (grand.known ? `≈${formatUsd(n)}` : "—") }}
                 accent
+                onClick={() => setTrendMetric("cost")}
+                active={trendMetric === "cost"}
               />
             </div>
             {moreMetrics && (
@@ -370,21 +385,29 @@ export function UsagePanel() {
                   icon={IconIn}
                   label={t("settings.usage.newInput")}
                   numeric={{ value: grand.input, format: (n) => formatTokens(n) }}
+                  onClick={() => setTrendMetric("tokens")}
+                  active={trendMetric === "tokens"}
                 />
                 <HeroCell
                   icon={IconOut}
                   label={t("settings.usage.output")}
                   numeric={{ value: grand.output, format: (n) => formatTokens(n) }}
+                  onClick={() => setTrendMetric("tokens")}
+                  active={trendMetric === "tokens"}
                 />
                 <HeroCell
                   icon={IconLayers}
                   label={t("settings.usage.cacheWrite")}
                   numeric={{ value: grand.cacheCreation, format: (n) => formatTokens(n) }}
+                  onClick={() => setTrendMetric("tokens")}
+                  active={trendMetric === "tokens"}
                 />
                 <HeroCell
                   icon={IconTarget}
                   label={t("settings.usage.cacheHitTokens")}
                   numeric={{ value: grand.cacheRead, format: (n) => formatTokens(n) }}
+                  onClick={() => setTrendMetric("tokens")}
+                  active={trendMetric === "tokens"}
                 />
               </div>
             )}
@@ -397,7 +420,7 @@ export function UsagePanel() {
               {t("settings.usage.moreMetrics")}
               <span aria-hidden>{moreMetrics ? "▴" : "▾"}</span>
             </button>
-            <UsageTrendChart rows={filtered} log={logFiltered} dateFrom={dateFrom} dateTo={dateTo} overrides={overrides} modelsDev={modelsDev} />
+            <UsageTrendChart rows={filtered} log={logFiltered} dateFrom={dateFrom} dateTo={dateTo} overrides={overrides} modelsDev={modelsDev} metric={trendMetric} />
           </div>
 
           <Tabs defaultValue="logs" className="flex flex-col">
@@ -868,8 +891,9 @@ function AnimatedNumber({ value, format }: { value: number; format: (n: number) 
   return <>{format(display)}</>;
 }
 
-/** Hero 单格卡(cc-switch UsageHero 的紧凑版;图标 + hover 提亮)。numeric 优先于
- * value 字符串(数字滚动渲染)。 */
+/** Hero 单格卡(cc-switch UsageHero 的紧凑版)。numeric 优先于 value 字符串(数字滚动
+ * 渲染)。2026-11-04 用户定调:去掉格子背景(border+bg 太重),纯文字排布;onClick 时
+ * 成为趋势图指标切换入口,active 格 label 行亮 accent 指示当前图表视角。 */
 function HeroCell({
   icon: Icon,
   label,
@@ -877,6 +901,8 @@ function HeroCell({
   numeric,
   accent,
   title,
+  onClick,
+  active,
 }: {
   icon: (props: { className?: string }) => ReactNode;
   label: string;
@@ -884,20 +910,42 @@ function HeroCell({
   numeric?: { value: number; format: (n: number) => string };
   accent?: boolean;
   title?: string;
+  onClick?: () => void;
+  active?: boolean;
 }) {
-  return (
-    <div
-      title={title}
-      className="rounded-[var(--mx-radius-md)] border border-[var(--mx-border)] bg-[var(--mx-card-inner)] px-2.5 py-1.5 transition-colors hover:border-[var(--mx-border-strong)]"
-    >
-      <div className="flex items-center gap-1 text-[9px] uppercase tracking-wide text-[var(--mx-faint)]">
-        <Icon className="h-[11px] w-[11px] shrink-0" />
-        <span className="truncate">{label}</span>
-      </div>
-      <div className={`text-[14px] font-semibold tabular-nums ${accent ? "text-[var(--mx-accent-bright)]" : "text-[var(--mx-text)]"}`}>
-        {numeric ? <AnimatedNumber value={numeric.value} format={numeric.format} /> : value}
-      </div>
+  const headCls = `flex items-center gap-1 text-[9px] uppercase tracking-wide transition-colors ${
+    active ? "text-[var(--mx-accent-bright)]" : onClick ? "text-[var(--mx-faint)] group-hover:text-[var(--mx-text)]" : "text-[var(--mx-faint)]"
+  }`;
+  const head = (
+    <div className={headCls}>
+      <Icon className="h-[11px] w-[11px] shrink-0" />
+      <span className="truncate">{label}</span>
     </div>
+  );
+  const body = (
+    <div className={`text-[14px] font-semibold tabular-nums ${accent ? "text-[var(--mx-accent-bright)]" : "text-[var(--mx-text)]"}`}>
+      {numeric ? <AnimatedNumber value={numeric.value} format={numeric.format} /> : value}
+    </div>
+  );
+  if (!onClick) {
+    return (
+      <div title={title} className="px-2.5 py-1.5">
+        {head}
+        {body}
+      </div>
+    );
+  }
+  return (
+    <button
+      type="button"
+      title={title}
+      onClick={onClick}
+      aria-pressed={active}
+      className="group px-2.5 py-1.5 text-left"
+    >
+      {head}
+      {body}
+    </button>
   );
 }
 
@@ -917,6 +965,9 @@ const IconTarget = iconSvg(<><circle cx="12" cy="12" r="10" /><circle cx="12" cy
 const IconIn = iconSvg(<><path d="M12 3v12" /><path d="m7 10 5 5 5-5" /><path d="M5 21h14" /></>);
 const IconOut = iconSvg(<><path d="M12 21V9" /><path d="m7 14 5-5 5 5" /><path d="M5 3h14" /></>);
 const IconLayers = iconSvg(<><polygon points="12 2 2 7 12 12 22 7 12 2" /><polyline points="2 17 12 22 22 17" /><polyline points="2 12 12 17 22 12" /></>);
+
+/** 趋势图视角(受控于顶部 Hero 格点击,2026-11-04 定调)。 */
+type TrendMetric = "tokens" | "requests" | "cost";
 
 /** 趋势行数据(桶 key + 四段合计)。 */
 type TrendPoint = {
@@ -942,6 +993,7 @@ function UsageTrendChart({
   dateTo,
   overrides,
   modelsDev,
+  metric,
 }: {
   rows: UsageRollup[];
   log: RequestLogEntry[];
@@ -949,13 +1001,13 @@ function UsageTrendChart({
   dateTo: string;
   overrides: Record<string, ModelPricing>;
   modelsDev: Record<string, ModelPricing> | null;
+  metric: TrendMetric;
 }) {
   const { t } = useTranslation();
   const wrapRef = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(0);
   const [hover, setHover] = useState<number | null>(null);
-  // 指标切换(cc-switch 同款三视角,2026-10-29):tokens 三段堆叠 / 请求数 / 成本。
-  const [metric, setMetric] = useState<"tokens" | "requests" | "cost">("tokens");
+  // 指标视角由顶部 Hero 格受控(props.metric),组件内不再自带切换 pill。
 
   useEffect(() => {
     const el = wrapRef.current;
@@ -1057,21 +1109,6 @@ function UsageTrendChart({
 
   return (
     <div ref={wrapRef} className="relative">
-      {/* 指标切换 pill(右上角,不占图区;cc-switch 同款三视角)。 */}
-      <div className="absolute right-0 top-0 z-10 flex gap-0.5 rounded-[var(--mx-radius-md)] border border-[var(--mx-border)] bg-[var(--mx-card-inner)] p-0.5">
-        {(["tokens", "requests", "cost"] as const).map((m) => (
-          <button
-            key={m}
-            type="button"
-            onClick={() => { setMetric(m); setHover(null); }}
-            className={`rounded-[calc(var(--mx-radius-md)-1px)] px-1.5 py-0.5 text-[10px] transition-colors ${
-              metric === m ? "bg-[var(--mx-accent)] text-white" : "text-[var(--mx-muted)] hover:text-[var(--mx-text)]"
-            }`}
-          >
-            {t(`settings.usage.trend${m[0].toUpperCase()}${m.slice(1)}`)}
-          </button>
-        ))}
-      </div>
       <svg
         width="100%"
         height={H}

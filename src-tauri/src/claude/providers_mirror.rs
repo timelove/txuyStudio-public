@@ -54,7 +54,8 @@ pub fn load_providers(app: &AppHandle) -> Vec<Value> {
 }
 
 /// provider 镜像 → 完整 env 段(与前端 `providerEnv` 同口径:extraEnv 合并 +
-/// baseUrl/token/model 三键;键序无关,BTreeMap 落盘稳定)。
+/// baseUrl/token/model 三键;token 按认证字段落 AUTH_TOKEN / API_KEY 之一;键序无关,
+/// BTreeMap 落盘稳定)。
 pub fn provider_env(p: &Value) -> BTreeMap<String, String> {
     let mut env = BTreeMap::new();
     if let Some(extra) = p.get("extraEnv").and_then(|e| e.as_object()) {
@@ -68,7 +69,6 @@ pub fn provider_env(p: &Value) -> BTreeMap<String, String> {
     }
     for (key, field) in [
         ("ANTHROPIC_BASE_URL", "baseUrl"),
-        ("ANTHROPIC_AUTH_TOKEN", "token"),
         ("ANTHROPIC_MODEL", "model"),
     ] {
         if let Some(s) = p.get(field).and_then(|v| v.as_str()) {
@@ -76,6 +76,14 @@ pub fn provider_env(p: &Value) -> BTreeMap<String, String> {
                 env.insert(key.to_string(), s.to_string());
             }
         }
+    }
+    if let Some(token) = p.get("token").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+        let key = if p.get("authStyle").and_then(|v| v.as_str()) == Some("api_key") {
+            "ANTHROPIC_API_KEY"
+        } else {
+            "ANTHROPIC_AUTH_TOKEN"
+        };
+        env.insert(key.to_string(), token.to_string());
     }
     env
 }
@@ -111,19 +119,23 @@ pub fn current_settings_env() -> BTreeMap<String, String> {
         .unwrap_or_default()
 }
 
-/// 该 provider 是否当前生效(BASE_URL + AUTH_TOKEN + MODEL 三键匹配,与前端
-/// `isProviderActive` 同口径;extraEnv 开关类键不参与判定)。
+/// 该 provider 是否当前生效(BASE_URL + AUTH_TOKEN/API_KEY(按认证字段实际落的那个)+
+/// MODEL 逐一比对,与前端 `isProviderActive` 同口径;extraEnv 开关类键不参与判定)。
 pub fn is_active(p: &Value, current: &BTreeMap<String, String>) -> bool {
     let env = provider_env(p);
     let get = |k: &str| env.get(k).map(|s| s.as_str());
     let cur = |k: &str| current.get(k).map(|s| s.as_str());
     // baseUrl/token 至少配了一个才谈得上「生效」(全空 provider 不匹配)。
-    if get("ANTHROPIC_BASE_URL").is_none() && get("ANTHROPIC_AUTH_TOKEN").is_none() {
+    if get("ANTHROPIC_BASE_URL").is_none()
+        && get("ANTHROPIC_AUTH_TOKEN").is_none()
+        && get("ANTHROPIC_API_KEY").is_none()
+    {
         return false;
     }
     for key in [
         "ANTHROPIC_BASE_URL",
         "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_API_KEY",
         "ANTHROPIC_MODEL",
     ] {
         match (get(key), cur(key)) {

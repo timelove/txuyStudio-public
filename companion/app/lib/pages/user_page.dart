@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import '../app_update.dart';
 import '../relay/account.dart';
 import '../relay/client.dart';
 import '../relay/credentials.dart';
@@ -24,6 +25,7 @@ class UserPage extends StatefulWidget {
   /// 切换桌面端后重建主壳(重读凭证 → 新 RelayClient;main._boot 同一条路径)。
   final Future<void> Function() onSwitchDesktop;
   final UserProfile profile;
+  final AppRelease? initialUpdate;
 
   const UserPage({
     super.key,
@@ -34,6 +36,7 @@ class UserPage extends StatefulWidget {
     required this.onProfileChanged,
     required this.onSwitchDesktop,
     required this.profile,
+    this.initialUpdate,
   });
 
   @override
@@ -42,6 +45,10 @@ class UserPage extends StatefulWidget {
 
 class _UserPageState extends State<UserPage> {
   late UserProfile _profile = widget.profile;
+  final AppUpdateService _updateService = AppUpdateService();
+  late AppRelease? _update = widget.initialUpdate;
+  bool _updateChecking = false;
+  String? _appVersion;
 
   /// 桌面端主机名 + 版本(`pair.hello` 业务帧,连上后拉一次)。
   String? _hostName;
@@ -55,6 +62,9 @@ class _UserPageState extends State<UserPage> {
   void initState() {
     super.initState();
     _loadHost();
+    _updateService.currentVersion().then((v) {
+      if (mounted) setState(() => _appVersion = v);
+    });
     DeviceLabelStore.loadAll().then((m) {
       if (mounted) setState(() => _deskLabel = m[widget.cred.desktopDeviceId]);
     });
@@ -73,6 +83,76 @@ class _UserPageState extends State<UserPage> {
         _hostVersion = r["version"] as String?;
       });
     } catch (_) {/* 离线时保持「未握手」 */}
+  }
+
+  Future<void> _checkUpdate() async {
+    if (_updateChecking) return;
+    setState(() => _updateChecking = true);
+    try {
+      final release = await _updateService.check();
+      if (!mounted) return;
+      setState(() => _update = release);
+      if (release == null) {
+        _toast("当前已是最新版本");
+      } else {
+        await _showUpdateDialog(release);
+      }
+    } catch (e) {
+      if (mounted) _toast("检查更新失败:$e");
+    } finally {
+      if (mounted) setState(() => _updateChecking = false);
+    }
+  }
+
+  Future<void> _showUpdateDialog(AppRelease release) async {
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text("发现新版本 v${release.version}"),
+        content: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 480, maxHeight: 420),
+          child: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                if (release.publishedAt != null)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 8),
+                    child: Text(
+                      "发布时间:${_fmtTime(release.publishedAt!)}",
+                      style: const TextStyle(fontSize: 11, color: Mx.muted),
+                    ),
+                  ),
+                SelectableText(
+                  release.notes.trim().isEmpty ? "本次发布未提供更新说明。" : release.notes.trim(),
+                  style: const TextStyle(fontSize: 12, height: 1.5, color: Mx.text),
+                ),
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("稍后再说")),
+          FilledButton(
+            onPressed: () {
+              Navigator.pop(ctx);
+              unawaited(_openDownload(release));
+            },
+            child: const Text("手动更新"),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _openDownload(AppRelease release) async {
+    try {
+      final ok = await _updateService.openDownload(release);
+      if (!mounted || ok) return;
+      _toast("无法打开下载页,请检查浏览器设置");
+    } catch (e) {
+      if (mounted) _toast("打开下载页失败:$e");
+    }
   }
 
   Future<void> _rename() async {
@@ -234,6 +314,24 @@ class _UserPageState extends State<UserPage> {
         padding: const EdgeInsets.fromLTRB(12, 12, 12, 24),
         children: [
           _identityCard(),
+          const SizedBox(height: 12),
+          _section('更新', [
+            _actionTile(
+              icon: _update == null ? Icons.system_update_alt : Icons.download,
+              title: _updateChecking
+                  ? '正在检查更新'
+                  : _update == null
+                      ? '检查更新'
+                      : '下载新版本 v${_update!.version}',
+              subtitle: _update == null
+                  ? '当前 v${_appVersion ?? '...'} · 检查 GitHub Releases'
+                  : (_update!.notes.trim().split('\n').first.isEmpty
+                      ? '查看更新内容并手动安装'
+                      : _update!.notes.trim().split('\n').first),
+              color: _update == null ? Mx.accentBright : Mx.warning,
+              onTap: _updateChecking ? () {} : _checkUpdate,
+            ),
+          ]),
           const SizedBox(height: 12),
           _section("配对", [
             if (_account != null)

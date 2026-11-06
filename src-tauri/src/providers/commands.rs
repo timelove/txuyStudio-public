@@ -29,7 +29,16 @@ pub(crate) struct EndpointProbe {
 /// base_url 归一拼 models 端点:已带版本段(/v1、/v4)的只补 /models,裸域名补 /v1/models。
 fn models_endpoint(base_url: &str) -> String {
     let base = base_url.trim().trim_end_matches('/');
-    let path = base.split("://").nth(1).map(|rest| rest.split_once('/').map(|(_, p)| p).unwrap_or("")).unwrap_or("");
+    // 路径段补回前导斜杠再判后缀(split_once 切出的 "v1" 不带 "/",直接 ends_with("/v1") 永假,
+    // 会把 https://host/v1 拼成 /v1/v1/models → 404;codex 侧 baseUrl 惯例带 /v1,已踩中)。
+    let path = base
+        .split("://")
+        .nth(1)
+        .map(|rest| match rest.split_once('/') {
+            Some((_, p)) => format!("/{p}"),
+            None => String::new(),
+        })
+        .unwrap_or_default();
     if path.ends_with("/v1") || path.ends_with("/v2") || path.ends_with("/v3") || path.ends_with("/v4") {
         format!("{}/models", base)
     } else {

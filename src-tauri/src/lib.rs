@@ -21,13 +21,14 @@ use claude::commands::{
 use claude::ClaudeRegistry;
 use codex::commands::{
     apply_codex_provider, codex_config_changed, get_codex_current_model, get_codex_session_model,
-    kill_codex, list_codex_models, read_codex_provider_info, send_codex_message,
-    set_codex_session_model,
+    kill_codex, list_codex_models, read_codex_provider_info, respond_codex_approval,
+    send_codex_message, set_codex_session_model,
 };
 use codex::CodexRegistry;
 use filetree::commands::{ensure_dir, list_dir, list_files, read_file, start_fs_watch, stop_fs_watch, write_file};
 use filetree::FsWatcherRegistry;
 use log::LevelFilter;
+use providers::balance::query_provider_balance;
 use providers::commands::probe_provider_endpoint;
 use relay::{get_relay_status, save_relay_config, relay_login, relay_register, relay_change_password, relay_logout};
 use pty::commands::{kill_pty, resize_pty, spawn_pty, write_pty};
@@ -413,16 +414,18 @@ pub fn run() {
             read_claude_settings_env,
             write_claude_settings_env,
             save_providers_snapshot,
-            // codex 自渲染对话(每轮短命 codex exec --json + resume 续接;send 即 spawn,
-            // 事件流见 codex/mod.rs;model 目录读 cc-switch-model-catalog.json)
+            // codex 自渲染对话(常驻 codex app-server 长连接;send=ensure 进程+thread/start|
+            // resume+turn/start,事件流见 codex/mod.rs;审批响应/respond;model 目录读 catalog)
             send_codex_message,
             kill_codex,
+            respond_codex_approval,
             list_codex_models,
             get_codex_current_model,
             apply_codex_provider,
             read_codex_provider_info,
             // 供应商端点探测(拉模型列表 + 延迟测速合一,走后端避开 WebView CORS)
             probe_provider_endpoint,
+            query_provider_balance,
             // 移动伴侣(出站中继状态/配置保存+重启任务)
             get_relay_status,
             save_relay_config,

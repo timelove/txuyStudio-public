@@ -254,7 +254,7 @@ type SettingsPageProps = {
 export function SettingsPage({ initialTab, onClose, onTitlePointerDown, onTitleDoubleClick }: SettingsPageProps) {
   const { t } = useTranslation();
   const { locale, changeLanguage } = useI18n();
-  const { fontSize, changeFontSize, bgSetting, changeBgSetting } = useSettings();
+  const { fontSize, changeFontSize, bgSetting, changeBgSetting, showPromptBanner, changeShowPromptBanner } = useSettings();
   const { themeId, changeTheme, themes } = useTheme();
   // 主题切换控件的 ref:View Transitions 圆形 reveal 的触发点(控件中心)。
   const themeGroupRef = useRef<HTMLDivElement>(null);
@@ -269,8 +269,17 @@ export function SettingsPage({ initialTab, onClose, onTitlePointerDown, onTitleD
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
+  // 挂载即把焦点收到弹窗壳(tabIndex=-1):从 xterm textarea(终端 IME 上下文,常年
+  // 英文态)完整走一次 blur→focus,刷新 Windows IME 状态机——否则从终端直接点开设置
+  // 时,表单输入框的中文输入可能仍卡在终端的英文上下文(用户实测「模型输入框经常
+  // 打不出中文」,2026-11-02)。
+  const shellRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    shellRef.current?.focus({ preventScroll: true });
+  }, []);
+
   return (
-    <div className="flex h-full min-h-0 flex-col">
+    <div ref={shellRef} tabIndex={-1} className="flex h-full min-h-0 flex-col outline-none">
         {/* 标题行(固定)= 弹窗拖拽手柄(cursor-move;✕ 按钮 closest 排除不误拖;
             双击回屏幕居中)。 */}
         <div
@@ -449,6 +458,33 @@ export function SettingsPage({ initialTab, onClose, onTitlePointerDown, onTitleD
                 )}
                 <div className="mt-1.5 text-[10px] text-[var(--mx-faint)]">{t("settings.bg.hint")}</div>
               </section>
+
+              {/* 消息流悬浮条分区:开关关闭后 AI 对话流顶部不再吸附「当前问题」横幅。
+                  无现成 Switch 组件,自写极简 toggle(轨道 + 滑块,on=accent)。 */}
+              <section className="mt-4 border-t border-[var(--mx-border)] pt-3">
+                <div className="flex items-center justify-between">
+                  <div className="min-w-0 pr-3">
+                    <div className="text-[10px] uppercase tracking-wide text-[var(--mx-faint)]">{t("settings.promptBanner.title")}</div>
+                    <div className="mt-1 text-[10px] text-[var(--mx-faint)]">{t("settings.promptBanner.hint")}</div>
+                  </div>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={showPromptBanner}
+                    aria-label={t("settings.promptBanner.title")}
+                    onClick={() => changeShowPromptBanner(!showPromptBanner)}
+                    className={`relative h-5 w-9 shrink-0 rounded-full transition-colors ${
+                      showPromptBanner ? "bg-(color:--mx-accent)" : "bg-(color:--mx-border-strong)"
+                    }`}
+                  >
+                    <span
+                      className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-[left] ${
+                        showPromptBanner ? "left-[18px]" : "left-0.5"
+                      }`}
+                    />
+                  </button>
+                </div>
+              </section>
             </TabsContent>
 
             {/* 模型 tab:内置供应商管理,Claude 与 Codex 各自独立列表/切换(ProviderManager
@@ -479,7 +515,10 @@ export function SettingsPage({ initialTab, onClose, onTitlePointerDown, onTitleD
                   ))}
                 </SliderToggleGroup>
               </div>
-              {modelKind === "claude" ? <ProviderManager kind="claude" /> : <ProviderManager kind="codex" />}
+              {modelKind === "claude" ? <ProviderManager kind="claude" /> : <ProviderManager kind="codex" key="codex" />}
+              {/* key="codex":claude↔codex 切换强制 remount——同一组件类型不加 key 时 React
+                  复用实例,claude 的 draft 编辑态会泄漏进 codex 实例(2026-11-04 探针实测:
+                  pill 切 Codex 后仍显示 claude 编辑表单,还叠出 codex 的推理力度字段)。 */}
             </TabsContent>
 
             {/* 用量 tab:近 N 天 claude/codex 会话 token 用量 + 估算费用(见 UsagePanel)。 */}

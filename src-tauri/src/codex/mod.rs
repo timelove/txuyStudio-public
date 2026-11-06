@@ -21,8 +21,13 @@
 //! stdin...")、无 Compacting 状态、每轮 EOF 是正常结束(emit Terminated{normal} 而非 {eof})。
 
 use std::collections::HashMap;
-use std::process::Child;
-use std::sync::Mutex;
+use std::process::{Child, ChildStdin};
+use std::sync::{
+    atomic::{AtomicBool, AtomicU64},
+    Arc, Mutex,
+};
+
+pub mod app_server;
 
 pub mod commands;
 
@@ -35,9 +40,13 @@ pub struct SessionConfig {
     pub cwd: Option<std::path::PathBuf>,
     /// sandbox 策略(codex -s):read-only | workspace-write | danger-full-access。
     pub sandbox: String,
+    /// Codex `/permissions` 四档 profile:ask-for-approval | approve-for-me | full-access | read-only。
+    pub permission: String,
     /// 模型(codex -m,catalog slug 如 "GLM-5.2")。None=不传(config.toml 默认)。
     pub model: Option<String>,
-    /// reasoning 强度(codex -c model_reasoning_effort)。None=不传(模型默认档)。
+    /// reasoning 强度。None=auto:后端解析自然默认档(config.toml model_reasoning_effort
+    /// → catalog default_reasoning_level)显式发送(公开 API 无法清 sticky override,
+    /// 见 commands.rs resolve_codex_default_effort)。
     pub reasoning_effort: Option<String>,
 }
 
@@ -49,16 +58,33 @@ pub struct SessionConfig {
 /// - `model`:当前会话 model(-m 传的值或 config.toml 默认),供 detach 窗口回填 meta.model。
 /// - `config_hash`:spawn 时 ~/.codex/config.toml + cc-switch-model-catalog.json 的内容哈希,
 ///   `codex_config_changed` 比对检测 cc-switch 切供应商(cc 切换改写这两个文件)。
-/// - `killed`:主动 kill 标志。读循环 EOF 据此区分:true=interrupted(kill_codex 已 emit,不发
-///   error);false=每轮正常结束(emit Terminated{normal})。
+/// - `killed`:主动 kill 标志,**按进程代际隔离**——spawn 时给 session 换新 Arc(不复位
+///   旧 Arc),旧读循环持旧 Arc 到 EOF 仍读到 kill 时置的 true(静默收尾),新进程用全新
+///   标志;若复位同一 Arc,旧循环迟到 EOF 会误判「非主动杀」发假 Terminated{exit}。
 pub struct CodexSession {
-    pub codex_session_id: Mutex<Option<String>>,
+    pub codex_session_id: Arc<Mutex<Option<String>>>,
+    pub current_turn_id: Arc<Mutex<Option<String>>>,
     pub child: Mutex<Option<Child>>,
+    pub stdin: Arc<Mutex<Option<ChildStdin>>>,
+    pub request_seq: Arc<AtomicU64>,
+    pub pending_requests: Arc<Mutex<HashMap<u64, std::sync::mpsc::Sender<Result<serde_json::Value, String>>>>>,
+    pub pending_server_requests: Arc<Mutex<HashMap<String, PendingServerRequest>>>,
+    pub initialized: Arc<AtomicBool>,
     pub config: Mutex<SessionConfig>,
-    pub status: Mutex<CodexStatus>,
+    pub status: Arc<Mutex<CodexStatus>>,
     pub model: Mutex<Option<String>>,
     pub config_hash: Mutex<Option<u64>>,
-    pub killed: Mutex<bool>,
+    pub killed: Arc<AtomicBool>,
+}
+
+/// app-server 发起的请求(审批等)。保存原始 id 与 method 供响应帧构造;params 留作诊断/
+/// 未来审批卡直接渲染服务端参数(前端审批卡目前渲染 emit 的 request.params 副本)。
+#[derive(Clone)]
+#[allow(dead_code)]
+pub struct PendingServerRequest {
+    pub id: serde_json::Value,
+    pub method: String,
+    pub params: serde_json::Value,
 }
 
 /// codex 会话状态(前端状态栏 + 输入框可用性 + busy 判断)。
@@ -116,6 +142,26 @@ pub enum CodexEventPayload {
     /// `turn.completed{usage}`:轮次完成。usage 含 input_tokens/cached_input_tokens/
     /// output_tokens/reasoning_output_tokens(透传 Value,前端回填 usage)。
     TurnCompleted { usage: Option<serde_json::Value> },
+    /// app-server 增量通知(agentMessage/reasoning/commandOutput)。
+    ItemDelta {
+        item_id: String,
+        item_type: String,
+        field: String,
+        delta: String,
+    },
+    /// app-server 权威 token 用量更新。
+    UsageUpdated {
+        usage: serde_json::Value,
+        context_window: Option<u64>,
+    },
+    /// app-server 发起的实时审批请求。
+    ApprovalRequested {
+        request: serde_json::Value,
+    },
+    /// app-server 告知某个服务端请求已解决(超时/其他客户端处理)。
+    ApprovalResolved {
+        request_id: String,
+    },
     /// 进程退出。reason 规范化:`"normal"`(每轮 exec 跑完的正常 EOF,前端当 idle 不显错误)/
     /// `"interrupted"`(用户中断)/`"spawn failed: ..."`(启动失败)。
     Terminated { reason: String },
@@ -155,8 +201,9 @@ impl CodexRegistry {
         tokio::task::spawn_blocking(move || {
             for (_tab_id, session) in sessions {
                 // 先置 killed=true(读循环 EOF 时不发 error,前端 transport 已 stop)。
-                if let Ok(mut k) = session.killed.lock() {
-                    *k = true;
+                session.killed.store(true, std::sync::atomic::Ordering::SeqCst);
+                if let Ok(mut stdin) = session.stdin.lock() {
+                    stdin.take();
                 }
                 // 取出 child(None)再杀整棵进程树;.cmd 包装下 node 是孙子进程。
                 if let Some(mut child) = session.child.lock().ok().and_then(|mut g| g.take()) {
@@ -178,8 +225,9 @@ impl CodexRegistry {
         let mut count = 0usize;
         for (_, sessions) in drained {
             for (_tab, session) in sessions {
-                if let Ok(mut k) = session.killed.lock() {
-                    *k = true;
+                session.killed.store(true, std::sync::atomic::Ordering::SeqCst);
+                if let Ok(mut stdin) = session.stdin.lock() {
+                    stdin.take();
                 }
                 if let Some(mut child) = session.child.lock().ok().and_then(|mut g| g.take()) {
                     commands::kill_child_tree(&mut child);

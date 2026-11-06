@@ -230,7 +230,13 @@ export type ClaudeMessage = {
 
 export type ClaudeBlock =
   | { type: "text"; text: string }
-  | { type: "thinking"; text: string }
+  | {
+      type: "thinking";
+      text: string;
+      /** 思考耗时毫秒(codex 折叠形状适配保留真实计时;claude 流不产此字段,tallySteps
+       *  优先用它,缺失才按字数粗估)。 */
+      ms?: number;
+    }
   | {
       type: "tool_use";
       id: string;
@@ -507,11 +513,6 @@ export function applyEvent(state: ClaudeStreamState, payload: ClaudeEventPayload
           streaming: true,
           // 流式全 0(glm)时保留旧值(resume 重放场景旧值是上轮 result 回填/历史回填的本轮口径)。
           usage: hasUsage(msg.usage) ? msg.usage : (oldMsg.usage ?? msg.usage),
-          // usage 取旧值(resume 重放全 0 流式)时,口径标记须随旧值一起保留——
-          // 否则 result 回填的累计值丢标记后被当流式快照直接用,ctx 显示成「拉总的」;
-          // 差分回填(usageDiffed)同理,丢了会污染混合域判定。
-          usageCumulative: hasUsage(msg.usage) ? undefined : oldMsg.usageCumulative,
-          usageDiffed: hasUsage(msg.usage) ? undefined : oldMsg.usageDiffed,
         };
       } else {
         next.messages.push({

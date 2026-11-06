@@ -14,6 +14,9 @@
 .xterm .xterm-viewport {
   height: 100%;
   background-color: transparent !important;
+  /* xterm 按字符行维护滚动位置；浏览器的 scroll anchoring 会在底部输入时
+     因字体/行高的亚像素变化自行修正 scrollTop，与 xterm 的贴底同步叠加成轻微抖动。 */
+  overflow-anchor: none;
 }
 
 /* 隐藏 .xterm-viewport 的原生滚动条:xterm v5 用 overlay 滚动条(.scrollbar)替代,

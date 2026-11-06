@@ -1,6 +1,7 @@
 import { Fragment, lazy, memo, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { selectEnclosingPre } from "../lib/selectEnclosingPre";
+import { useCurrentPromptStick } from "../lib/useCurrentPromptStick";
 import { useMessageWindow } from "../lib/useMessageWindow";
 import { homeDir } from "@tauri-apps/api/path";
 import { useTranslation } from "react-i18next";
@@ -21,6 +22,8 @@ import {
   type ToolBadgeStatus,
 } from "../domain/codexToolConfigs";
 import { SANDBOX_MODES } from "../domain/codexSandbox";
+import { CODEX_PERMISSION_PROFILES, codexPermissionProfile } from "../domain/codexPermission";
+import { readActiveCodexProviderModels } from "../domain/codexProviders";
 import { fetchAiCliSessions, mostRecentSessionInCwd, type AiCliSessionListItem } from "../domain/aiCliSessions";
 import { useSettings } from "../settings/SettingsProvider";
 import { statusFontSize } from "../settings";
@@ -29,16 +32,25 @@ import { SplitPaneButtons } from "./SplitPaneButtons";
 import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from "./ui/Popover";
 import { BottomToast } from "./ui/BottomToast";
 import { ContextMeter } from "./ui/ContextMeter";
+import { InteractivePanel } from "./InteractivePanel";
+import type { InteractiveRequest } from "../domain/interactive";
 import { Button } from "./ui/Button";
 import { CopyButton } from "./ui/CopyButton";
 import { PaneExpandButton } from "./ui/PaneExpandButton";
 import { PaneToolsMenu, TOOL_SIDEBAR_MIN_PANE_W, type PaneToolsMenuGroup } from "./ui/PaneToolsMenu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/Tooltip";
 import { SessionHeader } from "./chat/SessionHeader";
+import { CurrentPromptBanner } from "./chat/CurrentPromptBanner";
 import { ChatUserBubble } from "./chat/ChatUserBubble";
 import { MESSAGE_GAP_MS, TimeGapDivider, messageTimeMs } from "./chat/TimeGapDivider";
+import { StepFoldRow, WorkFoldRow } from "./StepFoldRow";
+import { computeFolds, type RowFold, type StepFold } from "../domain/stepFolds";
+import { codexClassifyTool, codexMsgsToFoldShape, codexQuickStepOf, codexWorkedMsOf } from "../domain/codexFolds";
+import type { ClaudeMessage } from "../domain/claudeStream";
+import { classifyCommand } from "../lib/commandClassifier";
 import { Tabs, TabsList, TabsTrigger } from "./ui/Tabs";
 import { TabCloseIcon } from "./icons";
+import { filterSlashCommands, parseSlashInput, type SlashCommandDef } from "../domain/slashCommands";
 
 /** MdPreview 懒加载(避免 codexpane 首屏就拉 marked/dompurify,与探针共用 md-render 分包)。 */
 const MdPreviewLazy = lazy(() =>
@@ -71,12 +83,40 @@ function relativeTime(iso: string | null, locale: string): string {
 /** 兜底 reasoning 档位(catalog 无当前 model 的 supported_reasoning_levels 时用)。 */
 const FALLBACK_REASONING_LEVELS = ["low", "medium", "high", "xhigh"];
 
+/** 模型菜单数据源:当前生效供应商的 models[](供应商管理里按 cc-switch modelCatalog 配的
+ *  列表)优先;未配置/无生效供应商退全局 catalog(list_codex_models 读
+ *  cc-switch-model-catalog.json)。 */
+async function loadModelCatalog(): Promise<CodexModelInfo[]> {
+  try {
+    const entries = await readActiveCodexProviderModels();
+    if (entries) {
+      return entries.map((e) => ({
+        slug: e.id,
+        displayName: e.displayName || e.id,
+        contextWindow: e.contextWindow,
+        reasoningLevels: e.reasoningLevels ?? [],
+      }));
+    }
+  } catch {
+    /* 读供应商配置失败,退全局 catalog */
+  }
+  return invoke<CodexModelInfo[]>("list_codex_models");
+}
+
 /** 模型目录项(与后端 `CodexModelInfo` camelCase 对齐,来源 cc-switch-model-catalog.json)。 */
 type CodexModelInfo = {
   slug: string;
   displayName: string;
   contextWindow?: number;
   reasoningLevels: string[];
+};
+
+/** 应用层权限提升请求:Codex exec 失败后,让用户确认是否切到 workspace-write 并续接重试。 */
+type PermissionAsk = {
+  toolId: string;
+  command: string;
+  output: string;
+  prompt: string;
 };
 
 type CodexPaneProps = {
@@ -254,7 +294,7 @@ export function CodexPane(props: CodexPaneProps) {
     className,
   } = props;
   const { t, i18n } = useTranslation();
-  const { fontSize } = useSettings();
+  const { fontSize, showPromptBanner } = useSettings();
   /** 输入框底部状态栏字号:随全局 fontSize 缩放(14→10,与原 text-[10px] 一致)。 */
   const statusFontPx = statusFontSize(fontSize);
   const [state, setState] = useState<CodexStreamState | null>(null);
@@ -286,7 +326,7 @@ export function CodexPane(props: CodexPaneProps) {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [historyStorageKey]);
-  const [menuMode, setMenuMode] = useState<"tab" | "sandbox" | "model" | "reasoning" | null>(null);
+  const [menuMode, setMenuMode] = useState<"tab" | "sandbox" | "permission" | "model" | "reasoning" | null>(null);
   const [resumeOpen, setResumeOpen] = useState(false);
   const [resumeInput, setResumeInput] = useState("");
   /** ↻ 弹窗「恢复上一次」:当前项目最近一条 codex 历史会话(弹窗打开时懒拉)。 */
@@ -342,6 +382,8 @@ export function CodexPane(props: CodexPaneProps) {
   const [atFiles, setAtFiles] = useState<{ path: string; name: string }[]>([]);
   const atPositionRef = useRef(-1);
   const atLoadedCwdRef = useRef<string | null>(null);
+  const [cmdOpen, setCmdOpen] = useState(false);
+  const [cmdIndex, setCmdIndex] = useState(0);
   const [helpOpen, setHelpOpen] = useState(false);
   const [costOpen, setCostOpen] = useState(false);
   /** /mcp 弹窗:~/.codex/config.toml 的 [mcp_servers.*] 段解析(null=加载中/失败空)。 */
@@ -373,6 +415,8 @@ export function CodexPane(props: CodexPaneProps) {
   const [availableModels, setAvailableModels] = useState<CodexModelInfo[]>([]);
   /** 上下文窗口上限(当前选中 model 的 catalog contextWindow;codex 事件流不带该值)。 */
   const [contextWindow, setContextWindow] = useState<number | undefined>(undefined);
+  const [permissionAsk, setPermissionAsk] = useState<PermissionAsk | null>(null);
+  const askedPermissionToolRef = useRef<string | null>(null);
 
   const getCodexTransportRef = useRef(getCodexTransport);
   getCodexTransportRef.current = getCodexTransport;
@@ -388,6 +432,31 @@ export function CodexPane(props: CodexPaneProps) {
     (paneId: string, tabId: string) => onCloseTabRef.current?.(paneId, tabId),
     [],
   );
+
+  // 打开 pane 即拉模型目录并回填 contextWindow;此前只有打开模型选择器才会显示 ctx。
+  useEffect(() => {
+    let alive = true;
+    void loadModelCatalog()
+      .then((list) => {
+        if (!alive) return;
+        setAvailableModels(list);
+        const transport = getCodexTransportRef.current(activeTabId);
+        const alias = transport?.getSelectedModelAlias();
+        const m = list.find((x) => x.slug === (alias ?? stateRef.current?.meta?.model));
+        setContextWindow(m?.contextWindow);
+        transport?.setContextWindow(m?.contextWindow);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [activeTabId, state?.meta?.model]);
+
+  // 切 tab 后同一工具 id 不应再次弹权限提升确认。
+  useEffect(() => {
+    askedPermissionToolRef.current = null;
+    setPermissionAsk(null);
+  }, [activeTabId]);
 
   // 挂载时探测 codex CLI 是否安装(非 Tauri 环境静默放行)。
   useEffect(() => {
@@ -486,6 +555,14 @@ export function CodexPane(props: CodexPaneProps) {
 
       const textBeforeCursor = v.slice(0, cursorPos);
 
+      const slashMatch = textBeforeCursor.match(/^\/(\S*)$/);
+      if (slashMatch && cursorPos === v.length) {
+        setCmdOpen(true);
+        setCmdIndex(0);
+      } else {
+        setCmdOpen(false);
+      }
+
       const atMatch = textBeforeCursor.match(/(?:^|\s)@(\S*)$/);
       if (atMatch) {
         atPositionRef.current = (atMatch.index ?? 0) + (atMatch[0].length - atMatch[1].length - 1);
@@ -551,6 +628,30 @@ export function CodexPane(props: CodexPaneProps) {
     loadPlugins();
   }, [loadPlugins]);
 
+  /** Codex 面板快捷指令。exec 模式不支持 CLI 原生 slash，因此由前端映射到会话动作。 */
+  const slashCommands: SlashCommandDef[] = [
+    { name: "/new", labelKey: "codexpane.cmdNew", group: "session", kind: "direct", glyph: "+", run: () => getCodexTransportRef.current(activeTabId).newSession() },
+    { name: "/clear", labelKey: "codexpane.cmdClear", group: "session", kind: "direct", glyph: "×", run: () => void getCodexTransportRef.current(activeTabId).resetSession() },
+    { name: "/stop", labelKey: "codexpane.cmdStop", group: "session", kind: "direct", glyph: "■", run: () => void getCodexTransportRef.current(activeTabId).interrupt() },
+    { name: "/model", labelKey: "codexpane.toolsModel", group: "session", kind: "direct", glyph: "▣", run: () => setMenuMode("model") },
+    { name: "/reasoning", labelKey: "codexpane.toolsReasoning", group: "session", kind: "direct", glyph: "◔", run: () => setMenuMode("reasoning") },
+    { name: "/permission", labelKey: "codexpane.toolsPermission", group: "session", kind: "direct", glyph: "✓", run: () => setMenuMode("permission") },
+    { name: "/sandbox", labelKey: "codexpane.toolsSandbox", group: "session", kind: "direct", glyph: "▤", run: () => setMenuMode("sandbox") },
+    { name: "/cost", labelKey: "codexpane.toolsCost", group: "session", kind: "direct", glyph: "◷", run: () => setCostOpen(true) },
+    { name: "/help", labelKey: "codexpane.toolsHelp", group: "session", kind: "direct", glyph: "?", run: () => setHelpOpen(true) },
+    { name: "/resume", labelKey: "codexpane.toolsResume", group: "session", kind: "direct", glyph: "↻", run: () => setResumeOpen(true) },
+    { name: "/mcp", labelKey: "codexpane.toolsMcp", group: "resources", kind: "direct", glyph: "⬡", run: () => (paneWide ? showToolPanel("mcp") : openMcpDialog()) },
+    { name: "/plugins", labelKey: "codexpane.toolsPlugins", group: "resources", kind: "direct", glyph: "⊞", run: () => (paneWide ? showToolPanel("plugins") : openPluginsDialog()) },
+    { name: "/agents", labelKey: "codexpane.toolsAgentFile", group: "resources", kind: "direct", glyph: "◈", run: () => openCodexHomeFile("AGENTS.md") },
+    { name: "/auth", labelKey: "codexpane.toolsAuthFile", group: "resources", kind: "direct", glyph: "◎", run: () => openCodexHomeFile("auth.json") },
+    { name: "/config", labelKey: "codexpane.toolsConfigFile", group: "resources", kind: "direct", glyph: "⚙", run: () => openCodexHomeFile("config.toml") },
+    { name: "/folder", labelKey: "codexpane.toolsOpenFolder", group: "locate", kind: "direct", glyph: "▰", run: () => { const cwd = sessions.find((s) => s.id === activeTabId)?.cwd; if (cwd) void invoke("reveal_in_folder", { path: cwd }).catch(() => {}); } },
+    { name: "/diff", labelKey: "codexpane.toolsDiff", group: "session", kind: "direct", glyph: "≋", run: () => { const cwd = sessions.find((s) => s.id === activeTabId)?.cwd; void getShellRunTransportRef.current(activeTabId).run("git diff", cwd); } },
+    { name: "/exit", labelKey: "codexpane.cmdExit", group: "session", kind: "direct", glyph: "×", run: () => onCloseTab?.(paneId, activeTabId) },
+  ];
+  const cmdMatches = useMemo(() => cmdOpen ? filterSlashCommands(slashCommands, input.slice(1)) : [], [cmdOpen, input, slashCommands]);
+  useEffect(() => setCmdIndex(0), [cmdMatches.length]);
+
   // 宽 pane 首次达标 → 自动开侧栏(codex 默认 mcp);缩小态是用户意图,不自动展开。
   useEffect(() => {
     if (paneWide && toolPanel === null) setToolPanel("mcp");
@@ -581,17 +682,23 @@ export function CodexPane(props: CodexPaneProps) {
           { label: t("codexpane.toolsPlugins"), glyph: "⊞", onClick: paneWide ? () => showToolPanel("plugins") : openPluginsDialog },
           { label: t("codexpane.toolsAgentFile"), glyph: "◈", onClick: () => openCodexHomeFile("AGENTS.md") },
           { label: t("codexpane.toolsAuthFile"), glyph: "◎", onClick: () => openCodexHomeFile("auth.json") },
+          { label: t("codexpane.toolsConfigFile"), glyph: "⚙", onClick: () => openCodexHomeFile("config.toml") },
         ],
       },
       {
         label: t("codexpane.toolsGroupSession"),
         tone: "accent",
         items: [
-          { label: t("codexpane.toolsModel"), glyph: "▣", onClick: () => setMenuMode("model") },
+          { label: t("codexpane.toolsModel"), hint: "/model", glyph: "▣", onClick: () => setMenuMode("model") },
           { label: t("codexpane.toolsReasoning"), glyph: "◔", onClick: () => setMenuMode("reasoning") },
+          { label: t("codexpane.toolsPermission"), hint: "/permission", glyph: "✓", onClick: () => setMenuMode("permission") },
+          { label: t("codexpane.toolsSandbox"), hint: "/sandbox", glyph: "▤", onClick: () => setMenuMode("sandbox") },
           { label: t("codexpane.toolsCost"), glyph: "◷", onClick: () => setCostOpen(true) },
           { label: t("codexpane.toolsHelp"), glyph: "?", onClick: () => setHelpOpen(true) },
           { label: t("codexpane.toolsResume"), glyph: "↻", onClick: () => setResumeOpen(true) },
+          { label: t("codexpane.toolsNew"), hint: "/new", glyph: "+", onClick: () => getCodexTransportRef.current(activeTabId).newSession() },
+          { label: t("codexpane.toolsReset"), hint: "/clear", glyph: "×", onClick: () => void getCodexTransportRef.current(activeTabId).resetSession() },
+          { label: t("codexpane.toolsInterrupt"), hint: "/stop", glyph: "■", onClick: () => void getCodexTransportRef.current(activeTabId).interrupt() },
           {
             label: t("codexpane.toolsDiff"),
             glyph: "±",
@@ -646,10 +753,11 @@ export function CodexPane(props: CodexPaneProps) {
 
   const busy = state?.status === "running";
 
-  // 「思考中」判定:busy 且最近 assistant 消息尚无可见文本/工具内容(codex item 粒度,
-  // turn_started 后到首个 item.completed 前为纯思考期)。
+  // 「思考中」判定:busy 且本轮尚无可见文本/工具内容(codex item 粒度)。空思考块已不
+  // 建(2026-11-05),纯思考期改由 reasoningStartedAt 计时条目(进行中的 reasoning)判定。
   const thinkingNow = useMemo(() => {
     if (!busy || !state) return false;
+    if (state.reasoningStartedAt && state.reasoningStartedAt.size > 0) return true;
     for (let i = state.messages.length - 1; i >= 0; i--) {
       const m = state.messages[i];
       if (m.role === "assistant") {
@@ -742,6 +850,16 @@ export function CodexPane(props: CodexPaneProps) {
       }
       return;
     }
+    if (text.startsWith("/")) {
+      const parsed = parseSlashInput(text);
+      const def = parsed ? slashCommands.find((c) => c.name === parsed.token) : undefined;
+      if (def && parsed) {
+        setInput("");
+        setCmdOpen(false);
+        await def.run(parsed.arg);
+        return;
+      }
+    }
     // /new:开新会话(清 state + 下轮不带 resume)。
     if (text === "/new" || text === "/clear") {
       setInput("");
@@ -763,7 +881,7 @@ export function CodexPane(props: CodexPaneProps) {
     // 看到自己的消息与回复,避免留在原视口(乐观插入 + transport.send 异步的时序抖动)。
     scrollToBottom();
     void transport.send(text);
-  }, [activeTabId, input, busy, shellRunning, sessions, paneId, onCloseTab, scrollToBottom]);
+  }, [activeTabId, input, busy, shellRunning, sessions, paneId, onCloseTab, scrollToBottom, slashCommands]);
 
   // C6 重新发送:user 消息 ↻ 重跑同一轮。busy 时**先 await interrupt 再 send**(与 handleSend
   // 同语义:后端 busy 会拒新轮,不 await 会竞速丢消息);经 busyRef 读 busy(不进 deps——
@@ -799,9 +917,11 @@ export function CodexPane(props: CodexPaneProps) {
       transport.setModel(slug);
       if (slug === "default") {
         setContextWindow(undefined);
+        transport.setContextWindow(undefined);
       } else {
         const m = availableModels.find((x) => x.slug === slug);
         setContextWindow(m?.contextWindow);
+        transport.setContextWindow(m?.contextWindow);
       }
     },
     [activeTabId, availableModels],
@@ -821,27 +941,99 @@ export function CodexPane(props: CodexPaneProps) {
 
   // -- sandbox 策略:状态栏显示 + 切换 + Shift+Tab 循环(替代 claude 的 permission mode) --
   const [sandbox, setSandboxState] = useState<string>(() => getCodexTransport(activeTabId).getSandbox());
+  const [permission, setPermissionState] = useState<string>(() => getCodexTransport(activeTabId).getPermission());
   useEffect(() => {
     setSandboxState(getCodexTransport(activeTabId).getSandbox());
+    setPermissionState(getCodexTransport(activeTabId).getPermission());
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTabId]);
   const setSandboxMode = useCallback(
     (mode: string) => {
-      getCodexTransportRef.current(activeTabId).setSandbox(mode);
+      const transport = getCodexTransportRef.current(activeTabId);
+      transport.setSandbox(mode);
+      // Codex `/permissions` 是 sandbox + 审批策略组合档;手动改 sandbox 时同步归档,
+      // 避免 Permission 显示 Ask/Read 而实际 sandbox 已经变成另一个档位。
+      const nextPermission =
+        mode === "danger-full-access"
+          ? "full-access"
+          : mode === "read-only"
+            ? "read-only"
+            : permission === "approve-for-me"
+              ? "approve-for-me"
+              : "ask-for-approval";
+      transport.setPermission(nextPermission);
       setSandboxState(mode);
+      setPermissionState(nextPermission);
       setMenuMode(null);
     },
-    [activeTabId],
+    [activeTabId, permission],
   );
   const cycleSandbox = useCallback(() => {
     const transport = getCodexTransportRef.current(activeTabId);
     const cur = transport.getSandbox();
     const idx = SANDBOX_MODES.findIndex((m) => m.id === cur);
     const next = SANDBOX_MODES[(idx + 1) % SANDBOX_MODES.length];
-    transport.setSandbox(next.id);
-    setSandboxState(next.id);
+    setSandboxMode(next.id);
+  }, [activeTabId, setSandboxMode]);
+  const setPermissionMode = useCallback((mode: string) => {
+    const profile = codexPermissionProfile(mode);
+    const transport = getCodexTransportRef.current(activeTabId);
+    transport.setPermission(profile.id);
+    transport.setSandbox(profile.sandbox);
+    setPermissionState(mode);
+    setSandboxState(profile.sandbox);
+    setMenuMode(null);
   }, [activeTabId]);
   const currentSandboxMeta = SANDBOX_MODES.find((m) => m.id === sandbox) ?? SANDBOX_MODES[1];
+  const currentPermissionProfile = codexPermissionProfile(permission);
+
+  // Codex exec --json 无法在执行前把审批请求交回 UI(实测 on-request 被强制为 never)。
+  // on-request 策略改为轮末识别典型沙箱拒绝,并给用户一个明确的“提升并重试”决策点。
+  useEffect(() => {
+    if ((permission !== "ask-for-approval" && permission !== "read-only") || busy || !state) return;
+    let prompt = "";
+    let failed: Extract<CodexBlock, { type: "tool_use" }> | null = null;
+    for (let i = state.messages.length - 1; i >= 0; i--) {
+      const message = state.messages[i];
+      if (message.role === "user") {
+        prompt = message.blocks.map((b) => (b.type === "text" ? b.text : "")).join("\n").trim();
+        break;
+      }
+      if (message.role === "assistant" && !failed) {
+        for (const block of message.blocks) {
+          if (block.type === "tool_use" && block.status === "error" && block.result?.content) {
+            failed = block;
+            break;
+          }
+        }
+      }
+    }
+    if (!failed?.result || !prompt) return;
+    const output = failed.result.content;
+    const denied = /sandbox|read-only|readonly|permission denied|access is denied|unauthorizedaccessexception|operation not permitted|blocked by sandbox|拒绝访问|访问被拒绝|没有权限/i.test(output);
+    if (!denied || askedPermissionToolRef.current === failed.id) return;
+    askedPermissionToolRef.current = failed.id;
+    const input = failed.input as { command?: unknown } | undefined;
+    setPermissionAsk({
+      toolId: failed.id,
+      command: typeof input?.command === "string" ? input.command : failed.inputBrief,
+      output,
+      prompt,
+    });
+  }, [permission, busy, state]);
+
+  const allowPermissionRetry = useCallback(async () => {
+    const ask = permissionAsk;
+    if (!ask) return;
+    setPermissionAsk(null);
+    const transport = getCodexTransportRef.current(activeTabId);
+    transport.setPermission("ask-for-approval");
+    setPermissionState("ask-for-approval");
+    transport.setSandbox("workspace-write");
+    setSandboxState("workspace-write");
+    scrollToBottom();
+    await transport.send(`${ask.prompt}\\n\\n请继续,并以 workspace-write 沙箱重试刚才因权限失败的操作。`);
+  }, [permissionAsk, activeTabId, scrollToBottom]);
 
   // -- 双击 Esc 中断(对齐 claude code/codex 交互) --
   const lastEscRef = useRef(0);
@@ -927,7 +1119,7 @@ export function CodexPane(props: CodexPaneProps) {
   const contextInfo = useMemo(() => {
     const u = state?.lastUsage;
     const ctx = u ? totalInputTokens(u.input_tokens ?? 0, u.cached_input_tokens ?? 0, u.cache_write_input_tokens ?? 0) : 0;
-    const window = contextWindow;
+    const window = contextWindow ?? state?.meta?.contextWindow;
     const pct = ctx > 0 && window ? Math.min(100, (ctx / window) * 100) : 0;
     return { window, ctx, pct };
   }, [state, contextWindow]);
@@ -938,9 +1130,106 @@ export function CodexPane(props: CodexPaneProps) {
     [state?.messages, shellState?.messages],
   );
 
+  // 「已处理」两层折叠(codex 版,与 ClaudePane 同构):work fold 把已结束轮的中间步骤
+  // 折成答案气泡内的「已处理 Ns · 读取了…」摘要行,steps fold 把连续 quick 步骤归并。
+  // 只对 codex 消息算(shell 不参与);live(流式中 / 审批挂起)不折叠——审批卡不能被折掉。
+  const codexMsgsForFolds = useMemo(
+    () => mergedMessages.filter((x): x is { kind: "codex"; msg: CodexMessage } => x.kind === "codex").map((x) => x.msg),
+    [mergedMessages],
+  );
+  const codexFoldMsgs = useMemo(() => codexMsgsToFoldShape(codexMsgsForFolds), [codexMsgsForFolds]);
+  const codexFoldLive = codexMsgsForFolds.some((m) => m.streaming) || !!state?.pendingApproval;
+  const codexFoldMap = useMemo(
+    () =>
+      computeFolds(codexFoldMsgs, {
+        live: codexFoldLive,
+        commandAction: classifyCommand,
+        quickStepOf: codexQuickStepOf,
+        workedMsOf: codexWorkedMsOf,
+        // codex 文件编辑走 shell 命令,无结构化 diff item,折叠行不显编辑段。
+        editsOf: () => undefined,
+      }),
+    [codexFoldMsgs, codexFoldLive],
+  );
+  // merged 索引 → codex 消息下标(shell 行 null):渲染循环查表拿 fold 坐标系下的 ci。
+  const codexIndexByMerged = useMemo(() => {
+    const out: (number | null)[] = new Array(mergedMessages.length).fill(null);
+    let ci = 0;
+    for (let i = 0; i < mergedMessages.length; i++) {
+      if (mergedMessages[i].kind === "codex") {
+        out[i] = ci;
+        ci++;
+      }
+    }
+    return out;
+  }, [mergedMessages]);
+  // work fold 答案反查表(end+1 → fold):答案行不在 fold 段内,渲染循环靠它识别
+  // 「本行是某轮的答案」→ 气泡内部第一个块渲染「已处理」摘要行。
+  const codexWorkFoldByAnswer = useMemo(() => {
+    const m = new Map<number, StepFold>();
+    for (const f of codexFoldMap.workFolds) m.set(f.end + 1, f);
+    return m;
+  }, [codexFoldMap]);
+  // 折叠行 open 状态(受控,localStorage per tab;与 claude 的 mx.foldOpen.<tabId> 分命名空间)。
+  // key `${kind}:${start}:${end}`(start/end 是 codex 消息下标,轮次推进旧 key 不变)。
+  const [codexOpenFolds, setCodexOpenFolds] = useState<Set<string>>(() => {
+    try {
+      const raw = localStorage.getItem(`mx.foldOpen.codex.${activeTabId}`);
+      return raw ? new Set(JSON.parse(raw) as string[]) : new Set<string>();
+    } catch {
+      return new Set<string>();
+    }
+  });
+  // 切 tab 重读(openFolds 按 tab 隔离;pane 实例复用时不重读会串 tab)。
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(`mx.foldOpen.codex.${activeTabId}`);
+      setCodexOpenFolds(raw ? new Set(JSON.parse(raw) as string[]) : new Set<string>());
+    } catch {
+      setCodexOpenFolds(new Set<string>());
+    }
+  }, [activeTabId]);
+  const toggleCodexFold = useCallback(
+    (key: string) => {
+      setCodexOpenFolds((prev) => {
+        const next = new Set(prev);
+        if (next.has(key)) next.delete(key);
+        else next.add(key);
+        try {
+          localStorage.setItem(`mx.foldOpen.codex.${activeTabId}`, JSON.stringify([...next]));
+        } catch {
+          /* localStorage 不可用 — 静默 */
+        }
+        return next;
+      });
+    },
+    [activeTabId],
+  );
+  const toggleCodexWorkFold = useCallback(
+    (f: StepFold) => toggleCodexFold(`work:${f.start}:${f.end}`),
+    [toggleCodexFold],
+  );
+
   // 消息流窗口化(内存优化):只挂最近一批消息的 DOM,顶部哨兵上滚自动展开更早一批。
   const { offset: msgOffset, sentinel: msgSentinel } = useMessageWindow(mergedMessages.length, scrollRef, activeTabId);
   const visibleMessages = msgOffset > 0 ? mergedMessages.slice(msgOffset) : mergedMessages;
+  const currentPrompt = useMemo(() => {
+    for (let i = mergedMessages.length - 1; i >= 0; i--) {
+      const item = mergedMessages[i];
+      if (item?.kind !== "codex" || item.msg.role !== "user") continue;
+      const text = item.msg.blocks
+        .map((block) => (block.type === "text" ? block.text.trim() : ""))
+        .filter(Boolean)
+        .join("\n");
+      if (text) return { id: item.msg.id, text };
+    }
+    return null;
+  }, [mergedMessages]);
+  const currentPromptStick = useCurrentPromptStick({
+    promptId: currentPrompt?.id,
+    scrollRef,
+    revision: `${mergedMessages.length}:${msgOffset}`,
+  });
 
   // 当前可选 reasoning 档位:catalog 中当前 model 项的 supported_reasoning_levels,兜底预置。
   const reasoningLevels = useMemo(() => {
@@ -1137,7 +1426,7 @@ export function CodexPane(props: CodexPaneProps) {
       {/* 主体行:对话区(flex-1:消息流 + 输入区)+ 宽 pane 工具侧栏(MCP/Plugins 常驻)。
           relative 供缩小态悬浮小竖条定位。 */}
       <div className="relative flex min-h-0 min-w-0 flex-1">
-      <div className="grid min-h-0 min-w-0 flex-1 grid-rows-[1fr_auto]">
+      <div className="relative grid min-h-0 min-w-0 flex-1 grid-rows-[1fr_auto]">
         <div ref={scrollRef} onScroll={handleScroll} className="mx-scroll-pretty relative min-h-0 overflow-x-hidden overflow-y-auto px-4 py-4" style={{ fontSize }}>
           {state && (state.messages.length > 0 || (shellState?.messages.length ?? 0) > 0) ? (
             <div ref={contentRef} className="mx-auto w-full max-w-[54.25rem] space-y-1">
@@ -1162,6 +1451,37 @@ export function CodexPane(props: CodexPaneProps) {
                 const prevTs = i > 0 ? visibleMessages[i - 1].msg.timestamp : null;
                 const gapTs =
                   ts != null && prevTs != null && messageTimeMs(ts) - messageTimeMs(prevTs) > MESSAGE_GAP_MS ? ts : null;
+                // 「已处理」折叠渲染(与 ClaudePane 同构):
+                //  ① work fold 段内行一律不在消息流渲染(折叠/展开都由答案气泡内部承载);
+                //  ② steps fold 段首 → 折叠行,未展开时段内其余行隐藏;
+                //  ③ 答案行(workFoldByAnswer 反查)→ 气泡内渲染「已处理」摘要行,就地展开。
+                const gi = i + msgOffset;
+                const ci = codexIndexByMerged[gi] ?? -1;
+                const foldRow = ci >= 0 ? codexFoldMap.rows[ci] ?? null : null;
+                const workFold = foldRow?.work ?? null;
+                const stepsFold = foldRow?.steps ?? null;
+                const isStepsStart = stepsFold != null && stepsFold.start === ci;
+                const answerWorkFold = ci >= 0 ? codexWorkFoldByAnswer.get(ci) ?? null : null;
+                if (workFold != null) return null;
+                const stepsOpen = stepsFold != null && codexOpenFolds.has(`steps:${stepsFold.start}:${stepsFold.end}`);
+                if (stepsFold != null && !isStepsStart && !stepsOpen) return null;
+                if (item.kind === "codex" && isStepsStart && stepsFold) {
+                  return (
+                    <Fragment key={item.msg.id}>
+                      {gapTs != null && <TimeGapDivider timestamp={gapTs} />}
+                      <div className="mx-chat-row">
+                        <StepFoldRow
+                          fold={stepsFold}
+                          messages={codexFoldMsgs}
+                          classifyTool={codexClassifyTool}
+                          t={t}
+                          open={stepsOpen}
+                          onToggle={() => toggleCodexFold(`steps:${stepsFold.start}:${stepsFold.end}`)}
+                        />
+                      </div>
+                    </Fragment>
+                  );
+                }
                 return (
                   <Fragment key={item.kind === "shell" ? `shell-${item.msg.id}` : item.msg.id}>
                     {gapTs != null && <TimeGapDivider timestamp={gapTs} />}
@@ -1170,8 +1490,23 @@ export function CodexPane(props: CodexPaneProps) {
                         <ShellRow message={item.msg} t={t} onInterrupt={handleShellInterrupt} />
                       </div>
                     ) : (
-                      <div className="mx-chat-row">
-                        <MessageRow message={item.msg} t={t} onResend={resendText} />
+                      <div
+                        className="mx-chat-row"
+                        ref={item.msg.id === currentPrompt?.id ? currentPromptStick.promptRef : undefined}
+                      >
+                        <MessageRow
+                          message={item.msg}
+                          t={t}
+                          onResend={resendText}
+                          workFold={answerWorkFold ?? undefined}
+                          workFoldOpen={answerWorkFold != null && codexOpenFolds.has(`work:${answerWorkFold.start}:${answerWorkFold.end}`)}
+                          onToggleWorkFold={toggleCodexWorkFold}
+                          foldMessages={codexMsgsForFolds}
+                          foldMsgsShape={codexFoldMsgs}
+                          foldRows={codexFoldMap.rows}
+                          openFoldKeys={codexOpenFolds}
+                          toggleFoldByKey={toggleCodexFold}
+                        />
                       </div>
                     )}
                   </Fragment>
@@ -1214,6 +1549,14 @@ export function CodexPane(props: CodexPaneProps) {
           )}
         </div>
 
+        {showPromptBanner && currentPrompt && currentPromptStick.detached && (
+          <CurrentPromptBanner
+            text={currentPrompt.text}
+            expanded={currentPromptStick.expanded}
+            onToggle={() => currentPromptStick.setExpanded((v) => !v)}
+          />
+        )}
+
         {/* 底部浮动输入区:状态行 + textarea + 发送/中断按钮。 */}
         <div className="shrink-0 px-4 pb-3 pt-1">
           <div className="mx-auto w-full max-w-[54.25rem]">
@@ -1239,6 +1582,68 @@ export function CodexPane(props: CodexPaneProps) {
                 </span>
               </div>
             )}
+            {/* app-server 实时审批坞卡(2026-11-04 从弹窗改为输入框上方,对齐 claude
+                InteractivePanel 形态:行即动作——允许一次/拒绝)。探针实测 0.166:
+                acceptForSession 该路径不消费、acceptWithExecpolicyAmendment 只免问
+                token 级完全相同的命令(换文件名即不匹配)——「本会话允许」没有协议
+                支撑,不放假按钮;真机制是权限档切「自动批准」(卡下提示一键切换)。
+                request.params 按已知方法(command/reason)择要渲染,未知形态 JSON 折叠。 */}
+            {state?.pendingApproval && (() => {
+              const pa = state.pendingApproval;
+              const p = pa.params as { command?: string; reason?: string } | null | undefined;
+              const cmd = typeof p?.command === "string" ? p.command : "";
+              const reason = typeof p?.reason === "string" ? p.reason : "";
+              const title = cmd
+                ? cmd.split("\n")[0].slice(0, 120)
+                : reason || pa.method || t("codexpane.approvalTitle");
+              const approvalRequest: InteractiveRequest = {
+                kind: "approval",
+                id: pa.key,
+                title,
+                steps: [{
+                  prompt: "",
+                  detail: (
+                    <>
+                      {cmd && (
+                        <pre className="mx-scroll-pretty max-h-28 overflow-auto whitespace-pre-wrap break-all rounded border border-[var(--mx-border)] bg-[var(--mx-surface-2)] p-2 font-mono text-[10px] text-[var(--mx-text)]">{cmd}</pre>
+                      )}
+                      {reason && <div className="text-[10px] text-[var(--mx-faint)]">{reason}</div>}
+                      {!cmd && pa.params != null && (
+                        <pre className="mx-scroll-pretty max-h-28 overflow-auto whitespace-pre-wrap break-all rounded border border-[var(--mx-border)] bg-[var(--mx-surface-2)] p-2 font-mono text-[10px] text-[var(--mx-text)]">{JSON.stringify(pa.params, null, 2)}</pre>
+                      )}
+                    </>
+                  ),
+                  rows: [
+                    { label: t("interactive.allowOnce") },
+                    { label: "__deny__" },
+                  ],
+                }],
+              };
+              return (
+                <div className="mx-dock-in mb-1.5">
+                  <InteractivePanel
+                    request={approvalRequest}
+                    t={t}
+                    noAutoFocus
+                    onAnswer={(ans) => {
+                      if (ans.kind !== "approval") return;
+                      const transport = getCodexTransportRef.current(activeTabId);
+                      void transport.respondApproval(pa.key, ans.decision !== "deny");
+                    }}
+                  />
+                  <div className="mt-1 flex items-center gap-1 px-1 text-[10px] text-[var(--mx-faint)]">
+                    <span>{t("codexpane.approvalAutoHint")}</span>
+                    <button
+                      type="button"
+                      className="text-[var(--mx-accent-bright)] hover:underline"
+                      onClick={() => setPermissionMode("approve-for-me")}
+                    >
+                      {t("codexpane.permissionAutoShort")}
+                    </button>
+                  </div>
+                </div>
+              );
+            })()}
             {codexMissing ? (
               /* 未安装提示卡片。 */
               <div className="mx-chip flex flex-col gap-2 border border-[var(--mx-danger-border)] bg-[var(--mx-danger-bg)] px-3 py-3 text-[11px] text-[var(--mx-text)]">
@@ -1268,7 +1673,7 @@ export function CodexPane(props: CodexPaneProps) {
                 </Button>
               </div>
             ) : (
-              <Popover open={atOpen && atMatches.length > 0}>
+              <Popover open={(atOpen && atMatches.length > 0) || (cmdOpen && cmdMatches.length > 0)}>
                 <PopoverAnchor asChild>
                   <div className="mx-chip flex flex-col rounded-[var(--mx-radius-lg)] border border-[var(--mx-border)] bg-[var(--mx-card-bg)] px-3 py-2 shadow-lg focus-within:border-[var(--mx-accent)]">
                     <div className="flex items-end gap-2">
@@ -1293,7 +1698,39 @@ export function CodexPane(props: CodexPaneProps) {
                             return;
                           }
                           // ↑/↓ 浏览输入历史。
-                          if (!atOpen && !e.nativeEvent.isComposing && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
+                          // / 命令面板:↑↓ 导航 + Tab 补全 + Enter 执行 + Esc 关闭;与 @ 面板互斥。
+                          if (cmdOpen && cmdMatches.length > 0) {
+                            if (e.key === "ArrowDown") {
+                              e.preventDefault();
+                              setCmdIndex((i) => (i < cmdMatches.length - 1 ? i + 1 : 0));
+                              return;
+                            }
+                            if (e.key === "ArrowUp") {
+                              e.preventDefault();
+                              setCmdIndex((i) => (i > 0 ? i - 1 : cmdMatches.length - 1));
+                              return;
+                            }
+                            if (e.key === "Tab" && !e.shiftKey && !e.nativeEvent.isComposing) {
+                              e.preventDefault();
+                              const d = cmdMatches[cmdIndex] ?? cmdMatches[0];
+                              setInput(d?.name ?? input);
+                              return;
+                            }
+                            if (e.key === "Enter" && !e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey && !e.nativeEvent.isComposing) {
+                              e.preventDefault();
+                              const d = cmdMatches[cmdIndex] ?? cmdMatches[0];
+                              setInput("");
+                              setCmdOpen(false);
+                              if (d) void d.run("");
+                              return;
+                            }
+                            if (e.key === "Escape") {
+                              e.preventDefault();
+                              setCmdOpen(false);
+                              return;
+                            }
+                          }
+                          if (!atOpen && !cmdOpen && !e.nativeEvent.isComposing && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
                             const ta = inputRef.current;
                             const pos = ta?.selectionStart ?? input.length;
                             const before = input.slice(0, pos);
@@ -1436,17 +1873,66 @@ export function CodexPane(props: CodexPaneProps) {
                           </PopoverContent>
                         )}
                       </Popover>
-                      {/* model:点击上拉选择器(读 cc-switch catalog;选中 -m 下轮生效)。 */}
+                      {/* Permission 与 sandbox 分离:前者控制失败后的应用层确认,后者仍是 exec -s 文件系统边界。 */}
+                      <Popover open={menuMode === "permission"} onOpenChange={(o) => setMenuMode(o ? "permission" : null)}>
+                        <PopoverTrigger asChild>
+                          <button
+                            type="button"
+                            onMouseDown={(e) => e.stopPropagation()}
+                            className="flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[var(--mx-text)] transition-colors hover:bg-[var(--mx-border)]"
+                            title={t("codexpane.permissionTitle")}
+                          >
+                            <span className={permission === "full-access" ? "text-[var(--mx-danger-bright)]" : permission === "read-only" ? "text-[var(--mx-violet)]" : "text-[var(--mx-accent)]"}>
+                              {t(currentPermissionProfile.shortLabelKey)}
+                            </span>
+                            <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" aria-hidden>
+                              <path d="M6 9l6 6 6-6" />
+                            </svg>
+                          </button>
+                        </PopoverTrigger>
+                        {menuMode === "permission" && (
+                          <PopoverContent
+                            side="top"
+                            align="start"
+                            sideOffset={4}
+                            onOpenAutoFocus={(e) => e.preventDefault()}
+                            className="mx-menu w-[320px] max-w-[calc(100vw-2rem)] border border-[var(--mx-border)] bg-[var(--mx-surface)] p-1 shadow-xl"
+                          >
+                            <div className="px-2 pb-1 text-[10px] leading-tight text-[var(--mx-faint)]">{t("codexpane.permissionNote")}</div>
+                            {CODEX_PERMISSION_PROFILES.map((profile) => (
+                              <button
+                                key={profile.id}
+                                type="button"
+                                onMouseDown={(e) => e.stopPropagation()}
+                                onClick={() => setPermissionMode(profile.id)}
+                                className={`flex w-full items-start gap-2 rounded px-2 py-1.5 text-left transition-colors ${
+                                  permission === profile.id
+                                    ? "bg-[var(--mx-selected-bg)] text-[var(--mx-text)]"
+                                    : "text-[var(--mx-muted)] hover:bg-[var(--mx-hover-bg)] hover:text-[var(--mx-text)]"
+                                }`}
+                              >
+                                <span className="w-[86px] shrink-0 text-[11px] font-semibold">{t(profile.labelKey)}</span>
+                                <span className="text-[10px] leading-tight">
+                                  <span className="block text-[var(--mx-text)]">{t(profile.descKey)}</span>
+                                  <span className="font-mono text-[var(--mx-faint)]">sandbox={profile.sandbox} · approval={profile.approval}</span>
+                                </span>
+                              </button>
+                            ))}
+                          </PopoverContent>
+                        )}
+                      </Popover>
+                      {/* model:点击上拉选择器(生效供应商 models[] 优先,退全局 catalog;选中下轮生效)。 */}
                       <Popover open={menuMode === "model"} onOpenChange={(o) => {
                         setMenuMode(o ? "model" : null);
                         if (!o) return;
-                        // 每次打开:实时拉 catalog 模型 + 检测 codex 配置变化(cc-switch 切供应商)。
-                        void invoke<CodexModelInfo[]>("list_codex_models").then((list) => {
+                        // 每次打开:实时拉模型目录 + 检测 codex 配置变化(切供应商)。
+                        void loadModelCatalog().then((list) => {
                           setAvailableModels(list);
                           // 顺带回填当前 model 的 contextWindow(ctx 显示)。
                           const alias = getCodexTransportRef.current(activeTabId)?.getSelectedModelAlias();
                           const m = list.find((x) => x.slug === (alias ?? stateRef.current?.meta?.model));
                           setContextWindow(m?.contextWindow);
+                          getCodexTransportRef.current(activeTabId)?.setContextWindow(m?.contextWindow);
                         }).catch(() => {});
                         void getCodexTransportRef.current(activeTabId)?.refreshIfConfigChanged();
                       }}>
@@ -1577,7 +2063,15 @@ export function CodexPane(props: CodexPaneProps) {
                       {/* ctx 迷你仪表:进度条=占用、分数=已用/窗口,阈值着色提示该 /compact;
                           hover 看剩余/百分比明细。catalog 未给窗口则不渲染。 */}
                       {contextInfo.window && (
-                        <ContextMeter used={contextInfo.ctx} window={contextInfo.window} />
+                        <ContextMeter
+                          used={contextInfo.ctx}
+                          window={contextInfo.window}
+                          usage={state?.lastUsage ? {
+                            input_tokens: contextInfo.ctx,
+                            output_tokens: state.lastUsage.output_tokens,
+                          } : null}
+                          t={t}
+                        />
                       )}
                       <span className="shrink-0">
                         ↑{formatTokens(sessionTokens.input)} ↓{formatTokens(sessionTokens.output)}
@@ -1595,7 +2089,26 @@ export function CodexPane(props: CodexPaneProps) {
                   className="mx-menu w-[360px] max-w-[calc(100vw-2rem)] overflow-hidden border border-[var(--mx-border)] bg-[var(--mx-surface)] p-1.5 shadow-xl"
                 >
                   <div className="mx-scroll-pretty max-h-[min(50vh,420px)] overflow-y-auto p-0.5">
-                  {atMatches.map((f, i) => (
+                  {cmdOpen && cmdMatches.length > 0
+                    ? cmdMatches.map((c, i) => (
+                        <button
+                          key={c.name}
+                          type="button"
+                          onMouseDown={(e) => e.stopPropagation()}
+                          onClick={() => {
+                            setInput("");
+                            setCmdOpen(false);
+                            void c.run("");
+                          }}
+                          onMouseEnter={() => setCmdIndex(i)}
+                          className={`flex w-full items-center gap-2 rounded px-2 py-1 text-left transition-colors ${i === cmdIndex ? "bg-[var(--mx-selected-bg)]" : "hover:bg-[var(--mx-hover-bg)]"}`}
+                        >
+                          {c.glyph && <span aria-hidden className="mx-icon-tile grid h-4 w-4 shrink-0 place-items-center text-[10px] font-bold bg-[var(--mx-accent-soft)] text-[var(--mx-accent)]">{c.glyph}</span>}
+                          <span className="shrink-0 font-mono text-[11px] font-medium text-[var(--mx-accent)]">{c.name}</span>
+                          <span className="min-w-0 flex-1 truncate text-[11px] text-[var(--mx-muted)]">{t(c.labelKey)}</span>
+                        </button>
+                      ))
+                    : atMatches.map((f, i) => (
                     <button
                       key={f.path}
                       type="button"
@@ -1729,6 +2242,23 @@ export function CodexPane(props: CodexPaneProps) {
       )}
       </div>
             {/* ⋯ 工具菜单触发的弹窗 + 定位失败的底部 toast。 */}
+            <DialogLike
+              open={!!permissionAsk}
+              onClose={() => setPermissionAsk(null)}
+              title={t("codexpane.permissionAskTitle")}
+            >
+              <div className="mt-3 space-y-2 text-[11px] text-[var(--mx-muted)]">
+                <div>{t("codexpane.permissionAskBody")}</div>
+                <pre className="mx-scroll-pretty max-h-20 overflow-auto whitespace-pre-wrap break-all rounded border border-[var(--mx-border)] bg-[var(--mx-surface-2)] p-2 font-mono text-[10px] text-[var(--mx-text)]">{permissionAsk?.command}</pre>
+                <pre className="mx-scroll-pretty max-h-28 overflow-auto whitespace-pre-wrap break-all rounded border border-[var(--mx-border)] bg-[var(--mx-surface-2)] p-2 font-mono text-[10px] text-[var(--mx-danger-bright)]">{permissionAsk?.output}</pre>
+                <div className="flex justify-end gap-2 pt-1">
+                  <Button size="sm" variant="ghost" onClick={() => setPermissionAsk(null)}>{t("codexpane.permissionDeny")}</Button>
+                  <Button size="sm" onClick={() => void allowPermissionRetry()}>{t("codexpane.permissionAllow")}</Button>
+                </div>
+              </div>
+            </DialogLike>
+            {/* app-server 实时审批改为输入框上方坞卡(2026-11-04 用户定调对齐 claude 形态,
+                弹窗已删;渲染见 composer 前的 InteractivePanel)。 */}
             <DialogLike open={helpOpen} onClose={() => setHelpOpen(false)} title={t("codexpane.helpTitle")}>
               <div className="mt-3 space-y-1.5 text-[11px] text-[var(--mx-muted)]">
                 <div><kbd className="rounded bg-[var(--mx-hover-bg)] px-1 font-mono text-[10px]">Enter</kbd> 发送 · <kbd className="rounded bg-[var(--mx-hover-bg)] px-1 font-mono text-[10px]">Shift+Enter</kbd> 换行</div>
@@ -1863,11 +2393,30 @@ const MessageRow = memo(function MessageRow({
   message,
   t,
   onResend,
+  workFold,
+  workFoldOpen,
+  onToggleWorkFold,
+  foldMessages,
+  foldMsgsShape,
+  foldRows,
+  openFoldKeys,
+  toggleFoldByKey,
 }: {
   message: CodexMessage;
   t: (k: string, opts?: Record<string, unknown>) => string;
   /** user 消息 hover「重新发送」(C6):重跑同一轮。 */
   onResend?: (text: string) => void;
+  /** 本消息是某已结束轮的答案时,气泡内第一个块渲染「已处理」摘要行(点击就地展开段内步骤)。 */
+  workFold?: StepFold;
+  workFoldOpen?: boolean;
+  onToggleWorkFold?: (f: StepFold) => void;
+  /** 段内原始 codex 消息(展开体逐消息渲染用)。 */
+  foldMessages?: CodexMessage[];
+  /** 段内折叠形状消息(tallySteps 语义计数用;与 foldMessages 同下标)。 */
+  foldMsgsShape?: ClaudeMessage[];
+  foldRows?: RowFold[];
+  openFoldKeys?: Set<string>;
+  toggleFoldByKey?: (key: string) => void;
 }) {
   const time = formatTime(message.timestamp);
 
@@ -1895,6 +2444,49 @@ const MessageRow = memo(function MessageRow({
       </span>
       <div className="group min-w-0 flex-1">
         <div className="flex flex-col gap-2 rounded-2xl rounded-bl-[6px] bg-[var(--mx-card-bg)] px-3 py-1.5">
+          {/* work fold 摘要行(「已处理 4m32s · 读取了 3 个文件…」,claude 同款):气泡内
+              第一个块;点击 toggle 该轮 work fold,段内步骤在下方就地展开。 */}
+          {workFold && (
+            <WorkFoldRow
+              fold={workFold}
+              messages={foldMsgsShape}
+              classifyTool={codexClassifyTool}
+              open={!!workFoldOpen}
+              onToggle={() => onToggleWorkFold?.(workFold)}
+              t={t}
+            />
+          )}
+          {/* work fold 就地展开体:段内步骤渲染在摘要行下方(向下生长,收起点始终在内容
+              首行);两层渐进——段内 quick steps 仍按 steps fold 收拢,点开再见明细。 */}
+          {workFold && workFoldOpen && foldMessages && foldMsgsShape && foldRows && openFoldKeys && toggleFoldByKey && (
+            <div className="flex flex-col gap-2">
+              {Array.from({ length: workFold.end - workFold.start + 1 }, (_, off) => {
+                const k = workFold.start + off;
+                const m = foldMessages[k];
+                if (!m || m.role !== "assistant") return null;
+                const stepsFold = foldRows[k]?.steps ?? null;
+                const isStepsStart = stepsFold != null && stepsFold.start === k;
+                const stepsOpen =
+                  stepsFold != null && openFoldKeys.has(`steps:${stepsFold.start}:${stepsFold.end}`);
+                // steps 折叠中:段首渲染折叠行,段内其余跳过(与消息流侧同构)。
+                if (stepsFold != null && !isStepsStart && !stepsOpen) return null;
+                if (isStepsStart && !stepsOpen) {
+                  return (
+                    <StepFoldRow
+                      key={`sf-${k}`}
+                      fold={stepsFold}
+                      messages={foldMsgsShape}
+                      classifyTool={codexClassifyTool}
+                      open={false}
+                      onToggle={() => toggleFoldByKey(`steps:${stepsFold.start}:${stepsFold.end}`)}
+                      t={t}
+                    />
+                  );
+                }
+                return m.blocks.map((b, bi) => <BlockView key={`wb-${k}-${bi}`} block={b} t={t} />);
+              })}
+            </div>
+          )}
           {message.blocks.map((b, i) => (
             <BlockView key={i} block={b} t={t} />
           ))}
@@ -1974,7 +2566,11 @@ function BlockView({
     );
   }
   if (block.type === "thinking") {
+    // 拿不到可读内容就不展示(空 text + 无时长 = 上游中转不回 summary 的空思考,直接
+    // return null;流式 ThinkingDots 的占位也一并取消——有 delta 内容才出现思考块)。
+    if (!block.text.trim() && block.ms == null) return null;
     // reasoning 手风琴折叠(默认折叠,展开看完整推理)。
+    const sec = block.ms != null ? `${(block.ms / 1000).toFixed(1)}s` : null;
     return (
       <details className="group">
         <summary className="flex cursor-pointer list-none items-center gap-1.5 py-0.5 text-xs text-[var(--mx-muted)] transition-colors hover:text-[var(--mx-text)]">
@@ -1988,11 +2584,12 @@ function BlockView({
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
           </svg>
           <span className="italic">{t("codexpane.thinking")}</span>
-          {block.text && <span className="text-[var(--mx-faint)]">· {block.text.length} chars</span>}
+          <span className="text-[var(--mx-faint)]">· {block.text.length} chars</span>
+          {sec && <span className="tabular-nums text-[var(--mx-faint)]">· {sec}</span>}
         </summary>
         <div className="mt-1.5 pl-[18px]">
           <div className="whitespace-pre-wrap break-words text-xs italic leading-relaxed text-[var(--mx-muted)]">
-            {block.text || "…"}
+            {block.text}
           </div>
         </div>
       </details>

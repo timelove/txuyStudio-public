@@ -69,6 +69,8 @@ type TabTerminal = {
   disposeCursorLock: { dispose: () => void } | null;
   /** 取消待发的防抖 PTY resize(关 tab 时清,防 dispose 后 invoke)。 */
   cancelPtyResize: () => void;
+  /** 取消待发的整屏重绘(关 tab 时清,防 dispose 后访问已销毁的 terminal)。 */
+  cancelRepaint: () => void;
   /** buffer 切换(normal↔alternate)订阅取消:TUI 进出时按 buffer 类型 refit 切换 margin。 */
   disposeBufferChange: { dispose: () => void };
   /** 当前挂着的 WebGL 渲染器(null = 未挂/不可用)。只给**可见** tab 挂,切走即卸
@@ -81,6 +83,13 @@ type TabTerminal = {
 /** 隐藏 tab 输出缓冲上限(字符)。后台 tab 长跑构建时输出只入缓冲不进 xterm,
  *  切回一次性补写;超限丢头保尾(切回至少能看到最近的输出)。 */
 const HIDDEN_BUF_MAX = 2_000_000;
+
+/**
+ * shell 行编辑器(如 PowerShell/PSReadLine)重绘输入行时常用的控制序列。
+ * WebGL 渲染器在这类「旧字形变为空白」的局部更新上偶尔会留下画布残影，
+ * 只对命中重绘序列的输出安排一次合并后的整屏刷新，普通输出仍走增量渲染。
+ */
+const TERMINAL_REPAINT_HINT = /(?:\r|\x08|\x1b\[[0-9;?]*[JKXPMJLGf])/;
 
 /** 底部滚动留白:PTY 逻辑屏比视口少固定 24px 对应的行数(ceil,至少 1 行)——
  *  提示符/光标恒距视口底 24px,下方是 scrollback 里可滚过的空行,输入/阅读不贴底。
@@ -345,6 +354,19 @@ export function TerminalPane({
     // === IME 候选框跟随光标修复 结束 ===
 
     const transport = getTransportRef.current(tabId);
+    let repaintRaf = 0;
+    const scheduleRepaint = () => {
+      if (repaintRaf) return;
+      repaintRaf = window.requestAnimationFrame(() => {
+        repaintRaf = 0;
+        if (terminal.rows > 0) terminal.refresh(0, terminal.rows - 1);
+      });
+    };
+    const cancelRepaint = () => {
+      if (!repaintRaf) return;
+      window.cancelAnimationFrame(repaintRaf);
+      repaintRaf = 0;
+    };
     // 隐藏 tab 的输出只入缓冲、不进 xterm:后台 tab 长跑构建输出时不再持续跑 parser/
     // 触发渲染拖慢前台(整页卡顿的另一来源);恢复可见时 flushHiddenBuf 一次性补写,
     // 顺序保留,历史完整。上限 HIDDEN_BUF_MAX 丢头保尾,防无界增长。
@@ -379,6 +401,7 @@ export function TerminalPane({
         return;
       }
       terminal.write(chunk);
+      if (TERMINAL_REPAINT_HINT.test(chunk)) scheduleRepaint();
     });
     const disposeOnData = terminal.onData((data) => {
       void transport.write(tabId, data);
@@ -467,6 +490,7 @@ export function TerminalPane({
         if (ptyResizeTimer) window.clearTimeout(ptyResizeTimer);
         ptyResizeTimer = 0;
       },
+      cancelRepaint,
       // WebGL 只给可见 tab 挂:创建时必可见(懒建),挂载点在下方 set 之后统一处理。
       webgl: null,
       flushHidden: flushHiddenBuf,
@@ -488,6 +512,7 @@ export function TerminalPane({
     const t = terminalsRef.current.get(tabId);
     if (!t) return;
     t.cancelPtyResize();
+    t.cancelRepaint();
     t.unsubscribe();
     t.disposeOnData.dispose();
     t.disposeCursorMove.dispose();

@@ -11,6 +11,17 @@
 
 import { invoke } from "@tauri-apps/api/core";
 
+/** 认证字段(2026-11-04 对齐 cc-switch):同一 token 放哪个 env 键,决定 CLI 发哪种认证头——
+ *  auth_token → `ANTHROPIC_AUTH_TOKEN`(Authorization: Bearer,三方中转通用,默认);
+ *  api_key → `ANTHROPIC_API_KEY`(x-api-key 头,官方 API 风格)。 */
+export type ClaudeAuthStyle = "auth_token" | "api_key";
+
+/** 上游接口格式(2026-11-04 对齐 cc-switch 的 apiFormat):anthropic = claude CLI 原生协议
+ *  (默认);openai = 供应商是 openai 兼容端点。**直连写法与 anthropic 完全相同**(settings.json
+ *  env 段无差别)——claude CLI 只讲 anthropic 协议,openai 端点必须自身提供兼容层;此字段
+ *  目前仅作标记与 UI 展示,为将来内置协议转换预留。 */
+export type ClaudeApiFormat = "anthropic" | "openai";
+
 /** 一条 claude 供应商配置。baseUrl/token/model 是核心三件,extraEnv 兜底平移其余 env 键
  *  (如 CLAUDE_CODE_AUTO_COMPACT_WINDOW / ANTHROPIC_DEFAULT_* 全家桶)——「从当前导入」时
  *  原样保留,切换时一并写回,保证与 cc-switch 手切行为一致。 */
@@ -21,8 +32,12 @@ export type ClaudeProvider = {
   token: string;
   /** 默认模型(写 env 的 ANTHROPIC_MODEL;空 = 不写该键,由上游 env 决定)。 */
   model: string;
-  /** 其余 env 键值对(不含 BASE_URL/AUTH_TOKEN/ANTHROPIC_MODEL 三个已建模键)。 */
+  /** 其余 env 键值对(不含 BASE_URL/AUTH_TOKEN/API_KEY/ANTHROPIC_MODEL 四个已建模键)。 */
   extraEnv: Record<string, string>;
+  /** 认证字段;缺省 = "auth_token"(旧 localStorage 数据兼容,可选字段)。 */
+  authStyle?: ClaudeAuthStyle;
+  /** 上游接口格式;缺省 = "anthropic"(可选字段)。 */
+  apiFormat?: ClaudeApiFormat;
 };
 
 const PROVIDERS_KEY = "mx.claudeProviders";
@@ -38,7 +53,9 @@ function isValidProvider(v: unknown): v is ClaudeProvider {
     typeof p.model === "string" &&
     p.extraEnv != null &&
     typeof p.extraEnv === "object" &&
-    Object.values(p.extraEnv).every((x) => typeof x === "string")
+    Object.values(p.extraEnv).every((x) => typeof x === "string") &&
+    (p.authStyle === undefined || p.authStyle === "auth_token" || p.authStyle === "api_key") &&
+    (p.apiFormat === undefined || p.apiFormat === "anthropic" || p.apiFormat === "openai")
   );
 }
 
@@ -83,12 +100,16 @@ export function newProviderId(): string {
   return `p-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
 }
 
-/** provider → 完整 env 段(切换时整体写入)。三个建模键 + extraEnv 合并,键序无关
- *  (后端 BTreeMap 排序落盘,同配置多次写文件字节稳定)。 */
+/** provider → 完整 env 段(切换时整体写入)。建模键 + extraEnv 合并,键序无关
+ *  (后端 BTreeMap 排序落盘,同配置多次写文件字节稳定)。token 按认证字段落
+ *  AUTH_TOKEN / API_KEY 之一——整体替换语义下另一键不会残留。 */
 export function providerEnv(p: ClaudeProvider): Record<string, string> {
   const env: Record<string, string> = { ...p.extraEnv };
   if (p.baseUrl) env.ANTHROPIC_BASE_URL = p.baseUrl;
-  if (p.token) env.ANTHROPIC_AUTH_TOKEN = p.token;
+  if (p.token) {
+    if (p.authStyle === "api_key") env.ANTHROPIC_API_KEY = p.token;
+    else env.ANTHROPIC_AUTH_TOKEN = p.token;
+  }
   if (p.model) env.ANTHROPIC_MODEL = p.model;
   return env;
 }
@@ -109,16 +130,16 @@ export function configuredModelsOf(p: ClaudeProvider): string[] {
   return out;
 }
 
-/** 当前生效 env 与某 provider 是否同配置(BASE_URL + AUTH_TOKEN + ANTHROPIC_MODEL 三键
- *  匹配即认定;extraEnv 的开关类键不参与判定,避免误报「未生效」)。 */
+/** 当前生效 env 与某 provider 是否同配置(建模键 BASE_URL + AUTH_TOKEN/API_KEY(按认证
+ *  字段实际落的那个)+ ANTHROPIC_MODEL 逐一比对,空键跳过;extraEnv 的开关类键不参与
+ *  判定,避免误报「未生效」)。 */
 export function isProviderActive(p: ClaudeProvider, currentEnv: Record<string, string> | null): boolean {
   if (!currentEnv) return false;
   const env = providerEnv(p);
-  return (
-    (!env.ANTHROPIC_BASE_URL || currentEnv.ANTHROPIC_BASE_URL === env.ANTHROPIC_BASE_URL) &&
-    (!env.ANTHROPIC_AUTH_TOKEN || currentEnv.ANTHROPIC_AUTH_TOKEN === env.ANTHROPIC_AUTH_TOKEN) &&
-    (!env.ANTHROPIC_MODEL || currentEnv.ANTHROPIC_MODEL === env.ANTHROPIC_MODEL)
-  );
+  for (const k of ["ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_MODEL"]) {
+    if (env[k] && currentEnv[k] !== env[k]) return false;
+  }
+  return true;
 }
 
 /** 多条配置同端点同密钥时都会通过 `isProviderActive`,取**配置最完整**的一条作生效家
@@ -147,19 +168,30 @@ export async function readCurrentEnv(): Promise<Record<string, string> | null> {
   }
 }
 
-/** 「从当前配置导入」:把当前生效 env 收敛成一条 provider(其余键进 extraEnv 原样保留)。 */
+/** 「从当前配置导入」:把当前生效 env 收敛成一条 provider(其余键进 extraEnv 原样保留)。
+ *  认证字段按实值反推:env 里有 ANTHROPIC_API_KEY → api_key(优先取作 token),
+ *  否则 auth_token。 */
 export function providerFromEnv(name: string, env: Record<string, string>): ClaudeProvider {
   const extra: Record<string, string> = {};
   for (const [k, v] of Object.entries(env)) {
-    if (k === "ANTHROPIC_BASE_URL" || k === "ANTHROPIC_AUTH_TOKEN" || k === "ANTHROPIC_MODEL") continue;
+    if (
+      k === "ANTHROPIC_BASE_URL" ||
+      k === "ANTHROPIC_AUTH_TOKEN" ||
+      k === "ANTHROPIC_API_KEY" ||
+      k === "ANTHROPIC_MODEL"
+    ) {
+      continue;
+    }
     extra[k] = v;
   }
+  const apiKey = env.ANTHROPIC_API_KEY ?? "";
   return {
     id: newProviderId(),
     name,
     baseUrl: env.ANTHROPIC_BASE_URL ?? "",
-    token: env.ANTHROPIC_AUTH_TOKEN ?? "",
+    token: apiKey || (env.ANTHROPIC_AUTH_TOKEN ?? ""),
     model: env.ANTHROPIC_MODEL ?? "",
+    authStyle: apiKey ? "api_key" : "auth_token",
     extraEnv: extra,
   };
 }

@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { homeDir } from "@tauri-apps/api/path";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { selectEnclosingPre } from "../lib/selectEnclosingPre";
+import { useCurrentPromptStick } from "../lib/useCurrentPromptStick";
 import { useMessageWindow } from "../lib/useMessageWindow";
 import { formatCost, formatTokens, formatTokensPerSecond } from "../lib/turnMetrics";
 import { deriveAlwaysAllowLabel } from "../lib/permissionSuggest";
@@ -10,6 +11,7 @@ import { toolStepDetail, toolStepObject, toolStepTitle, toolStepVerbKey } from "
 import { StepBody, StepCard, StepRow } from "./StepRow";
 import { InteractivePanel } from "./InteractivePanel";
 import { StepFoldRow, WorkFoldRow } from "./StepFoldRow";
+import { CurrentPromptBanner } from "./chat/CurrentPromptBanner";
 import { computeFolds, type RowFold, type StepFold } from "../domain/stepFolds";
 import { classifyCommand } from "../lib/commandClassifier";
 import type { SettingsTab } from "./SettingsModal";
@@ -443,7 +445,7 @@ export function ClaudePane(props: ClaudePaneProps) {
     className,
   } = props;
   const { t, i18n } = useTranslation();
-  const { fontSize } = useSettings();
+  const { fontSize, showPromptBanner } = useSettings();
   /** 输入框底部状态栏字号:随全局 fontSize 缩放(14→10,与原 text-[10px] 一致)。 */
   const statusFontPx = statusFontSize(fontSize);
   const [state, setState] = useState<ClaudeStreamState | null>(null);
@@ -1568,6 +1570,17 @@ export function ClaudePane(props: ClaudePaneProps) {
     const transport = getClaudeTransportRef.current(activeTabId);
     transport.setMode("acceptEdits");
     setModeState("acceptEdits");
+    // 控制通道优先:ExitPlanMode 以 can_use_tool 控制请求到达时 CLI 正阻塞等答复,
+    // 回 allow 让 **CLI 自己退出 plan 模式续跑**(零中断零重放)。老路径(interrupt+发文字)
+    // 会把阻塞中的 CLI 杀掉——界面上先渲染「[Request interrupted by user]」再乐观插入批准
+    // 文字,restart 后才可能恢复,glm 代理下常停在半路(用户报告的「批准后状态停止」)。
+    const pending = stateRef.current?.pendingPermissions.find(
+      (p) => p.toolName === "ExitPlanMode" || p.toolName === "exit_plan_mode",
+    );
+    if (pending) {
+      void transport.respondPermission(pending.requestId, "allow");
+      return;
+    }
     await transport.interrupt();
     void transport.send("批准该计划,开始执行");
   }, [activeTabId]);
@@ -1962,6 +1975,23 @@ export function ClaudePane(props: ClaudePaneProps) {
   // 折叠索引表按 mergedMessages 全量下标工作 → 渲染循环用 gi = i + msgOffset 回查。
   const { offset: msgOffset, sentinel: msgSentinel } = useMessageWindow(mergedMessages.length, scrollRef, activeTabId);
   const visibleMessages = msgOffset > 0 ? mergedMessages.slice(msgOffset) : mergedMessages;
+  const currentPrompt = useMemo(() => {
+    for (let i = mergedMessages.length - 1; i >= 0; i--) {
+      const item = mergedMessages[i];
+      if (item?.kind !== "claude" || item.msg.role !== "user") continue;
+      const text = item.msg.blocks
+        .map((block) => (block.type === "text" ? block.text.trim() : ""))
+        .filter(Boolean)
+        .join("\n");
+      if (text) return { id: item.msg.id, text };
+    }
+    return null;
+  }, [mergedMessages]);
+  const currentPromptStick = useCurrentPromptStick({
+    promptId: currentPrompt?.id,
+    scrollRef,
+    revision: `${mergedMessages.length}:${msgOffset}`,
+  });
   const [openFolds, setOpenFolds] = useState<Set<string>>(() => {
     try {
       const raw = localStorage.getItem(`mx.foldOpen.${activeTabId}`);
@@ -2292,7 +2322,7 @@ export function ClaudePane(props: ClaudePaneProps) {
           relative 供缩小态悬浮小竖条定位。 */}
       <div className="relative flex min-h-0 min-w-0 flex-1">
       {/* 对话区:消息流(上,flex-1 滚动) + 底部浮动输入区(下)。 */}
-      <div className="grid min-h-0 min-w-0 flex-1 grid-rows-[1fr_auto]">
+      <div className="relative grid min-h-0 min-w-0 flex-1 grid-rows-[1fr_auto]">
         {/* overflow-x-hidden:消息流只纵向滚动。内含 markdown(压缩总结等)时,任何宽度计算
             意外(长路径串/代码块 min-content)都会让 overflow-x 被 UA 计算成 auto,底部冒横向
             滚动条;横向阅读需求由 pre/表格各自的内部滚动承担,故这里直接钳掉。 */}
@@ -2341,7 +2371,11 @@ export function ClaudePane(props: ClaudePaneProps) {
                 if (workFold != null) return null;
                 // 展开的 steps fold 段内(非段首,仅非 work 区的 steps):命令恒显命令原文 ——
                 // 展开「运行了 N 条命令」即读到全部执行过的命令(用户反馈)。
-                const foldExpanded = stepsFold != null && !isStepsStart && openFolds.has(stepsFoldKey(stepsFold));
+                const stepsOpen = stepsFold != null && openFolds.has(stepsFoldKey(stepsFold));
+                const foldExpanded = stepsFold != null && !isStepsStart && stepsOpen;
+                // steps 折叠中:段首渲染折叠行,段内其余行隐藏(work 展开体同构;漏了这行
+                // 折叠时段内内容仍全可见,折叠只剩标题语义)。
+                if (stepsFold != null && !isStepsStart && !stepsOpen) return null;
                 if (isStepsStart) {
                   return (
                     <Fragment key={`fold-${i}`}>
@@ -2351,7 +2385,7 @@ export function ClaudePane(props: ClaudePaneProps) {
                           fold={stepsFold}
                           messages={claudeMessagesForFolds}
                           t={t}
-                          open={openFolds.has(stepsFoldKey(stepsFold))}
+                          open={stepsOpen}
                           onToggle={() => toggleFold(stepsFoldKey(stepsFold))}
                         />
                       </div>
@@ -2366,7 +2400,10 @@ export function ClaudePane(props: ClaudePaneProps) {
                         <ShellRow message={item.msg} t={t} onInterrupt={handleShellInterrupt} />
                       </div>
                     ) : (
-                      <div className="mx-chat-row">
+                      <div
+                        className="mx-chat-row"
+                        ref={item.msg.id === currentPrompt?.id ? currentPromptStick.promptRef : undefined}
+                      >
                         <MessageRow
                           message={item.msg}
                           t={t}
@@ -2438,6 +2475,14 @@ export function ClaudePane(props: ClaudePaneProps) {
             </button>
           )}
         </div>
+
+        {showPromptBanner && currentPrompt && currentPromptStick.detached && (
+          <CurrentPromptBanner
+            text={currentPrompt.text}
+            expanded={currentPromptStick.expanded}
+            onToggle={() => currentPromptStick.setExpanded((v) => !v)}
+          />
+        )}
 
         {/* 底部浮动输入区:状态行 + textarea + 发送/中断按钮。 */}
         <div className="shrink-0 px-4 pb-3 pt-1">

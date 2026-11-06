@@ -9,8 +9,8 @@
 //
 // open 态受控(open/onToggle 由 caller 给,caller 侧 localStorage 持久化)。
 
-import type { ClaudeMessage } from "../domain/claudeStream";
-import type { StepFold } from "../domain/stepFolds";
+import type { ClaudeBlock, ClaudeMessage } from "../domain/claudeStream";
+import type { StepFold, ToolActionClass } from "../domain/stepFolds";
 import { classifyCommand } from "../lib/commandClassifier";
 import { formatDuration } from "../lib/turnMetrics";
 import { StepRow } from "./StepRow";
@@ -26,20 +26,34 @@ export type StepTally = {
   thoughtSeconds: number;
 };
 
-/** 段内消息 → 语义计数(导出供测试)。 */
-export function tallySteps(messages: ClaudeMessage[], start: number, end: number): StepTally {
+/** 工具动作分类(类型真身在 domain/stepFolds,此处 re-export 保持旧 import 路径可用)。 */
+export type { ToolActionClass } from "../domain/stepFolds";
+
+/** 段内消息 → 语义计数(导出供测试)。classifyTool 覆盖工具名 → 动作分类
+ *  (claude 默认内置工具名表;codex 传 codex 口径)。 */
+export function tallySteps(
+  messages: ClaudeMessage[],
+  start: number,
+  end: number,
+  classifyTool?: (b: ClaudeBlock) => ToolActionClass,
+): StepTally {
   const t: StepTally = { read: 0, search: 0, list: 0, fetch: 0, run: 0, use: 0, thoughtSeconds: 0 };
   for (let i = start; i <= end; i++) {
     const m = messages[i];
     if (m.role !== "assistant") continue;
     for (const b of m.blocks) {
       if (b.type === "thinking") {
-        // 思考时长无独立计时,用字符数 /40 粗估(≈中文 1 字 1 token 的阅读量级),
+        // 思考时长:优先真实计时(codex 折叠形状保留的 item_started→completed ms);
+        // claude 流无独立计时,用字符数 /40 粗估(≈中文 1 字 1 token 的阅读量级),
         // 只为折叠行里的「思考 Ns」提示,不值得为此接精确计时。
-        t.thoughtSeconds += Math.round(b.text.length / 40);
+        t.thoughtSeconds += b.ms != null ? Math.round(b.ms / 1000) : Math.round(b.text.length / 40);
         continue;
       }
       if (b.type !== "tool_use") continue;
+      if (classifyTool) {
+        t[classifyTool(b)]++;
+        continue;
+      }
       switch (b.name) {
         case "Read":
         case "NotebookRead":
@@ -99,21 +113,23 @@ function tallyPhrases(tally: StepTally, t: (k: string, params?: Record<string, u
   return phrases;
 }
 
-/** steps 折叠行:语义小结 + 数字加粗。 */
+/** steps 折叠行:语义小结 + 数字加粗。classifyTool:工具 → 动作分类覆盖(codex 口径)。 */
 export function StepFoldRow({
   fold,
   messages,
   open,
   onToggle,
   t,
+  classifyTool,
 }: {
   fold: StepFold;
   messages: ClaudeMessage[];
   open: boolean;
   onToggle: () => void;
   t: (k: string, params?: Record<string, unknown>) => string;
+  classifyTool?: (b: ClaudeBlock) => ToolActionClass;
 }) {
-  const tally = tallySteps(messages, fold.start, fold.end);
+  const tally = tallySteps(messages, fold.start, fold.end, classifyTool);
   const phrases = tallyPhrases(tally, t);
   const thought =
     tally.thoughtSeconds >= 1 ? t("fold.thought", { d: formatDuration(tally.thoughtSeconds * 1000) }) : null;
@@ -144,6 +160,7 @@ export function WorkFoldRow({
   open,
   onToggle,
   t,
+  classifyTool,
 }: {
   fold: StepFold;
   /** 段内消息(供 tallySteps 步骤语义计数;缺省则只显时长 + edits)。 */
@@ -151,10 +168,12 @@ export function WorkFoldRow({
   open: boolean;
   onToggle: () => void;
   t: (k: string, params?: Record<string, unknown>) => string;
+  /** 工具 → 动作分类覆盖(codex 口径)。 */
+  classifyTool?: (b: ClaudeBlock) => ToolActionClass;
 }) {
   const worked = formatDuration(fold.workedMs ?? 0);
   const edits = fold.edits;
-  const tally = messages ? tallySteps(messages, fold.start, fold.end) : null;
+  const tally = messages ? tallySteps(messages, fold.start, fold.end, classifyTool) : null;
   const phrases = tally ? tallyPhrases(tally, t) : [];
   const editsStr =
     edits && edits.files > 0

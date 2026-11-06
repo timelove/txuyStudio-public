@@ -165,13 +165,33 @@ class _ProjectsPageState extends State<ProjectsPage> {
         if (_error != null)
           Padding(padding: const EdgeInsets.all(24), child: Center(child: Text(_error!, style: const TextStyle(color: Mx.muted, fontSize: 13)))),
         if (projects != null)
-          for (final p in projects) _projectCard(p),
+          for (final p in _sortedProjects(projects)) _projectCard(p),
         ],
     ));
   }
 
+  /// 在线优先排序:有正在对话 tab 的项目最前,次之有在线(started)AI 会话,其余
+  /// 保持后端顺序(分桶拼接保序,与消息页/详情页同口径)。
+  List<ProjectInfo> _sortedProjects(List<ProjectInfo> src) {
+    final buckets = [for (var i = 0; i < 3; i++) <ProjectInfo>[]];
+    for (final p in src) {
+      buckets[p.hasBusyTab ? 0 : (p.hasLiveAiTab ? 1 : 2)].add(p);
+    }
+    return buckets.expand((b) => b).toList();
+  }
+
+  /// 卡片 chips 的展示序:busy > 在线 AI > 其余(chips 只显前 4 个,在线的优先占位)。
+  List<TabInfo> _chipTabs(ProjectInfo p) {
+    final buckets = [for (var i = 0; i < 3; i++) <TabInfo>[]];
+    for (final t in p.tabs) {
+      buckets[t.busy ? 0 : (t.isAi && t.started ? 1 : 2)].add(t);
+    }
+    return buckets.expand((b) => b).toList();
+  }
+
   Widget _projectCard(ProjectInfo p) {
-    final ai = p.firstAiTab;
+    final ai = p.resumeTab;
+    final chips = _chipTabs(p);
     return Card(
       child: InkWell(
         borderRadius: BorderRadius.circular(Mx.radiusLg),
@@ -221,22 +241,26 @@ class _ProjectsPageState extends State<ProjectsPage> {
                 child: Wrap(
                   spacing: 6, runSpacing: 4,
                   children: [
-                    for (final t in p.tabs.take(4))
+                    for (final t in chips.take(4))
                       Container(
                         padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                         decoration: BoxDecoration(
-                          color: t.isAi ? Mx.violetSoft : Mx.cardInner,
+                          // busy 的 chip 金色高亮(正在对话,一眼锁定);AI tab 紫;其余灰。
+                          color: t.busy ? Mx.accentSoft : (t.isAi ? Mx.violetSoft : Mx.cardInner),
                           borderRadius: BorderRadius.circular(Mx.radiusSm),
-                          border: Border.all(color: t.isAi ? Mx.violetBorder : Mx.borderSoft),
+                          border: Border.all(
+                              color: t.busy ? Mx.accent : (t.isAi ? Mx.violetBorder : Mx.borderSoft)),
                         ),
                         child: Text(
                           "${kindGlyph(t.kind)} ${t.title.isEmpty ? t.kind : t.title}",
-                          style: TextStyle(fontSize: 10, color: t.isAi ? Mx.violet : Mx.muted),
+                          style: TextStyle(
+                              fontSize: 10,
+                              color: t.busy ? Mx.accentBright : (t.isAi ? Mx.violet : Mx.muted)),
                           overflow: TextOverflow.ellipsis,
                         ),
                       ),
-                    if (p.tabs.length > 4)
-                      Text("+${p.tabs.length - 4}", style: const TextStyle(fontSize: 10, color: Mx.faint)),
+                    if (chips.length > 4)
+                      Text("+${chips.length - 4}", style: const TextStyle(fontSize: 10, color: Mx.faint)),
                   ],
                 ),
               ),

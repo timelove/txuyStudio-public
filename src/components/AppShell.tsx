@@ -448,6 +448,10 @@ export function AppShell({
         if (pending?.provider === "codex") {
           t.setResumeSessionId(pending.sessionId);
           pendingResumeRef.current.delete(key);
+        } else if (!manualAddedTabIdsRef.current.has(tabId)) {
+          // hydrate 恢复的 codex tab:首启默认接续本 cwd 最近一条历史会话(与 claude 同构,
+          // 见 ClaudeTransport.startSession;拉取/认领/降级逻辑在 transport.send 首轮)。
+          t.enableAutoResumeLatest();
         }
         pool.set(key, t);
       } else {
@@ -658,9 +662,9 @@ export function AppShell({
         title: titleOverride ?? SHELL_KIND_META[kind].defaultTitle,
         ...(cwd ? { cwd } : {}),
       };
-      // 手动新建的 claude tab 记入集合:首启不自动恢复最近会话(用户点「新建」期望全新话题;
-      // hydrate 恢复的 tab 不经过这里,才享受默认恢复)。
-      if (kind === "claudepane") manualAddedTabIdsRef.current.add(newTab.id);
+      // 手动新建的 claude/codex tab 记入集合:首启不自动恢复最近会话(用户点「新建」期望全新
+      // 话题;hydrate 恢复的 tab 不经过这里,才享受默认恢复)。
+      if (kind === "claudepane" || kind === "codexpane") manualAddedTabIdsRef.current.add(newTab.id);
       // 用领域纯函数 addTab 追加并设 active。
       const next = addTab(cur, paneId, newTab);
       commitTree(projectId, next);

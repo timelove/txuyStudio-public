@@ -18,6 +18,10 @@ import type { ClaudeBlock, ClaudeMessage } from "./claudeStream";
  *  签名严格匹配:`(cmd: string) => "read"|"search"|"list"|"run"|"other"` */
 export type CommandAction = (cmd: string) => "read" | "search" | "list" | "run" | "other";
 
+/** 工具动作分类(read/search/list/fetch/run/use),claude 内置口径与 codex 口径共用
+ *  (tallySteps / codexFolds 的分类器都产出它)。 */
+export type ToolActionClass = "read" | "search" | "list" | "fetch" | "run" | "use";
+
 /** 单个 fold 段。kind 区分 steps(连续 quick step 折叠) / work(整段已完成 turn 折叠)。 */
 export type StepFold = {
   kind: "steps" | "work";
@@ -53,6 +57,15 @@ export type ComputeFoldsOptions = {
   threshold?: number;
   /** work fold 最小 turn durationMs(默认 0;本阶段先不做 work fold,留接口)。 */
   workMinMs?: number;
+  /** quick step 判定覆盖(claude 默认按内置工具名表;codex 传 codex 工具名口径)。
+   *  签名与 isQuickStep 一致(msg 参数仅为同构,codex 实现不消费)。 */
+  quickStepOf?: (msg: ClaudeMessage, block: ClaudeBlock, commandAction: CommandAction) => boolean;
+  /** work fold 轮时长来源覆盖(默认取 answer 消息 durationMs;codex 无逐消息耗时,
+   *  传 timestamp 差口径)。返回 null/非正数 → 该轮不折。 */
+  workedMsOf?: (messages: ClaudeMessage[], answerIdx: number, promptIdx: number) => number | null;
+  /** work fold 编辑统计覆盖(默认 claude 工具名口径;codex 编辑走 shell 命令无结构化
+   *  diff item,传 () => undefined 不显编辑段)。 */
+  editsOf?: (messages: ClaudeMessage[], start: number, end: number) => StepFold["edits"] | undefined;
 };
 
 export type ComputeFoldsResult = {
@@ -115,15 +128,6 @@ export function isQuickStep(
   return false;
 }
 
-/** 单 message 是否全是 quick step(整条消息只有一个 block 且 quick)。 */
-function isMessageAllQuick(
-  msg: ClaudeMessage,
-  commandAction: CommandAction,
-): boolean {
-  if (msg.blocks.length === 0) return false;
-  return msg.blocks.every((b) => isQuickStep(msg, b, commandAction));
-}
-
 /** 派生 steps 折叠。
  *  算法:从 i=0 扫到 N-1,遇 first quick start → 找连续 quick 段长度 ≥ threshold,
  *  生成一个 StepFold;否则散点不折叠。 */
@@ -131,13 +135,19 @@ function deriveStepFolds(
   messages: ClaudeMessage[],
   commandAction: CommandAction,
   threshold: number,
+  quickStepOf?: (msg: ClaudeMessage, block: ClaudeBlock, commandAction: CommandAction) => boolean,
 ): StepFold[] {
+  const quick = quickStepOf ?? isQuickStep;
+  const isAllQuick = (m: ClaudeMessage): boolean => {
+    if (m.blocks.length === 0) return false;
+    return m.blocks.every((b) => quick(m, b, commandAction));
+  };
   const folds: StepFold[] = [];
   let i = 0;
   while (i < messages.length) {
     const m = messages[i]!;
     // 跳过 non-quick / streaming
-    if (m.streaming || !isMessageAllQuick(m, commandAction)) {
+    if (m.streaming || !isAllQuick(m)) {
       i++;
       continue;
     }
@@ -145,7 +155,7 @@ function deriveStepFolds(
     let j = i + 1;
     while (j < messages.length) {
       const mj = messages[j]!;
-      if (mj.streaming || !isMessageAllQuick(mj, commandAction)) break;
+      if (mj.streaming || !isAllQuick(mj)) break;
       j++;
     }
     const length = j - i;
@@ -169,8 +179,8 @@ export function computeFolds(
     return { rows, stepFolds: [], workFolds: [] };
   }
 
-  const stepFolds = deriveStepFolds(messages, options.commandAction, threshold);
-  const workFolds = deriveWorkFolds(messages);
+  const stepFolds = deriveStepFolds(messages, options.commandAction, threshold, options.quickStepOf);
+  const workFolds = deriveWorkFolds(messages, options.workedMsOf, options.editsOf);
 
   // 归属标记(扁平):段内每行都持有 fold 引用;渲染层据此决定「折叠行放哪、哪些行隐藏」。
   // work 段内的 steps 归属仍保留(work 展开后段内 quick steps 继续按 steps 收拢)。
@@ -202,7 +212,12 @@ export function computeFolds(
  * - 轮内含 plan 卡(exit_plan_mode)→ 从 plan 之后开始折(plan 卡本身必显,
  *   baocode PlanItem 同规则)。
  */
-function deriveWorkFolds(messages: ClaudeMessage[], workThreshold = 2): StepFold[] {
+function deriveWorkFolds(
+  messages: ClaudeMessage[],
+  workedMsOf?: (messages: ClaudeMessage[], answerIdx: number, promptIdx: number) => number | null,
+  editsOf?: (messages: ClaudeMessage[], start: number, end: number) => StepFold["edits"] | undefined,
+  workThreshold = 2,
+): StepFold[] {
   const folds: StepFold[] = [];
   // 1) 收集 prompt 索引:非 streaming 的 user 消息(appendUserMessage 乐观插入的那条;
   //    tool_result 的 user 行在 jsonl 里也会回显,但 applyEvent 的纯文本兜底分支只在
@@ -226,7 +241,9 @@ function deriveWorkFolds(messages: ClaudeMessage[], workThreshold = 2): StepFold
       }
     }
     if (answer <= prompt) continue;
-    const workedMs = messages[answer].durationMs;
+    // 轮时长:claude = result 回填的 answer.durationMs;codex 无逐消息耗时,传
+    // timestamp 差口径(answer 时刻 - prompt 时刻)。无时长信息不折(折了反而丢信息)。
+    const workedMs = workedMsOf ? workedMsOf(messages, answer, prompt) : (messages[answer].durationMs ?? null);
     if (workedMs == null || workedMs <= 0) continue;
     // 起点默认 prompt+1;轮内有 plan 卡则从 plan 之后折(plan 前的规划步骤保留展示)。
     let start = prompt + 1;
@@ -247,7 +264,7 @@ function deriveWorkFolds(messages: ClaudeMessage[], workThreshold = 2): StepFold
       if (nonThinking.length > 0) shown++;
     }
     if (shown < workThreshold) continue;
-    const edits = turnEdits(messages, start, answer);
+    const edits = editsOf ? editsOf(messages, start, answer) : turnEdits(messages, start, answer);
     folds.push({ kind: "work", start, end: answer - 1, workedMs, edits });
   }
   return folds;

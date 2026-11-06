@@ -83,6 +83,7 @@ async fn run_method(app: &AppHandle, method: &str, params: &Value) -> Result<Val
         "chat.send" => chat_send(app, params).await,
         "chat.interrupt" => chat_interrupt(app, params).await,
         "chat.permission" => chat_permission(app, params).await,
+        "chat.codexApproval" => chat_codex_approval(app, params).await,
 
         // —— AI pane 快捷指令(2026-10-26) ——
         // 手机上的「会话动作」(压缩/清空/新会话/切模型/重启/退出),替代桌面端 ⋯ 菜单。
@@ -324,7 +325,7 @@ fn chat_status(app: &AppHandle, params: &Value) -> Result<Value, String> {
             let session = by_project
                 .get(&project_id)
                 .and_then(|s| s.get(&tab_id));
-            let (started, busy, status, model, sid, effort) = match session {
+            let (started, busy, status, model, sid, effort, permission_mode) = match session {
                 Some(s) => {
                     let st = s.status.lock().ok().map(|g| g.clone()).unwrap_or(crate::claude::ClaudeStatus::Idle);
                     let busy = matches!(
@@ -335,14 +336,15 @@ fn chat_status(app: &AppHandle, params: &Value) -> Result<Value, String> {
                     let model = s.model.lock().ok().and_then(|g| g.clone());
                     let sid = s.claude_session_id.lock().ok().and_then(|g| g.clone());
                     // 启动 flag(不是运行时状态):手机快捷指令的「当前档」显示用。
-                    let effort = s
-                        .config
-                        .lock()
-                        .ok()
-                        .and_then(|g| g.effort.clone());
-                    (started, busy, status_label(&st), model, sid, effort)
+                    let cfg = s.config.lock().ok();
+                    let effort = cfg.as_ref().and_then(|g| g.effort.clone());
+                    let permission_mode = cfg
+                        .as_ref()
+                        .and_then(|g| Some(g.permission_mode.clone()))
+                        .filter(|s| !s.is_empty());
+                    (started, busy, status_label(&st), model, sid, effort, permission_mode)
                 }
-                None => (false, false, "idle", None, None, None),
+                None => (false, false, "idle", None, None, None, None),
             };
             // 后台任务快照(断线重连/进页补齐;实时由 backgroundTasksChanged 事件推)。
             let bg_tasks = session
@@ -355,6 +357,7 @@ fn chat_status(app: &AppHandle, params: &Value) -> Result<Value, String> {
                 "status": status,
                 "model": model,
                 "effort": effort,
+                "permissionMode": permission_mode,
                 "sessionId": sid,
                 "backgroundTasks": bg_tasks,
             }))
@@ -363,21 +366,21 @@ fn chat_status(app: &AppHandle, params: &Value) -> Result<Value, String> {
             let reg = app.state::<CodexRegistry>();
             let by_project = reg.by_project.lock().map_err(|e| e.to_string())?;
             let session = by_project.get(&project_id).and_then(|s| s.get(&tab_id));
-            let (started, busy, status, model, sid, reasoning) = match session {
+            let (started, busy, status, model, sid, reasoning, sandbox, permission) = match session {
                 Some(s) => {
                     let st = s.status.lock().ok().map(|g| g.clone()).unwrap_or(crate::codex::CodexStatus::Idle);
                     let busy = matches!(st, crate::codex::CodexStatus::Running);
                     let started = s.child.lock().map(|g| g.is_some()).unwrap_or(false);
                     let model = s.model.lock().ok().and_then(|g| g.clone());
                     let sid = s.codex_session_id.lock().ok().and_then(|g| g.clone());
-                    let reasoning = s
-                        .config
-                        .lock()
-                        .ok()
-                        .and_then(|g| g.reasoning_effort.clone());
-                    (started, busy, codex_status_label(&st), model, sid, reasoning)
+                    // 最近一轮实际用的参数:手机「权限/沙箱」面板的当前档显示。
+                    let cfg = s.config.lock().ok();
+                    let reasoning = cfg.as_ref().and_then(|g| g.reasoning_effort.clone());
+                    let sandbox = cfg.as_ref().map(|g| g.sandbox.clone()).filter(|s| !s.is_empty());
+                    let permission = cfg.as_ref().map(|g| g.permission.clone()).filter(|s| !s.is_empty());
+                    (started, busy, codex_status_label(&st), model, sid, reasoning, sandbox, permission)
                 }
-                None => (false, false, "idle", None, None, None),
+                None => (false, false, "idle", None, None, None, None, None),
             };
             Ok(json!({
                 "provider": "codex",
@@ -386,6 +389,8 @@ fn chat_status(app: &AppHandle, params: &Value) -> Result<Value, String> {
                 "status": status,
                 "model": model,
                 "reasoningEffort": reasoning,
+                "sandbox": sandbox,
+                "permission": permission,
                 "sessionId": sid,
             }))
         }
@@ -563,9 +568,12 @@ async fn chat_history(app: &AppHandle, params: &Value) -> Result<Value, String> 
             return Ok(json!({ "provider": "claude", "events": [], "total": 0 }));
         };
         let h = crate::claude::commands::read_claude_history_events(sid).await?;
+        // 手机路径裁剪:完整 message 单条可达数百 KB(工具 input/结果全文),400 条轻松数 MB。
+        // 只投影手机渲染消费的字段(见 slim_event_for_mobile),桌面回溯回填不受影响。
+        let events: Vec<_> = h.events.iter().map(crate::claude::commands::slim_event_for_mobile).collect();
         return Ok(json!({
             "provider": "claude",
-            "events": h.events,
+            "events": events,
             "total": h.total,
         }));
     }
@@ -676,9 +684,21 @@ async fn chat_send(app: &AppHandle, params: &Value) -> Result<Value, String> {
     // codex 每轮短命进程:model / reasoning / 新会话都是**本轮参数**,不是启动 flag
     // (与 claude 相反,见 chat_command 注释)。手机端把在快捷指令里选的这几项随每次
     // chat.send 带上,后端原样透传;不传 = 用 config.toml 默认 + 续接 live thread。
+    // sandbox/permission 同为每轮参数(2026-11-04 app-server per-turn override),手机
+    // 「权限/沙箱」面板选择随 send 带;不传 = 后端默认(workspace-write + ask-for-approval)。
     let model = params.get("model").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(|s| s.to_string());
     let reasoning = params
         .get("reasoningEffort")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    let sandbox = params
+        .get("sandbox")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    let permission = params
+        .get("permission")
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string());
@@ -690,7 +710,8 @@ async fn chat_send(app: &AppHandle, params: &Value) -> Result<Value, String> {
         tab_id,
         cwd,
         text,
-        None, // sandbox:默认 workspace-write
+        sandbox,
+        permission,
         model,
         reasoning,
         None, // resume_session_id
@@ -767,16 +788,18 @@ async fn chat_command(app: &AppHandle, params: &Value) -> Result<Value, String> 
             .await?;
             Ok(json!({ "ok": true, "command": command }))
         }
-        "model" | "effort" => {
+        "model" | "effort" | "mode" => {
             // `auto` = 恢复默认(不传该启动 flag)。手机端的档位列表里它有这一项,
             // 后端翻译成 None —— `--model auto` / `--effort auto` 都不是 claude 认的值。
+            // `mode` 是 `--permission-mode`(acceptEdits/plan/manual/bypassPermissions),
+            // 同为启动 flag,重启换;四档都是具体值,没有 auto 形态(直传)。
             let raw = req_str(params, "value")?;
             let value = if raw.eq_ignore_ascii_case("auto") { None } else { Some(raw) };
             restart_claude_with(app, &project_id, &tab_id, |mode, effort, model| {
-                if command == "model" {
-                    (mode, effort, value.clone())
-                } else {
-                    (mode, value.clone(), model)
+                match command.as_str() {
+                    "model" => (mode, effort, value.clone()),
+                    "effort" => (mode, value.clone(), model),
+                    _ => (value.clone(), effort, model),
                 }
             })
             .await
@@ -863,7 +886,7 @@ async fn restart_claude_with(
         project_id.to_string(),
         tab_id.to_string(),
         cwd,
-        mode,
+        mode.clone(),
         None, // allowed_tools:用项目持久化 allowlist
         None, // resume_session_id:走 AppState 持久化 sid 自动续接
         effort.clone(),
@@ -871,7 +894,13 @@ async fn restart_claude_with(
         None, // add_dirs
     )
     .await?;
-    Ok(json!({ "ok": true, "provider": "claude", "effort": effort, "model": model }))
+    Ok(json!({
+        "ok": true,
+        "provider": "claude",
+        "effort": effort,
+        "model": model,
+        "permissionMode": mode,
+    }))
 }
 
 /// `chat.models`:手机快捷指令里的模型/推理档候选(只读)。
@@ -1056,6 +1085,29 @@ async fn chat_permission(app: &AppHandle, params: &Value) -> Result<Value, Strin
         behavior,
         updated_input,
         message,
+    )
+    .await?;
+    Ok(json!({ "responded": true }))
+}
+
+/// `chat.codexApproval`:回 codex app-server 的实时审批决策(approval_requested 卡片)。
+///
+/// 与桌面 `respond_codex_approval` 同一条路径;`key` 是审批帧的 request key(手机端从
+/// `approval_requested` 事件的 `request.key` 取)。`approved` 直传布尔(decision 枚举由
+/// 后端按 method 代际分派,手机端不感知两代协议差异)。
+async fn chat_codex_approval(app: &AppHandle, params: &Value) -> Result<Value, String> {
+    guard_write(app)?;
+    let project_id = req_str(params, "projectId")?;
+    let tab_id = req_str(params, "tabId")?;
+    let key = req_str(params, "key")?;
+    let approved = params.get("approved").and_then(|v| v.as_bool()).unwrap_or(false);
+    crate::codex::commands::respond_codex_approval(
+        app.clone(),
+        project_id,
+        tab_id,
+        key,
+        approved,
+        None,
     )
     .await?;
     Ok(json!({ "responded": true }))

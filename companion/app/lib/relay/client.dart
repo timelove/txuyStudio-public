@@ -163,7 +163,13 @@ class RelayClient {
   }
 
   /// 密文请求(15s 超时;桌面端离线由 send_result 立即触发失败)。
-  Future<Map<String, dynamic>> request(String method, [Map<String, dynamic>? params]) {
+  Future<Map<String, dynamic>> request(String method, [Map<String, dynamic>? params]) async {
+    // 未连接立即失败:帧发出去也到不了中继(_send 静默丢帧),干等 15s 超时只会让
+    // 用户看到莫名其妙的「timeout」。典型场景:锁屏/切后台被系统掐了 WS,回前台
+    // 重连还没完成就点了发送。
+    if (state != RelayConnState.online || _ws == null) {
+      throw StateError("连接已断开,正在重连…");
+    }
     final id = "req-${++_reqSeq}";
     final completer = Completer<Map<String, dynamic>>();
     _pending[id] = completer;
@@ -176,7 +182,7 @@ class RelayClient {
     });
     return completer.future.timeout(const Duration(seconds: 15), onTimeout: () {
       _pending.remove(id);
-      throw TimeoutException("relay request $method");
+      throw TimeoutException("连接超时,请稍后重试");
     });
   }
 

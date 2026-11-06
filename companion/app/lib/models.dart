@@ -125,6 +125,24 @@ class ProjectInfo {
     }
     return null;
   }
+
+  /// 有正在对话的 tab(项目级置顶排序第一优先级)。
+  bool get hasBusyTab => tabs.any((t) => t.busy);
+
+  /// 有在线 AI 会话(busy 或 started;项目级置顶排序第二优先级)。
+  bool get hasLiveAiTab => tabs.any((t) => t.isAi && (t.busy || t.started));
+
+  /// 「继续对话」目标:优先正在对话的 AI tab,次之在线(started)的,没有则第一个
+  /// AI tab——手机上最想进的就是活跃会话,别让固定取首个把人带进冷会话。
+  TabInfo? get resumeTab {
+    for (final t in tabs) {
+      if (t.isAi && t.busy) return t;
+    }
+    for (final t in tabs) {
+      if (t.isAi && t.started) return t;
+    }
+    return firstAiTab;
+  }
 }
 
 /// `chat.status` 结果。
@@ -138,6 +156,15 @@ class ChatStatus {
   final String? effort;
   /// codex:`model_reasoning_effort` 当前值;claude 恒 null。
   final String? reasoningEffort;
+  /// claude:`--permission-mode` 当前值(acceptEdits/plan/manual/bypassPermissions);
+  /// codex 恒 null。启动 flag,手机快捷指令「当前档」显示用。
+  final String? permissionMode;
+  /// codex:最近一轮实际用的沙箱档(read-only/workspace-write/danger-full-access);
+  /// claude 恒 null。
+  final String? sandbox;
+  /// codex:最近一轮实际用的权限档(ask-for-approval/approve-for-me/full-access/read-only);
+  /// claude 恒 null。
+  final String? permission;
   final String? sessionId;
   /// claude:后台任务快照(taskId/taskType/description;断线重连/进页补齐,
   /// 实时由 backgroundTasksChanged 事件推)。codex 恒空。
@@ -150,6 +177,9 @@ class ChatStatus {
     this.model,
     this.effort,
     this.reasoningEffort,
+    this.permissionMode,
+    this.sandbox,
+    this.permission,
     this.sessionId,
     this.backgroundTasks = const [],
   });
@@ -161,6 +191,9 @@ class ChatStatus {
         model: j["model"],
         effort: j["effort"],
         reasoningEffort: j["reasoningEffort"],
+        permissionMode: j["permissionMode"],
+        sandbox: j["sandbox"],
+        permission: j["permission"],
         sessionId: j["sessionId"],
         backgroundTasks: [
           for (final t in (j["backgroundTasks"] as List<dynamic>? ?? const []))

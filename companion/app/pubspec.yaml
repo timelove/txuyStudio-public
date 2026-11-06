@@ -40,6 +40,10 @@ dependencies:
   cryptography: ^2.7.0
   # 中继 HTTP API(login/vault/devices/admin;web 上自动走 fetch,跨源靠中继 CORS)
   http: ^1.2.0
+  # 读取当前 App 版本,用于 GitHub Releases 更新比较
+  package_info_plus: ^8.3.1
+  # 手动更新:打开 GitHub Release / APK 下载页,由系统浏览器完成下载安装
+  url_launcher: ^6.3.1
   # 配对凭证 + 手机自身 deviceId 持久化
   shared_preferences: ^2.3.0
   # web 平台 API(location.hash 直达链接);dart:html 在 3.47 已 deprecated

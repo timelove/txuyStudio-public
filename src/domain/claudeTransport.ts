@@ -148,6 +148,40 @@ export class ClaudeTransport {
     this.cwd = cwd ?? null;
     this.registryKey = registryKey;
     if (registryKey) claudeStatusRegistry.register(registryKey, projectId, tabId);
+    this.loadPrefs();
+  }
+
+  // —— per-tab 启动参数持久化(localStorage)——
+  // mode/effort/model 都是启动 flag 标记(内存态),重开 tab / 重启应用即回默认,用户
+  // 选过的档丢失。tabId 在 pane tree 里稳定(state.json 落盘),按 (projectId, tabId)
+  // 存 localStorage 跨重启恢复(与 codexTransport 同款;坏数据静默忽略)。
+
+  private prefsKey(): string {
+    return `mx.claudePrefs.v1.${this.projectId}.${this.tabId}`;
+  }
+
+  private loadPrefs(): void {
+    try {
+      const raw = localStorage.getItem(this.prefsKey());
+      if (!raw) return;
+      const p = JSON.parse(raw) as { mode?: string; effort?: string; model?: string | null };
+      if (p.mode) this.mode = p.mode;
+      if (p.effort) this.effort = p.effort;
+      if (p.model !== undefined) this.model = p.model;
+    } catch {
+      // 坏 JSON / 写不进:忽略,走默认档。
+    }
+  }
+
+  private savePrefs(): void {
+    try {
+      localStorage.setItem(
+        this.prefsKey(),
+        JSON.stringify({ mode: this.mode, effort: this.effort, model: this.model }),
+      );
+    } catch {
+      // 写失败不致命:只影响下次打开的记忆。
+    }
   }
 
   /** 取当前权限模式(用户选择的,可能尚未生效到进程)。 */
@@ -180,6 +214,7 @@ export class ClaudeTransport {
    */
   setMode(mode: string): void {
     this.mode = mode;
+    this.savePrefs();
   }
 
   /** 当前 effort(供 UI 读)。undefined=auto(不传 --effort)。 */
@@ -202,6 +237,7 @@ export class ClaudeTransport {
   setEffort(level: string | undefined): void {
     this.effort = level;
     this.state = { ...this.state, meta: { ...this.state.meta, effort: level } };
+    this.savePrefs();
     this.emit();
   }
 
@@ -936,6 +972,7 @@ export class ClaudeTransport {
     // 传字面 "default" 不是合法值。其余别名(default/sonnet/opus/haiku/fable)或自定义 id 原样传。
     this.model = name === "default" ? null : name;
     this.state = { ...this.state, meta: { ...this.state.meta, model: name } };
+    this.savePrefs();
     this.emit();
     // 同步新 model 到后端(供独立窗口 detach 后 hydrateModel 读)。重启后 init 路径后端自写覆盖。
     void this.syncModelToBackend(name);
