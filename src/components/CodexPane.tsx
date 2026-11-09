@@ -30,7 +30,8 @@ import { statusFontSize } from "../settings";
 import { ShellMenu } from "./ShellMenu";
 import { SplitPaneButtons } from "./SplitPaneButtons";
 import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from "./ui/Popover";
-import { BottomToast } from "./ui/BottomToast";
+import { Toast } from "./ui/Toast";
+import { FleetIcon } from "./ui/FleetIcon";
 import { ContextMeter } from "./ui/ContextMeter";
 import { InteractivePanel } from "./InteractivePanel";
 import type { InteractiveRequest } from "../domain/interactive";
@@ -202,6 +203,8 @@ const CodexTabChip = memo(function CodexTabChip({
   const { t } = useTranslation();
   const transport = session.kind === "codexpane" ? getCodexTransport(session.id) : undefined;
   const kind = useTabSummary(transport, shellRunning);
+  // Fleet Worker 徽标:tab 名为 worktree 分支名(fleet/<taskId>),与 ClaudeTabChip 同口径。
+  const isFleet = session.name.startsWith("fleet/");
   return (
         <TabsTrigger asChild value={session.id}>
           <div
@@ -211,6 +214,9 @@ const CodexTabChip = memo(function CodexTabChip({
                 : "text-[var(--mx-text-dim)] hover:text-[var(--mx-text)]"
             }`}
           >
+            {isFleet && (
+              <FleetIcon className="h-3 w-3 text-[#f59e0b]" />
+            )}
             <span className="min-w-0 max-w-[180px] truncate text-[length:var(--mx-ui-fs-sm)] font-[600]">{t(session.name)}</span>
             <TabStatusDot kind={kind} />
             {showClose && onCloseTab && (
@@ -1075,6 +1081,27 @@ export function CodexPane(props: CodexPaneProps) {
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
   }, [focused]);
+
+  // —— 审批坞卡全局快捷键 Ctrl+F1/F2(2026-11-06 用户要求,与 ClaudePane 同款)——
+  // pane focused 时 window 域监听,焦点在哪都生效。codex 行只有两个:允许一次/拒绝
+  // (无「总是允许」——app-server 协议无会话级批准支撑,见卡注释),故 F2=拒绝。
+  // 无待审批时放行不拦截。
+  const pendingApprovalRef = useRef(state?.pendingApproval);
+  pendingApprovalRef.current = state?.pendingApproval;
+  useEffect(() => {
+    if (!focused) return;
+    const handler = (e: KeyboardEvent) => {
+      if (!e.ctrlKey || e.altKey || e.shiftKey || e.metaKey) return;
+      const m = e.code.match(/^F([12])$/);
+      if (!m) return;
+      const pa = pendingApprovalRef.current;
+      if (!pa) return;
+      e.preventDefault();
+      getCodexTransportRef.current(activeTabId).respondApproval(pa.key, m[1] === "1");
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [focused, activeTabId]);
 
   // -- 会话时长:首次消息记起点;显示走 ElapsedText 本地 tick(不每秒重渲染整个 pane) --
   const [sessionStart, setSessionStart] = useState<number | null>(null);
@@ -2348,9 +2375,9 @@ export function CodexPane(props: CodexPaneProps) {
               </div>
             </DialogLike>
             {unsupportedMsg && (
-              <BottomToast tone="warning" onClose={() => setUnsupportedMsg(null)}>
+              <Toast tone="warning" onClose={() => setUnsupportedMsg(null)}>
                 {unsupportedMsg}
-              </BottomToast>
+              </Toast>
             )}
     </article>
   );

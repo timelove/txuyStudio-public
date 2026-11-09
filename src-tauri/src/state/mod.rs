@@ -6,6 +6,6 @@ pub mod commands;
 pub mod persistence;
 
 pub use txuy_core::state::{
-    AppSnapshot, AppState, PaneNode, ProjectRecord, WindowBounds, archive_recent,
+    AppSnapshot, AppState, FleetWorkerData, PaneNode, ProjectRecord, WindowBounds, archive_recent,
     collect_tab_ids, default_pane_tree, now_ms, set_active_for_window,
 };

@@ -1,4 +1,4 @@
-# 带 updater 签名的打包入口:注入 TAURI_SIGNING_PRIVATE_KEY 后跑 tauri build。
+﻿# 带 updater 签名的打包入口:注入 TAURI_SIGNING_PRIVATE_KEY 后跑 tauri build。
 # 私钥约定(PROGRESS #108):仅本机 ~/.tauri/txuystudio.key,密码空(--ci 生成),
 # 绝不进仓库/公开 mirror;公钥已嵌 tauri.conf.json。
 # **私钥丢失勿重新生成密钥对**——会使已发版用户更新验签全部失败,只能从备份恢复。

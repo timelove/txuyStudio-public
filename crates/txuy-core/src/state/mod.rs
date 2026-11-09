@@ -94,6 +94,34 @@ pub struct ProjectRecord {
     /// 兼容旧 state.json 缺字段,无需迁移。
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub claude_tab_sessions: HashMap<String, String>,
+    /// Fleet Worker(worktree 隔离的 AI 并行会话)记录。worker = 自带 git worktree 的
+    /// claude/codex 会话:cwd 指向 worktree、分支 `fleet/<taskId>`、磁盘收拢在
+    /// `<项目根>-fleet/<taskId>`。空 Vec 不写盘(`skip_serializing_if`),旧 state.json
+    /// 缺字段 → `#[serde(default)]` 空数组,零迁移(同 `claude_allowed_tools` 先例)。
+    /// tabId 指向 pane tree 中的 worker tab;关 tab 后记录仍保留(tabId 置 None,可重新挂)。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fleet_workers: Vec<FleetWorkerData>,
+}
+
+/// 单个 Fleet Worker 的持久化记录(身份层,不含运行时状态)。
+///
+/// 运行时 busy 等状态读各引擎 registry;此处只存「这个 worker 是谁、在哪」。
+/// `id` 即 taskId,同时是 worktree 子目录名与分支后缀。与前端 `FleetWorker` 对齐(camelCase)。
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FleetWorkerData {
+    pub id: String,
+    pub project_id: String,
+    /// "claude" | "codex"
+    pub provider: String,
+    /// 分支名,固定 `fleet/<taskId>`
+    pub branch: String,
+    /// worktree 磁盘路径(项目外兄弟目录下)
+    pub worktree_path: String,
+    pub created_ms: u128,
+    /// 挂载的 tab id;None = tab 已关但 worker 记录保留(可重新挂载)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_id: Option<String>,
 }
 
 /// 原生窗口大小/位置,由 `save_window_bounds` 持久化、启动时 `restore_main_window_bounds` 还原。
@@ -274,6 +302,7 @@ mod tests {
             pane_tree: None,
             claude_allowed_tools: vec![],
             claude_tab_sessions: Default::default(),
+            fleet_workers: vec![],
         });
         snap.workspace_active.insert("workspace-2".into(), "p2".into());
         snap.recent_projects.push(ProjectRecord {
@@ -285,6 +314,7 @@ mod tests {
             pane_tree: None,
             claude_allowed_tools: vec![],
             claude_tab_sessions: Default::default(),
+            fleet_workers: vec![],
         });
 
         let json = serde_json::to_string(&snap).expect("serialize");
@@ -310,6 +340,7 @@ mod tests {
             pane_tree: None,
             claude_allowed_tools: vec![],
             claude_tab_sessions: Default::default(),
+            fleet_workers: vec![],
         };
         archive_recent(&mut snap, vec![rec("a", "D:\\a"), rec("b", "D:\\b")]);
         archive_recent(&mut snap, vec![rec("a2", "D:\\a")]);

@@ -332,17 +332,24 @@ pub fn extract_last_osc_cwd(bytes: &[u8]) -> Option<String> {
 /// 必须把 `(管道 -join ';')` 整体括号包住,让 -join 先于 + 求值。
 pub const PATH_REFRESH_PS: &str = r#"$env:Path += ';' + (( ([Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [Environment]::GetEnvironmentVariable('Path','User')) -split ';' | Where-Object { $_ -and ($_ -notin ($env:Path -split ';')) } | Select-Object -Unique ) -join ';')"#;
 
-/// PowerShell 片段:注入 `pnpm` wrapper function,绕过 volta Rust shim 在 PTY 下的 bug。
+/// PowerShell 片段:注入 `pnpm` wrapper function,经 `volta run` 修正版本解析。
 ///
-/// 背景:volta 的 `pnpm.exe`(Rust shim)执行 pnpm 入口(`volta which pnpm` 返回无扩展名路径)
-/// 时,在 ConPTY 环境下 spawn 的 cmd 找不到 `pnpm` -> 报「'pnpm' 不是内部或外部命令」。外部
-/// PowerShell 正常,仅 txuyStudio pane 复现 -- volta 侧 bug,PATH/PATHEXT/VOLTA_HOME 全一致也救不了。
+/// 背景(两代 bug):
+/// ① volta 1.x:`pnpm.exe`(Rust shim)在 ConPTY 下 spawn 的 cmd 找不到 `pnpm`,报
+///    「'pnpm' 不是内部或外部命令」;外部 PowerShell 正常。当年方案是 `volta which pnpm`
+///    解析入口加 `.cmd` 后缓存,绕开 shim。
+/// ② volta 2.0.2 起:`volta which` 语义变为报 **default image 落地路径**(不感知项目
+///    pin),且旧实现的 `$script:__pnpm` 缓存是进程级、cd 换目录不失效——两者叠加,
+///    pane 内 `pnpm` 永远拿到 default 版本,项目 `volta.pnpm` pin 完全失效(实测:
+///    项目 pin 12.18.0,pane 内恒输出 default 的 10.30.2;`volta run -- pnpm exec
+///    node -v` 才给出项目 pin 的 node)。
 ///
-/// 方案:`Get-Command volta` 检测 volta 存在才定义 function(不破坏用 npm 等其他方式装 pnpm 的用户)。
-/// 首次调用 `volta which pnpm` 解析入口、加 `.cmd`、缓存到 `$script:__pnpm`,后续直跑包 wrapper
-/// (`pnpm.cmd` 调 node pnpm.cjs),绕过 volta Rust shim。解析失败兜底 `pnpm.exe`(走 shim,罕见)。
-/// 只影响 pane 内 `pnpm` 命令;`pnpm.exe` 仍走 volta shim(用户可显式调用原 shim)。
-pub const PNPM_WRAPPER_PS: &str = r#"if (Get-Command volta -ErrorAction SilentlyContinue) { function pnpm { if (-not $script:__pnpm) { $e = (volta which pnpm 2>$null); if ($e) { $c = "$e.cmd"; if (Test-Path $c) { $script:__pnpm = $c } } }; if ($script:__pnpm) { & $script:__pnpm @args } else { pnpm.exe @args } } }"#;
+/// 方案:`volta run -- pnpm @args`。每次调用按**当前 cwd** 解析(项目 volta.pnpm /
+/// packageManager pin 优先,default 兜底),目录切换即时生效;volta run 直连 inventory
+/// 真实入口、不经 PATH 查找,ConPTY 下也不受 app PATH 快照缺失影响(① 的场景一并覆盖)。
+/// `Get-Command volta` 检测 volta 存在才定义 function(不破坏用 npm 等其他方式装 pnpm
+/// 的用户);`pnpm.exe` 仍可显式调用(走 shim)。
+pub const PNPM_WRAPPER_PS: &str = r#"if (Get-Command volta -ErrorAction SilentlyContinue) { function pnpm { volta run -- pnpm @args } }"#;
 
 /// PowerShell prompt hook：每次 prompt 渲染前输出不可见 OSC 标记，前端 transport 用它记录实时 cwd。
 ///

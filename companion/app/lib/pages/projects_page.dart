@@ -251,13 +251,30 @@ class _ProjectsPageState extends State<ProjectsPage> {
                           border: Border.all(
                               color: t.busy ? Mx.accent : (t.isAi ? Mx.violetBorder : Mx.borderSoft)),
                         ),
-                        child: Text(
-                          "${kindGlyph(t.kind)} ${t.title.isEmpty ? t.kind : t.title}",
-                          style: TextStyle(
-                              fontSize: 10,
-                              color: t.busy ? Mx.accentBright : (t.isAi ? Mx.violet : Mx.muted)),
-                          overflow: TextOverflow.ellipsis,
-                        ),
+                        child: t.isFleet
+                            ? Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  const Icon(Icons.call_split, size: 11, color: Mx.warning),
+                                  const SizedBox(width: 3),
+                                  Flexible(
+                                    child: Text(
+                                      t.title.isEmpty ? t.kind : t.title,
+                                      style: TextStyle(
+                                          fontSize: 10,
+                                          color: t.busy ? Mx.accentBright : (t.isAi ? Mx.violet : Mx.muted)),
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                  ),
+                                ],
+                              )
+                            : Text(
+                                "${kindGlyph(t.kind)} ${t.title.isEmpty ? t.kind : t.title}",
+                                style: TextStyle(
+                                    fontSize: 10,
+                                    color: t.busy ? Mx.accentBright : (t.isAi ? Mx.violet : Mx.muted)),
+                                overflow: TextOverflow.ellipsis,
+                              ),
                       ),
                     if (chips.length > 4)
                       Text("+${chips.length - 4}", style: const TextStyle(fontSize: 10, color: Mx.faint)),

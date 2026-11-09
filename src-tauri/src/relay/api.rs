@@ -97,6 +97,22 @@ async fn run_method(app: &AppHandle, method: &str, params: &Value) -> Result<Val
         // 输入通道 + 风险确认,v1 明确不做(见设计文档「已知取舍:shell 只读」)。
         "pty.tail" => pty_tail(app, params),
 
+        // —— Fleet Worker 总览(2026-11-09) ——
+        // 手机端拉某项目的 worker 列表(记录 + 实时 diff 统计)。只读,不入 guard_write;
+        // create/merge/remove 等写操作 v1 不暴露到手机(桌面 FleetPanel 做,带 preview
+        // + 二次确认,手机上一键合并太危险)。worker tab 本身在 projects.list 里已作为
+        // 普通 AI tab 出现(title=分支名,手机可识别可聊);本方法补的是 pane 树里没有
+        // 的信息:未挂 tab 的 worker、diff 统计、worktree 孤儿检测。
+        "fleet.list" => {
+            let project_id = req_str(params, "projectId")?;
+            let views = crate::fleet::commands::list_fleet_workers(
+                app.state::<AppState>(),
+                project_id,
+            )
+            .await?;
+            serde_json::to_value(views).map_err(|e| e.to_string())
+        }
+
         // AI pane 的快捷指令已由上方 `chat.command` 承担(会话动作语义)。协议文档里的
         // `commands.run{tabId,text}` 是「往 shell 敲命令」,v1 明确不做远程输入(见 pty.tail
         // 注释三条理由),`quickCommands.*` 的自定义指令库也留到后续 —— 继续显式回错。

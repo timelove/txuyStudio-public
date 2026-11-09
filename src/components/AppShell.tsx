@@ -53,12 +53,23 @@ import { CODEX_PROVIDER_CHANGED_EVENT } from "../domain/codexProviders";
 import { CodexTransport } from "../domain/codexTransport";
 import { useCodexStatuses } from "../domain/codexStatusRegistry";
 import { ShellRunTransport } from "../domain/shellRunTransport";
+import {
+  createFleetWorker,
+  fleetPaneCwd,
+  listFleetWorkers,
+  setFleetWorkerTab,
+  type FleetWorkerView,
+} from "../domain/fleet";
+import { ShellMenuExtrasContext, type ShellMenuExtraItem } from "../domain/shellMenuExtras";
 import { ProjectColumn } from "./ProjectColumn";
 import { ShellSidebar } from "./ShellSidebar";
 import { StatusBar } from "./StatusBar";
 import { TopProjectBar } from "./TopProjectBar";
 import { SettingsPage, type SettingsTab } from "./SettingsModal";
 import { InstallPromptModal } from "./InstallPromptModal";
+import { Toast } from "./ui/Toast";
+import { FleetIcon } from "./ui/FleetIcon";
+import { FleetCreateDialog } from "./FleetCreateDialog";
 
 type AppShellProps = {
   projects: ProjectSnapshot[];
@@ -229,6 +240,10 @@ export function AppShell({
   // 安装提示模态内容(TUI 工具未安装 / yazi 缺依赖)。null=不显示。
   const [installPrompt, setInstallPrompt] = useState<PromptSpec | null>(null);
 
+  // AI tab 限额提示(每工作目录每 provider 限 1 个 claudepane/codexpane tab;超限建 tab
+  // 被拒时弹)。null=不显示;4s 自动消失 + ✕ 手动关。
+  const [aiLimitToast, setAiLimitToast] = useState<string | null>(null);
+
   // git 分支缓存:rootPath → branch(null=已查且非 git;undefined=未查)。按项目根去重。
   const [gitBranchByRoot, setGitBranchByRoot] = useState<Record<string, string | null | undefined>>({});
 
@@ -249,11 +264,18 @@ export function AppShell({
   // 不在集合里的 claude tab = hydrate 恢复的上次会话 tab → getClaudeTransport 建池时启用
   // 「默认恢复最近会话」(enableAutoResumeLatest,见 ClaudeTransport.startSession)。
   const manualAddedTabIdsRef = useRef<Set<string>>(new Set());
+  // tabId → tab.cwd 映射(仅记有自定义 cwd 的 tab):transport 池化函数建实例时优先读
+  // tab 自身 cwd(Fleet Worker 的 worktree、SessionBrowser 恢复的异 cwd 会话),无则回退
+  // 项目根。tab.cwd 存在 pane tree 里,但池化函数签名只拿 (projectId, paneId, tabId),
+  // 不方便每次遍历树——此映射在树变化处(commitTree)全量重建,读侧 O(1)。
+  // 没有 pendingResume 注入时(SessionBrowser 恢复走了 pending,不会走到这里)兜底用。
+  const tabCwdsRef = useRef<Map<string, string>>(new Map());
 
   // pane 实际尺寸(由 TerminalPane 的 ResizeObserver 上报,按 pane 复合键存):供分屏方向自适应。
   const paneRectsRef = useRef<Map<string, { width: number; height: number }>>(new Map());
 
-  // 新项目进来时补建空树(open_project 后)。
+  // 新项目进来时补建空树(open_project 后);同时把 hydrate 树里的 tab cwd 灌进
+  // tabCwdsRef(commitTree 只覆盖运行期树变更,hydrate 初始树不走 commitTree)。
   useEffect(() => {
     setTreesByProject((prev) => {
       let changed = false;
@@ -262,6 +284,9 @@ export function AppShell({
         if (!next[p.id]) {
           next[p.id] = p.workspace.paneTree;
           changed = true;
+        }
+        for (const tab of listPanes(p.workspace.paneTree).flatMap((pane) => pane.tabs)) {
+          if (tab.cwd) tabCwdsRef.current.set(tab.id, tab.cwd);
         }
       }
       return changed ? next : prev;
@@ -395,7 +420,8 @@ export function AppShell({
         // registryKey 传给 transport,使 emit 出口据此上报 summary 到 claudeStatusRegistry(供
         // StatusBar 跨 tab 汇总);paneId 由 transport 创建后补全(setRegistryPaneId)。
         const pending = pendingResumeRef.current.get(key);
-        const cwd = pending?.provider === "claude" ? pending.cwd : rootPath;
+        // cwd 优先级:显式恢复注入 > tab 自身 cwd(Fleet Worker worktree 等) > 项目根。
+        const cwd = pending?.provider === "claude" ? pending.cwd : (tabCwdsRef.current.get(tabId) ?? rootPath);
         t = new ClaudeTransport(projectId, tabId, cwd, key);
         t.setRegistryPaneId(paneId);
         if (pending?.provider === "claude") {
@@ -442,7 +468,8 @@ export function AppShell({
       if (!t) {
         const rootPath = projects.find((p) => p.id === projectId)?.rootPath;
         const pending = pendingResumeRef.current.get(key);
-        const cwd = pending?.provider === "codex" ? pending.cwd : rootPath;
+        // cwd 优先级同 getClaudeTransport:显式恢复注入 > tab 自身 cwd > 项目根。
+        const cwd = pending?.provider === "codex" ? pending.cwd : (tabCwdsRef.current.get(tabId) ?? rootPath);
         t = new CodexTransport(projectId, tabId, cwd, key);
         t.setRegistryPaneId(paneId);
         if (pending?.provider === "codex") {
@@ -465,10 +492,54 @@ export function AppShell({
   /** 把某项目的新 tree 写入本地 + 落盘后端。 */
   const commitTree = useCallback((projectId: ProjectId, next: PaneNode) => {
     setTreesByProject((prev) => ({ ...prev, [projectId]: next }));
+    // 重建该项目 tabId→cwd 映射(tabCwdsRef 只记非空 cwd;跨项目 tabId 天然唯一:
+    // nextId("tab") 全局递增 + hydrate 的 tab id 来自各自 state 树,互不冲突)。
+    // 先清该项目旧项再写入新项,防关闭 tab 后映射残留。
+    for (const tab of listPanes(next).flatMap((p) => p.tabs)) {
+      if (tab.cwd) tabCwdsRef.current.set(tab.id, tab.cwd);
+      else tabCwdsRef.current.delete(tab.id);
+    }
     invoke("save_pane_tree", { projectId, paneTree: next }).catch((err) => {
       console.warn("[AppShell] save_pane_tree failed:", err);
     });
   }, []);
+
+  /**
+   * AI tab 限额:同一工作目录每 provider(claude/codex)只允许 1 个自渲染 AI tab。
+   *
+   * 口径:tab 的 cwd 即会话工作目录——项目根(主仓会话)或 fleet worktree(worker 会话,
+   * 其 tab cwd=worktree 路径,自身占该 worktree 的额度,天然覆盖「fleet pane 也不能再开
+   * 同目录第二个 AI」)。要并行 → Fleet Worker 建新 worktree(每个 worker 一个目录一个
+   * 会话,互不挤占)。spawnFleetTab 不经过此判定(fleet 本身就是并行逃生阀)。
+   * 归一:大小写与尾部斜杠(Windows 路径不区分大小写)。无 cwd 的 AI tab 按项目根归类。
+   */
+  const aiTabLimitExceeded = useCallback(
+    (projectId: ProjectId, kind: ShellKind, cwd: string | undefined | null): boolean => {
+      if (kind !== "claudepane" && kind !== "codexpane") return false;
+      const tree = treesByProject[projectId];
+      if (!tree) return false;
+      const rootPath = projects.find((p) => p.id === projectId)?.rootPath ?? "";
+      const norm = (d: string | undefined | null) =>
+        (d ?? rootPath).replace(/[\\/]+$/, "").toLowerCase();
+      const want = norm(cwd);
+      for (const tab of listPanes(tree).flatMap((p) => p.tabs)) {
+        if (tab.shellKind !== kind) continue;
+        if (norm(tab.cwd) === want) return true;
+      }
+      return false;
+    },
+    [treesByProject, projects],
+  );
+
+  /** AI 限额 toast:置消息 + 4s 自动消失(先清旧计时器,重复触发时重新计时)。 */
+  const showAiLimitToast = useCallback((msg: string) => {
+    setAiLimitToast(msg);
+  }, []);
+  useEffect(() => {
+    if (!aiLimitToast) return;
+    const timer = window.setTimeout(() => setAiLimitToast(null), 4000);
+    return () => window.clearTimeout(timer);
+  }, [aiLimitToast]);
 
   /**
    * 拖拽分屏分隔线调比例。commit=false(拖拽中):只更新内存态 treesByProject,不刷后端
@@ -629,21 +700,28 @@ export function AppShell({
       if (!(await ensureToolAndDeps(kind))) return; // TUI 未装(含 yazi+依赖合并提示)→ 弹模态,不分屏。
       const cur = treesByProject[projectId];
       if (!cur) return;
-      // 新 pane 始终起在项目根目录:不继承当前活动 tab 的 cwd(避免「复制整个 shell」)。
+      // 新 pane 默认起在项目根目录:不继承当前活动 tab 的 cwd(避免「复制整个 shell」)。
+      // 例外:fleet pane 内分屏继承 worktree cwd(与 handleAddTab 同口径)。
       const rootPath = projects.find((p) => p.id === projectId)?.rootPath ?? "";
+      const cwd = fleetPaneCwd(cur, paneId) ?? rootPath;
+      // AI 限额:同 handleAddTab(分屏建的 AI pane 与新建 tab 同口径占用额度)。
+      if (aiTabLimitExceeded(projectId, kind, cwd)) {
+        showAiLimitToast(t(kind === "claudepane" ? "fleet.limit.claude" : "fleet.limit.codex"));
+        return;
+      }
       const newPaneId = nextId("pane");
       const newTabId = nextId("tab");
       const newPane: PaneLeaf = {
         type: "pane",
         id: newPaneId,
-        tabs: [createTab(newTabId, kind, SHELL_KIND_META[kind].defaultTitle, rootPath)],
+        tabs: [createTab(newTabId, kind, SHELL_KIND_META[kind].defaultTitle, cwd)],
         activeTabId: newTabId,
       };
       const next = splitPaneWithPane(cur, paneId, direction, newPane);
       commitTree(projectId, next);
       setFocused({ projectId, paneId: newPaneId });
     },
-    [treesByProject, projects, commitTree, ensureToolAndDeps],
+    [treesByProject, projects, commitTree, ensureToolAndDeps, aiTabLimitExceeded, showAiLimitToast, t],
   );
 
   // 新建 tab:在焦点 pane 追加一个指定 kind 的 tab 并设为 active。
@@ -653,9 +731,18 @@ export function AppShell({
       if (!(await ensureToolAndDeps(kind))) return; // TUI 未装(含 yazi+依赖合并提示)→ 弹模态,不建 tab。
       const cur = treesByProject[projectId];
       if (!cur) return;
-      // 新 tab 始终起在项目根目录:不继承当前活动 tab 的 cwd(避免「复制整个 shell」)。
+      // 新 tab 默认起在项目根目录:不继承当前活动 tab 的 cwd(避免「复制整个 shell」)。
+      // 例外:fleet pane(活动 tab 是 fleet/ worker)内新建的终端/AI tab 继承 worktree
+      // cwd——worker 旁边开的 shell/claude 天然落在同一 worktree。
       const rootPath = projects.find((p) => p.id === projectId)?.rootPath;
-      const cwd = cwdOverride ?? rootPath;
+      const cwd = cwdOverride ?? fleetPaneCwd(cur, paneId) ?? rootPath;
+      // AI 限额:同工作目录每 provider 仅 1 个 AI tab(超限弹 toast 引导 Fleet Worker)。
+      // SessionBrowser 恢复历史会话也走这里——同 cwd 恢复视为「回到该目录的唯一会话」,
+      // 提示复用现有 tab 即可,不另开。
+      if (aiTabLimitExceeded(projectId, kind, cwd)) {
+        showAiLimitToast(t(kind === "claudepane" ? "fleet.limit.claude" : "fleet.limit.codex"));
+        return;
+      }
       const newTab: PaneTab = {
         id: nextId("tab"),
         shellKind: kind,
@@ -672,7 +759,7 @@ export function AppShell({
       setFocused({ projectId, paneId });
       return newTab.id;
     },
-    [treesByProject, projects, commitTree, ensureToolAndDeps],
+    [treesByProject, projects, commitTree, ensureToolAndDeps, aiTabLimitExceeded, showAiLimitToast, t],
   );
 
   const handleResumeSession = useCallback(
@@ -748,6 +835,12 @@ export function AppShell({
         void invoke("kill_shell_command", { projectId, tabId }).catch(() => {});
         shellRunTransportsRef.current.delete(key);
       }
+      // Fleet Worker tab:解绑 worker 记录的 tabId(记录保留,FleetPanel 仍可合并/重挂)。
+      const fleetBinding = fleetTabBindingsRef.current.get(tabId);
+      if (fleetBinding && fleetBinding.projectId === projectId) {
+        fleetTabBindingsRef.current.delete(tabId);
+        void setFleetWorkerTab(projectId, fleetBinding.workerId, null).catch(() => {});
+      }
       const result = closeTab(cur, paneId, tabId);
       if (!result) return;
       const { tree, paneClosed } = result;
@@ -763,7 +856,7 @@ export function AppShell({
         setFocused({ projectId, paneId });
       }
     },
-    [treesByProject, focused, commitTree],
+    [treesByProject, focused, commitTree, setFleetWorkerTab],
   );
 
   // 关闭 pane:stop 其所有 tab 的 transport,树回填,焦点落邻居。
@@ -814,6 +907,17 @@ export function AppShell({
         }
         shellRunTransportsRef.current.delete(key);
       }
+      // Fleet Worker tab 整 pane 关闭:解绑该 pane 全部 tab 的 worker 记录(记录保留)。
+      for (const [tabId, binding] of Array.from(fleetTabBindingsRef.current.entries())) {
+        if (binding.projectId !== projectId) continue;
+        const pane = treesByProject[projectId]
+          ? findPaneByTabId(treesByProject[projectId], tabId)
+          : null;
+        if (pane?.id === paneId) {
+          fleetTabBindingsRef.current.delete(tabId);
+          void setFleetWorkerTab(projectId, binding.workerId, null).catch(() => {});
+        }
+      }
       paneRectsRef.current.delete(surfaceKey(projectId, paneId));
       const next = closePane(cur, paneId);
       if (!next) return;
@@ -823,7 +927,7 @@ export function AppShell({
         setFocused(fallback ? { projectId, paneId: fallback } : null);
       }
     },
-    [treesByProject, focused, commitTree],
+    [treesByProject, focused, commitTree, setFleetWorkerTab],
   );
 
   // 左栏新建 shell:在焦点 pane 上新建 tab(不再分屏)。焦点不在该项目则取其第一个 pane。
@@ -858,14 +962,16 @@ export function AppShell({
       if (!focused) return;
       const cur = treesByProject[focused.projectId];
       if (!cur) return;
-      // 新 pane 始终起在项目根目录:不继承当前活动 tab 的 cwd(避免「复制整个 shell」)。
+      // 新 pane 默认起在项目根目录:不继承当前活动 tab 的 cwd(避免「复制整个 shell」)。
+      // 例外:fleet pane 内快捷键分屏同样继承 worktree cwd(与 handleAddTab 同口径)。
       const rootPath = projects.find((p) => p.id === focused.projectId)?.rootPath ?? "";
+      const cwd = fleetPaneCwd(cur, focused.paneId) ?? rootPath;
       const newPaneId = nextId("pane");
       const newTabId = nextId("tab");
       const newPane: PaneLeaf = {
         type: "pane",
         id: newPaneId,
-        tabs: [createTab(newTabId, "shell", SHELL_KIND_META.shell.defaultTitle, rootPath)],
+        tabs: [createTab(newTabId, "shell", SHELL_KIND_META.shell.defaultTitle, cwd)],
         activeTabId: newTabId,
       };
       const next = splitPaneWithPane(cur, focused.paneId, dir, newPane);
@@ -1287,7 +1393,157 @@ export function AppShell({
     [treesByProject, activeProjectId, onSelectProject, handleSetActiveTab],
   );
 
+  // ── Fleet Worker(worktree 隔离的多 AI 并行会话)───────────────────────────
+  // 创建上下文:ShellMenu 点「Fleet Worker」时的目标 pane。菜单打开前 pane body
+  // onMouseDown 已 onFocusPane,故这里取 focused state 即目标 pane,各 pane 组件零透传。
+  // direction:入口来自分屏菜单时的用户所选方向(worker 独立成新 pane);
+  // 新建 tab 菜单入口为 undefined(worker tab 加入原 pane 的 tab 栈)。
+  const [fleetCreateTarget, setFleetCreateTarget] = useState<{ projectId: string; paneId: string; direction?: SplitDirection } | null>(null);
+  // 各项目已有 workers(对话框重名预显 + 「直接选现有」列表;后端校验为准)。打开对话框时拉取。
+  const [fleetExistingWorkers, setFleetExistingWorkers] = useState<FleetWorkerView[]>([]);
+  // 各项目 worker 记录数(StatusBar Fleet 徽标;0 = 无 worker 只显图标)。挂载时拉一次,
+  // 创建成功/面板刷新时增量更新,状态栏自身不轮询。
+  const [fleetWorkerCounts, setFleetWorkerCounts] = useState<Record<string, number>>({});
+  // tabId → { projectId, workerId }:关 tab 时反查该解绑的 worker 记录(置 tabId=null,
+  // 记录保留——worker 仍可从 FleetPanel 重新挂 tab 或直接合并)。创建流程绑定时写入。
+  const fleetTabBindingsRef = useRef<Map<string, { projectId: string; workerId: string }>>(new Map());
+
+  // 挂载时对全部项目拉一次 worker 数(徽标冷启动;新开窗口 hydrate 已有 worker 时可见)。
+  useEffect(() => {
+    let alive = true;
+    for (const p of projects) {
+      listFleetWorkers(p.id)
+        .then((ws) => {
+          if (alive) setFleetWorkerCounts((prev) => ({ ...prev, [p.id]: ws.length }));
+        })
+        .catch(() => {});
+    }
+    return () => {
+      alive = false;
+    };
+  }, [projects]);
+
+  // ShellMenu 附加菜单项(context 注入,ShellMenu 在 AI CLI 组末渲染)。
+  const shellMenuExtras = useMemo<ShellMenuExtraItem[]>(() => {
+    const projectId = focused?.projectId ?? activeProjectId;
+    const paneId = focused?.paneId;
+    if (!projectId || !paneId) return [];
+    return [
+      {
+        label: "fleet.menu.newWorker",
+        icon: <FleetIcon />,
+        accent: "#f59e0b",
+        onClick: (direction) => {
+          // 打开创建/挂载对话框:拉该项目已有 workers(重名预显 + 「直接选现有」列表,
+          // 失败降级为空)。direction 来自分屏菜单的用户所选方向(新建 tab 菜单为 undefined)。
+          setFleetCreateTarget({ projectId, paneId, direction });
+          listFleetWorkers(projectId)
+            .then((ws) => setFleetExistingWorkers(ws))
+            .catch(() => setFleetExistingWorkers([]));
+        },
+      },
+    ];
+  }, [focused, activeProjectId]);
+
+  // 在 target 上落一个 worker tab 并绑定记录(创建与「选现有」挂载共用):
+  // direction 有值按所选方向分新 pane(单 worker tab),否则加入原 pane tab 栈。
+  // freshCreate = 全新建 worktree(全新话题,不自动恢复);重挂现有 worker 传 false
+  // (transport 首启 autoResumeLatest 续接该 worktree 上次会话)。
+  const spawnFleetTab = useCallback(
+    async (
+      target: { projectId: string; paneId: string; direction?: SplitDirection },
+      worker: { id: string; provider: string; branch: string; worktreePath: string },
+      freshCreate: boolean,
+    ): Promise<string | undefined> => {
+      const kind: ShellKind = worker.provider === "claude" ? "claudepane" : "codexpane";
+      let tabId: string | undefined;
+      if (target.direction) {
+        // 分屏:新 pane 只含 worker tab(cwd=worktree,title=分支名),按所选方向从目标 pane 分出。
+        const cur = treesByProject[target.projectId];
+        if (!cur) return;
+        const newPaneId = nextId("pane");
+        tabId = nextId("tab");
+        // 全新建的 worker 是全新话题:不自动恢复最近会话(与 handleAddTab 同口径);
+        // 重挂现有 worker 走 autoResumeLatest 续接。
+        if (freshCreate) manualAddedTabIdsRef.current.add(tabId);
+        const newPane: PaneLeaf = {
+          type: "pane",
+          id: newPaneId,
+          tabs: [createTab(tabId, kind, worker.branch, worker.worktreePath)],
+          activeTabId: tabId,
+        };
+        const next = splitPaneWithPane(cur, target.paneId, target.direction, newPane);
+        commitTree(target.projectId, next);
+        setFocused({ projectId: target.projectId, paneId: newPaneId });
+      } else {
+        // freshCreate=false 的重挂不进 manualAddedTabIdsRef —— 但 handleAddTab 内部会写
+        // 该集合,故重挂路径绕过 handleAddTab 直接改树(与分屏路径同构)。
+        const cur = treesByProject[target.projectId];
+        if (!cur) return;
+        tabId = nextId("tab");
+        if (freshCreate) manualAddedTabIdsRef.current.add(tabId);
+        const next = addTab(cur, target.paneId, createTab(tabId, kind, worker.branch, worker.worktreePath));
+        commitTree(target.projectId, next);
+        setFocused({ projectId: target.projectId, paneId: target.paneId });
+      }
+      if (tabId) {
+        void setFleetWorkerTab(target.projectId, worker.id, tabId).catch(() => {});
+        fleetTabBindingsRef.current.set(tabId, { projectId: target.projectId, workerId: worker.id });
+      }
+      return tabId;
+    },
+    [treesByProject, commitTree],
+  );
+
+  // 对话框确认:后端建 worktree + 记录,成功后按入口建该 provider 的 AI tab
+  // (cwd 指 worktree、title 为分支名),再把 tabId 绑定到 worker 记录。
+  // 分屏菜单入口(target.direction 有值):按所选方向从目标 pane 分出新 pane,
+  // 新 pane 单含 worker tab;新建 tab 菜单入口:worker tab 加入原 pane 的 tab 栈。
+  const handleCreateFleetWorker = useCallback(
+    async (taskId: string, provider: "claude" | "codex"): Promise<string | undefined> => {
+      const target = fleetCreateTarget;
+      if (!target) return;
+      const record = await createFleetWorker(target.projectId, taskId, provider);
+      const tabId = await spawnFleetTab(target, record, true);
+      // 徽标 +1(乐观更新;面板下次打开会以真实列表覆盖)。
+      setFleetWorkerCounts((prev) => ({ ...prev, [target.projectId]: (prev[target.projectId] ?? 0) + 1 }));
+      return tabId;
+    },
+    [fleetCreateTarget, spawnFleetTab],
+  );
+
+  // 「直接选现有」:不建新 worktree。已挂 tab 的直接聚焦(切项目 + 聚焦 pane + 切活动
+  // tab,复用现有会话);未挂的在目标 pane 按 target 动线建 tab + 绑定,transport 首启
+  // autoResumeLatest 续接该 worktree 的上次会话。孤儿记录(worktree 目录已删)拒绝重挂。
+  const handleAttachFleetWorker = useCallback(
+    (worker: FleetWorkerView) => {
+      const target = fleetCreateTarget;
+      if (!target) return;
+      // 已挂且 tab 真在树里 → 直接聚焦;tabId 残留但 tab 已不在(异常路径未解绑)→ 降级重挂。
+      const attached = worker.tabId ? findPaneByTabId(treesByProject[target.projectId] ?? null, worker.tabId) : null;
+      if (worker.tabId && attached) {
+        handleFocusClaudeTab(target.projectId, worker.tabId);
+        return;
+      }
+      if (!worker.worktreeExists) {
+        // 孤儿:worktree 目录被外部删除,重挂无意义(会话 cwd 指向不存在的目录)。
+        console.warn("[AppShell] attach rejected: worktree missing", worker.id);
+        return;
+      }
+      void spawnFleetTab(target, worker, false);
+    },
+    [fleetCreateTarget, treesByProject, handleFocusClaudeTab, spawnFleetTab],
+  );
+
+  // FleetPanel 列表回报:更新该项目的 Fleet 徽标计数(打开面板/刷新/合并/丢弃后都会触发)。
+  const handleFleetWorkerCount = useCallback((projectId: string, count: number) => {
+    setFleetWorkerCounts((prev) => (prev[projectId] === count ? prev : { ...prev, [projectId]: count }));
+  }, []);
+
   return (
+    // ShellMenuExtrasContext:Fleet Worker 菜单项经 context 注入 ShellMenu(避免沿 9 个
+    // pane 组件透传 onFleetWorker)。范围 = 整个 shell(PaneSurface 各 pane 都在 main 内)。
+    <ShellMenuExtrasContext.Provider value={shellMenuExtras}>
     <main className="relative isolate grid h-screen min-h-0 grid-rows-[var(--mx-titlebar-h)_1fr_var(--mx-statusbar-h)] overflow-hidden bg-[var(--mx-bg)]">
       {/* 背景图层:main 加 relative+isolate 建立 stacking context,背景层 z-[-1] 沉到所有内容
           之下(之前 fixed + auto z-index 在某些情况下浮到内容之上)。absolute inset-0 充满 main,
@@ -1457,8 +1713,27 @@ export function AppShell({
         codexStatuses={codexStatuses}
         onFocusClaudeTab={handleFocusClaudeTab}
         onOpenSettings={openSettings}
+        onFocusFleetTab={handleFocusClaudeTab}
+        fleetWorkerCount={focusedProject ? (fleetWorkerCounts[focusedProject.id] ?? 0) : 0}
+        onFleetWorkerCount={handleFleetWorkerCount}
       />
       <InstallPromptModal prompt={installPrompt} onClose={() => setInstallPrompt(null)} />
+      {/* AI tab 限额 toast(每工作目录每 provider 限 1;超限引导 Fleet Worker)。
+          顶部偏下:比底部醒目、不挡输入框;文案较长可换行。 */}
+      {aiLimitToast && (
+        <Toast tone="warning" placement="top" onClose={() => setAiLimitToast(null)}>
+          {aiLimitToast}
+        </Toast>
+      )}
+      {/* Fleet Worker 创建对话框(ShellMenu Fleet 入口);target null 时不渲染。 */}
+      <FleetCreateDialog
+        target={fleetCreateTarget}
+        existingWorkers={fleetExistingWorkers}
+        onClose={() => setFleetCreateTarget(null)}
+        onCreate={handleCreateFleetWorker}
+        onAttach={handleAttachFleetWorker}
+      />
     </main>
+    </ShellMenuExtrasContext.Provider>
   );
 }

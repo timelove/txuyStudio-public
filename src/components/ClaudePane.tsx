@@ -16,7 +16,8 @@ import { computeFolds, type RowFold, type StepFold } from "../domain/stepFolds";
 import { classifyCommand } from "../lib/commandClassifier";
 import type { SettingsTab } from "./SettingsModal";
 import { Dialog, DialogContent, DialogTitle } from "./ui/Dialog";
-import { BottomToast } from "./ui/BottomToast";
+import { Toast } from "./ui/Toast";
+import { FleetIcon } from "./ui/FleetIcon";
 import { ContextMeter } from "./ui/ContextMeter";
 import { useTranslation } from "react-i18next";
 import type { ShellKind, SplitDirection } from "../domain/paneTree";
@@ -339,6 +340,10 @@ const ClaudeTabChip = memo(function ClaudeTabChip({
   // getClaudeTransport 是 AppShell 池化函数,同 tabId 返回同一实例,跨 render 稳定。
   const transport = session.kind === "claudepane" ? getClaudeTransport(session.id) : undefined;
   const kind = useTabSummary(transport, shellRunning, resolvedApprovals);
+  // Fleet Worker 徽标:tab 名为 worktree 分支名(fleet/<taskId>,创建流程显式设),加 git 分支
+  // 图标(FleetIcon SVG,琥珀色)与 ShellMenu/StatusBar 入口同色系,一眼区分哪个 tab 是
+  // worktree 隔离会话。
+  const isFleet = session.name.startsWith("fleet/");
   return (
         <TabsTrigger asChild value={session.id}>
           <div
@@ -348,6 +353,9 @@ const ClaudeTabChip = memo(function ClaudeTabChip({
                 : "text-[var(--mx-text-dim)] hover:text-[var(--mx-text)]"
             }`}
           >
+            {isFleet && (
+              <FleetIcon className="h-3 w-3 text-[#f59e0b]" />
+            )}
             <span className="min-w-0 max-w-[180px] truncate text-[length:var(--mx-ui-fs-sm)] font-[600]">{t(session.name)}</span>
             <TabStatusDot kind={kind} />
             {showClose && onCloseTab && (
@@ -1786,6 +1794,28 @@ export function ClaudePane(props: ClaudePaneProps) {
     return () => window.removeEventListener("keydown", handler);
   }, [focused]);
 
+  // —— 待批准卡全局数字快捷键 Ctrl+F1~F4(2026-11-06 用户要求)——
+  // pane focused 时 window 域监听,焦点在哪都生效(输入框有草稿也可):F1 批准本次 /
+  // F2 总是允许 / F3 拒绝 / F4 反馈修改(= 聚焦输入框,no-op)。与输入框内裸数字键
+  // (空草稿时)并存:Ctrl 系不冲突打字,语义一致走同一 triggerApprovalAction。
+  const triggerApprovalActionRef = useRef(triggerApprovalAction);
+  triggerApprovalActionRef.current = triggerApprovalAction;
+  const activeApprovalIdRef = useRef(activeApprovalId);
+  activeApprovalIdRef.current = activeApprovalId;
+  useEffect(() => {
+    if (!focused) return;
+    const handler = (e: KeyboardEvent) => {
+      if (!e.ctrlKey || e.altKey || e.shiftKey || e.metaKey) return;
+      const m = e.code.match(/^F([1-4])$/);
+      if (!m) return;
+      if (activeApprovalIdRef.current === null) return;
+      e.preventDefault();
+      triggerApprovalActionRef.current(Number(m[1]) - 1);
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [focused]);
+
   // —— 会话时长:首次出现消息记起点;显示走 ElapsedText 本地 tick(不每秒重渲染整个 pane)——
   const [sessionStart, setSessionStart] = useState<number | null>(null);
   useEffect(() => {
@@ -2692,23 +2722,19 @@ export function ClaudePane(props: ClaudePaneProps) {
                           });
                           return;
                         }
-                        // 待确认权限卡键盘流(见 activeApproval 注释):空输入 + 面板全关时
-                        // ←→ 移动卡上高亮、Enter 触发(空输入 Enter 本就无操作,拦截无损失;
-                        // ←→ 在空文本域里也无光标语义)。
+                        // 待确认权限卡快捷键(2026-11-06 收敛:只用快捷键,←→/Enter 高亮流废弃):
+                        // 空输入 + 面板全关时数字键 1-4 直触发对应动作(4=反馈修改=聚焦输入框,
+                        // 无操作);Ctrl+F1~F4 全局快捷键在 window 域另挂(activeApproval effect),
+                        // 焦点在哪都生效。
                         if (
                           activeApprovalId !== null &&
                           !input.trim() &&
                           !atOpen &&
                           !e.nativeEvent.isComposing
                         ) {
-                          if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+                          if (/^[1-4]$/.test(e.key) && !e.altKey && !e.ctrlKey && !e.metaKey) {
                             e.preventDefault();
-                            setApprovalFocusIdx((i) => (e.key === "ArrowRight" ? (i + 1) % 4 : (i + 3) % 4));
-                            return;
-                          }
-                          if (e.key === "Enter" && !e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey) {
-                            e.preventDefault();
-                            triggerApprovalAction(approvalFocusIdx);
+                            triggerApprovalAction(Number(e.key) - 1);
                             return;
                           }
                         }
@@ -3669,24 +3695,24 @@ export function ClaudePane(props: ClaudePaneProps) {
               </DialogContent>
             </Dialog>
             {compactError && !compactErrorDismissed && (
-              <BottomToast onClose={() => setCompactErrorDismissed(true)}>
+              <Toast onClose={() => setCompactErrorDismissed(true)}>
                 {t("claudepane.compactFailed", { error: compactError })}
-              </BottomToast>
+              </Toast>
             )}
             {rewindError && (
-              <BottomToast onClose={() => setRewindError(null)}>
+              <Toast onClose={() => setRewindError(null)}>
                 {rewindError}
-              </BottomToast>
+              </Toast>
             )}
             {retryFailedMsg && (
-              <BottomToast onClose={() => setRetryFailedMsg(null)}>
+              <Toast onClose={() => setRetryFailedMsg(null)}>
                 {retryFailedMsg}
-              </BottomToast>
+              </Toast>
             )}
             {exportToast && (
-              <BottomToast tone={exportToast.ok ? "warning" : "danger"} onClose={() => setExportToast(null)}>
+              <Toast tone={exportToast.ok ? "warning" : "danger"} onClose={() => setExportToast(null)}>
                 {exportToast.msg}
-              </BottomToast>
+              </Toast>
             )}
     </article>
   );

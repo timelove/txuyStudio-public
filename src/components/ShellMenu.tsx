@@ -1,5 +1,6 @@
 import type { ShellKind, SplitDirection } from "../domain/paneTree";
 import { NEW_SHELL_GROUPS, SHELL_KIND_META } from "../domain/shellKinds";
+import { useShellMenuExtras } from "../domain/shellMenuExtras";
 import { useTranslation } from "react-i18next";
 import { PopoverContent } from "./ui/Popover";
 
@@ -27,6 +28,9 @@ export function ShellMenu({
   splitDirection?: SplitDirection;
 }) {
   const { t } = useTranslation();
+  // 附加菜单项(Fleet Worker 入口):经 context 注入(AppShell Provide),未 Provide 时为空。
+  // 放在 AI CLI 组末尾渲染——Fleet Worker 本质是「worktree + AI tab」的组合动作,语义归属 AI 组。
+  const extras = useShellMenuExtras();
   return (
     <PopoverContent align="start" sideOffset={4} className="w-[132px]">
       {NEW_SHELL_GROUPS.map((group, gi) => (
@@ -56,6 +60,27 @@ export function ShellMenu({
               </button>
             );
           })}
+          {group.title === "AI CLI" &&
+            extras.map((item) => (
+              <button
+                key={item.label}
+                type="button"
+                className="flex w-full items-center gap-2 px-3 py-[4px] text-left text-[11px] text-[var(--mx-text)] hover:bg-[var(--mx-hover-bg)] cursor-pointer"
+                onMouseDown={(e) => e.stopPropagation()}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  item.onClick(splitDirection);
+                }}
+              >
+                <span
+                  className="mx-icon-tile grid h-4 w-4 place-items-center text-[10px] font-bold"
+                  style={{ background: item.accent, color: "#0b1020" }}
+                >
+                  {item.icon}
+                </span>
+                {t(item.label)}
+              </button>
+            ))}
         </div>
       ))}
     </PopoverContent>

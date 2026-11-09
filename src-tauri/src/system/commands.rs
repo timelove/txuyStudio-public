@@ -741,8 +741,13 @@ fn scan_claude_usage_file(
     };
     let path_key = path.to_string_lossy().into_owned();
     // 同文件内 message.id 去重(一轮多 block 行共享 id;跨文件 id 亦全局唯一,但按文件分桶
-    // 语义已够——同一会话只在一个文件)。
-    let mut seen: std::collections::HashSet<String> = Default::default();
+    // 语义已够——同一会话只在一个文件)。同 id 多行的 usage 是「中间值→最终值」递进:
+    // 首行 output 个位数、带 stop_reason 的末行才完整——「首行胜出」会低计 output,
+    // 对齐 cc-switch 择优:优先有 stop_reason 的行,否则 output 更大者。
+    // 实现:picked 暂存待聚合行(保序),seen 只记比较键(id→(picked 下标, stop, output)),
+    // 避免克隆整个 JSON 行。
+    let mut picked: Vec<serde_json::Value> = Vec::new();
+    let mut seen: std::collections::HashMap<String, (usize, bool, u64)> = Default::default();
     for line in std::io::BufReader::new(file).lines() {
         let line = match line {
             Ok(l) => l,
@@ -759,15 +764,47 @@ fn scan_claude_usage_file(
             Some(m) => m,
             None => continue,
         };
+        if !msg.get("usage").map(|u| u.is_object()).unwrap_or(false) {
+            continue;
+        }
+        let mid = msg.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string();
+        let n_stop = msg.get("stop_reason").is_some();
+        let n_out = msg.get("usage").and_then(|u| u.get("output_tokens")).and_then(|x| x.as_u64()).unwrap_or(0);
+        match seen.get_mut(&mid) {
+            // 已见:cc-switch 择优——新行有 stop_reason 而旧行没有,或双方同态但
+            // output 更大 → 替换;否则丢弃。
+            Some((idx, o_stop, o_out)) => {
+                let better = if n_stop && !*o_stop {
+                    true
+                } else if n_stop == *o_stop {
+                    n_out > *o_out
+                } else {
+                    false
+                };
+                if better {
+                    picked[*idx] = v;
+                    *o_stop = n_stop;
+                    *o_out = n_out;
+                }
+            }
+            // 首见:追加;seen 只记有 id 的行(无 id 行恒保留,不参与替换)。
+            None => {
+                if !mid.is_empty() {
+                    seen.insert(mid, (picked.len(), n_stop, n_out));
+                }
+                picked.push(v);
+            }
+        }
+    }
+    for v in picked {
+        let msg = match v.get("message") {
+            Some(m) => m,
+            None => continue,
+        };
         let usage = match msg.get("usage") {
             Some(u) if u.is_object() => u,
             _ => continue,
         };
-        // 去重:同一 message.id 的后续 block 行丢弃。
-        let mid = msg.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string();
-        if !mid.is_empty() && !seen.insert(mid) {
-            continue;
-        }
         let date = match v.get("timestamp").and_then(|t| t.as_str()).and_then(local_date_from_ts) {
             Some(d) => d,
             None => continue,
@@ -941,14 +978,17 @@ fn scan_request_log(days: u64) -> Result<Vec<RequestLogEntry>, String> {
 }
 
 /// claude 单文件请求日志:与 scan_claude_usage_file 同提取规则(assistant 行 + message.id
-/// 去重 + synthetic 过滤),但不聚合,逐条带 ts/sessionId。
+/// 择优去重 + synthetic 过滤),但不聚合,逐条带 ts/sessionId。
 fn scan_claude_request_log(path: &Path, cutoff_date: &str, out: &mut Vec<RequestLogEntry>) {
     use std::io::BufRead;
     let file = match std::fs::File::open(path) {
         Ok(f) => f,
         Err(_) => return,
     };
-    let mut seen: std::collections::HashSet<String> = Default::default();
+    // 同文件内 message.id 择优去重(规则同 scan_claude_usage_file):picked 暂存
+    // 逐条行(保序),seen 只记比较键(id→(picked 下标, stop, output))。
+    let mut picked: Vec<serde_json::Value> = Vec::new();
+    let mut seen: std::collections::HashMap<String, (usize, bool, u64)> = Default::default();
     for line in std::io::BufReader::new(file).lines() {
         let line = match line {
             Ok(l) => l,
@@ -965,14 +1005,46 @@ fn scan_claude_request_log(path: &Path, cutoff_date: &str, out: &mut Vec<Request
             Some(m) => m,
             None => continue,
         };
+        if !msg.get("usage").map(|u| u.is_object()).unwrap_or(false) {
+            continue;
+        }
+        let mid = msg.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string();
+        let n_stop = msg.get("stop_reason").is_some();
+        let n_out = msg.get("usage").and_then(|u| u.get("output_tokens")).and_then(|x| x.as_u64()).unwrap_or(0);
+        match seen.get_mut(&mid) {
+            // 已见:优先有 stop_reason 的行,同态取 output 更大者,否则丢弃。
+            Some((idx, o_stop, o_out)) => {
+                let better = if n_stop && !*o_stop {
+                    true
+                } else if n_stop == *o_stop {
+                    n_out > *o_out
+                } else {
+                    false
+                };
+                if better {
+                    picked[*idx] = v;
+                    *o_stop = n_stop;
+                    *o_out = n_out;
+                }
+            }
+            // 首见:追加;无 id 行恒保留。
+            None => {
+                if !mid.is_empty() {
+                    seen.insert(mid, (picked.len(), n_stop, n_out));
+                }
+                picked.push(v);
+            }
+        }
+    }
+    for v in picked {
+        let msg = match v.get("message") {
+            Some(m) => m,
+            None => continue,
+        };
         let usage = match msg.get("usage") {
             Some(u) if u.is_object() => u,
             _ => continue,
         };
-        let mid = msg.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string();
-        if !mid.is_empty() && !seen.insert(mid) {
-            continue;
-        }
         let ts = v.get("timestamp").and_then(|t| t.as_str()).unwrap_or("").to_string();
         let date = match ts.as_str().split_once('T').map(|(d, _)| d.to_string()) {
             Some(d) => d,

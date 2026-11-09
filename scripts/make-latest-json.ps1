@@ -1,4 +1,4 @@
-# make-latest-json.ps1
+﻿# make-latest-json.ps1
 # 从 tauri build 产物生成 tauri-plugin-updater 的 latest.json(发版时上传到 GitHub Release
 # 作为固定名资产,endpoints 指 releases/latest/download/latest.json)。
 #

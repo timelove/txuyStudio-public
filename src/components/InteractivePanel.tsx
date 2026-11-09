@@ -307,10 +307,9 @@ export function InteractivePanel({
                     }
                   >
                     {isApproval ? (
-                      /* approval 行即动作:左侧键帽数字对应 1-3 直选(question 才是复选框)。 */
-                      <span className="inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-sm border border-[var(--mx-border-strong)] font-mono text-[9px] font-bold text-[var(--mx-faint)]">
-                        {i + 1}
-                      </span>
+                      /* approval 行即动作:2026-11-06 收敛——数字键帽撤掉(键位提示只宣传
+                         Ctrl+F1~F4 全局快捷键;裸数字键仍有效但不引导)。question 保留复选框。 */
+                      <span className="w-3.5 shrink-0" />
                     ) : (
                       <span
                         className="inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-sm border"

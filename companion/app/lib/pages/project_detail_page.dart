@@ -12,6 +12,11 @@ import 'terminal_mirror_page.dart';
 ///
 /// 手机不模拟左右分割(小屏不可用),但**分组与顺序严格跟随桌面端**。只有 AI tab
 /// (claudepane/codexpane)可点进对话页;shell/test 置灰并说明原因。
+///
+/// Fleet Worker:worker tab 以 git 分支图标(Icons.call_split)徽标 + 「Fleet Worker」
+/// 副标题区分(它仍是普通 AI tab,点进去就是同一套对话页);页面底部另有 Fleet 总览
+/// 分节(`fleet.list`,含未挂 tab 的 worker 与 diff 统计,只读——合并/丢弃在桌面
+/// FleetPanel 做)。
 class ProjectDetailPage extends StatefulWidget {
   final RelayClient client;
   final ProjectInfo project;
@@ -33,6 +38,10 @@ class _ProjectDetailPageState extends State<ProjectDetailPage> {
   StreamSubscription<RelayConnState>? _connSub;
   StreamSubscription<Map<String, dynamic>>? _evtSub;
   Timer? _evtDebounce;
+
+  /// Fleet 总览(fleet.list):null=未拉/失败,[] = 无 worker,非空=列表。
+  /// 在线时与 _refresh 一起拉,失败静默(总览是 pane 树的补充,不挡主结构)。
+  List<FleetWorkerInfo>? _fleetWorkers;
 
   @override
   void initState() {
@@ -68,6 +77,8 @@ class _ProjectDetailPageState extends State<ProjectDetailPage> {
   }
 
   /// 刷新项目结构(桌面端可能刚分屏/新开 tab)。失败静默保留旧结构。
+  /// 同时拉 Fleet 总览(fleet.list;失败静默——旧桌面端没有该方法,unknown method 会被
+  /// 当普通错误吞掉,总览分节退化为「没有 worker」展示)。
   Future<void> _refresh() async {
     try {
       final resp = await widget.client.request("projects.list");
@@ -77,6 +88,15 @@ class _ProjectDetailPageState extends State<ProjectDetailPage> {
           .toList();
       if (list.isNotEmpty && mounted) setState(() => _project = list.first);
     } catch (_) {}
+    try {
+      final resp = await widget.client.request("fleet.list", {"projectId": _project.id});
+      final workers = (resp["result"] as List<dynamic>? ?? const [])
+          .map((e) => FleetWorkerInfo.fromJson(e as Map<String, dynamic>))
+          .toList();
+      if (mounted) setState(() => _fleetWorkers = workers);
+    } catch (_) {
+      if (mounted) setState(() => _fleetWorkers = const []);
+    }
   }
 
   /// pane 展示序(桌面原 index 列表,按在线优先重排;同档保持桌面顺序)。
@@ -174,6 +194,9 @@ class _ProjectDetailPageState extends State<ProjectDetailPage> {
                   child: Text("该项目还没有 pane", style: TextStyle(fontSize: 13, color: Mx.muted)),
                 ),
               ),
+            // Fleet 总览分节:pane 树之外的全量 worker(含未挂 tab 的)。在线才拉得到;
+            // null = 从未拉成(旧桌面端无 fleet.list),不显示分节。
+            if (_fleetWorkers != null && _fleetWorkers!.isNotEmpty) _fleetSection(),
           ],
         ),
       ),
@@ -245,14 +268,16 @@ class _ProjectDetailPageState extends State<ProjectDetailPage> {
               borderRadius: BorderRadius.circular(Mx.radiusSm),
               border: Border.all(color: ai ? _providerBorder(tab) : Mx.borderSoft),
             ),
-            child: Text(
-              _providerGlyph(tab.kind),
-              style: TextStyle(
-                fontSize: 12,
-                fontWeight: FontWeight.bold,
-                color: ai ? _providerColor(tab) : Mx.faint,
-              ),
-            ),
+            child: tab.isFleet
+                ? const Icon(Icons.call_split, size: 14, color: Mx.warning)
+                : Text(
+                    _providerGlyph(tab.kind),
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.bold,
+                      color: ai ? _providerColor(tab) : Mx.faint,
+                    ),
+                  ),
           ),
           const SizedBox(width: 10),
           Expanded(
@@ -282,7 +307,9 @@ class _ProjectDetailPageState extends State<ProjectDetailPage> {
                 ]),
                 Text(
                   ai
-                      ? (tab.provider == "claude" ? "Claude 对话" : "Codex 对话")
+                      ? (tab.isFleet
+                          ? "Fleet Worker · ${tab.provider == "claude" ? "Claude" : "Codex"}(worktree 隔离)"
+                          : (tab.provider == "claude" ? "Claude 对话" : "Codex 对话"))
                       : "${_plainKindLabel(tab.kind)} · 只读镜像",
                   style: const TextStyle(fontSize: 10, color: Mx.faint),
                 ),
@@ -306,6 +333,113 @@ class _ProjectDetailPageState extends State<ProjectDetailPage> {
       ),
       child: Text(text, style: TextStyle(fontSize: 9, fontWeight: FontWeight.w600, color: fg)),
     );
+  }
+
+  /// Fleet 总览分节:全量 worker 列表(fleet.list),含 pane 树里没有的信息——
+  /// 未挂 tab 的 worker、diff 统计、worktree 孤儿。**只读**:合并/丢弃回桌面
+  /// FleetPanel 做(带 preview + 二次确认,手机上一键合并太危险,v1 不暴露写操作)。
+  /// 已挂 tab 的 worker 行可点进对话页(与 pane 分节同一条 ChatPage 动线)。
+  Widget _fleetSection() {
+    final workers = _fleetWorkers!;
+    return Card(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(14, 10, 14, 4),
+            child: Row(children: [
+              const Icon(Icons.call_split, size: 14, color: Mx.warning),
+              const SizedBox(width: 6),
+              const Text(
+                "Fleet Workers",
+                style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: Mx.textBright),
+              ),
+              const SizedBox(width: 6),
+              Text("· ${workers.length}",
+                  style: const TextStyle(fontSize: 11, color: Mx.dim)),
+            ]),
+          ),
+          for (final w in workers) _fleetRow(w),
+          const SizedBox(height: 6),
+        ],
+      ),
+    );
+  }
+
+  /// worker 行:分支名 + provider + diff 统计(+N/-M 文件数)+ 孤儿警告。
+  /// 已挂 tab:点击进对话(tab 还在 pane 树里,ChatPage 走同一条代码路径);
+  /// 未挂 tab:纯展示(会话在桌面,但当前没有可聊的窗口)。
+  Widget _fleetRow(FleetWorkerInfo w) {
+    final tab = _findTabById(w.tabId);
+    final glyph = w.provider == "claude" ? "C" : "X";
+    final soft = w.provider == "claude" ? Mx.violetSoft : Mx.infoSoft;
+    final color = w.provider == "claude" ? Mx.violet : Mx.info;
+    final border = w.provider == "claude" ? Mx.violetBorder : Mx.border;
+    final created = DateTime.fromMillisecondsSinceEpoch(w.createdMs);
+    final createdLabel = "${created.month}/${created.day}";
+    return InkWell(
+      onTap: tab != null ? () => _openChatByTabId(tab) : null,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(14, 8, 12, 8),
+        child: Row(children: [
+          Container(
+            width: 26,
+            height: 26,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: soft,
+              borderRadius: BorderRadius.circular(Mx.radiusSm),
+              border: Border.all(color: border),
+            ),
+            child: Text(glyph, style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: color)),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  w.branch,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Mx.textBright),
+                ),
+                Text(
+                  w.worktreeExists
+                      ? "${w.changedFiles} 文件 · +${w.addedLines}/-${w.removedLines} · $createdLabel${tab == null ? " · 未挂 tab" : ""}"
+                      : "worktree 已不存在(孤儿记录,回桌面丢弃)",
+                  style: TextStyle(fontSize: 10, color: w.worktreeExists ? Mx.faint : Mx.warning),
+                ),
+              ],
+            ),
+          ),
+          if (tab != null)
+            Icon(Icons.chevron_right, size: 18, color: Mx.accentBright),
+        ]),
+      ),
+    );
+  }
+
+  /// 从项目 pane 树里按 tabId 找 tab(fleet.list 只回 tabId,展示态要回 pane 树查)。
+  TabInfo? _findTabById(String? tabId) {
+    if (tabId == null) return null;
+    for (final p in _project.panes) {
+      for (final t in p.tabs) {
+        if (t.id == tabId) return t;
+      }
+    }
+    return null;
+  }
+
+  /// worker 行点进对话:tab 已知 pane 时不经 pane 分节(直接找它所在 pane 序号做 label)。
+  void _openChatByTabId(TabInfo tab) {
+    for (var i = 0; i < _project.panes.length; i++) {
+      if (_project.panes[i].tabs.any((t) => t.id == tab.id)) {
+        _openChat(_project.panes[i], tab, i);
+        return;
+      }
+    }
   }
 
   static String _providerGlyph(String kind) => switch (kind) {

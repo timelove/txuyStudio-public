@@ -9,6 +9,9 @@ import type { ClaudeSessionKind } from "../domain/claudeStream";
 import { autoCheckUpdate, getUpdaterSnapshot, subscribeUpdater, type UpdaterSnapshot } from "../domain/appUpdater";
 import type { SettingsTab } from "./SettingsModal";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/Tooltip";
+import { Popover, PopoverContent, PopoverTrigger } from "./ui/Popover";
+import { FleetIcon } from "./ui/FleetIcon";
+import { FleetPanel } from "./FleetPanel";
 
 type StatusBarProps = {
   /** 聚焦项目(选中 shell 所属项目);无聚焦项目时为 null。 */
@@ -23,6 +26,12 @@ type StatusBarProps = {
   onFocusClaudeTab?: (projectId: string, tabId: string) => void;
   /** 打开设置弹窗(「新版本可用」chip → about 页);设置齿轮在顶栏品牌区,弹窗由 AppShell 持有。 */
   onOpenSettings?: (tab?: SettingsTab) => void;
+  /** 聚焦 Fleet Worker 的 tab(FleetPanel 卡片「聚焦」按钮,动线同 AI 药丸)。 */
+  onFocusFleetTab?: (projectId: string, tabId: string) => void;
+  /** Fleet 入口徽标:该项目的 worker 记录数(0 隐藏数字,只留 git 分支图标)。AppShell 维护。 */
+  fleetWorkerCount?: number;
+  /** 面板内 worker 数变化(打开/刷新/合并/丢弃后)回报 AppShell 更新徽标。 */
+  onFleetWorkerCount?: (projectId: string, count: number) => void;
 };
 
 /** 健康提醒的自然时间窗口长度(ms)。tip 按此时长对齐到墙上时钟轮换(默认 30min → :00 / :30 边界)。后续设置面板接入后改为从 settings 读取。 */
@@ -47,13 +56,15 @@ const HEALTH_TIPS: { tip: string; done: string }[] = [
  *
  * 生命周期:所有 interval 在卸载时清除,避免后台空转 invoke。
  */
-export function StatusBar({ focusedProject, gitBranch, claudeStatuses, codexStatuses, onFocusClaudeTab, onOpenSettings }: StatusBarProps) {
+export function StatusBar({ focusedProject, gitBranch, claudeStatuses, codexStatuses, onFocusClaudeTab, onOpenSettings, onFocusFleetTab, fleetWorkerCount, onFleetWorkerCount }: StatusBarProps) {
   const { t } = useTranslation();
   const [mem, setMem] = useState<{ usedBytes: number; totalBytes: number } | null>(null);
   const [tipIdx, setTipIdx] = useState(0);
   const [tipHighlight, setTipHighlight] = useState(false);
   /** 当前 tip 已被用户点击「完成」→ 隐藏;下一轮轮换时自动恢复显示新 tip。 */
   const [tipHidden, setTipHidden] = useState(false);
+  /** FleetPanel Popover 开合(Fleet 按钮向上弹;聚焦项目为 null 时不渲染入口)。 */
+  const [fleetOpen, setFleetOpen] = useState(false);
   /** 全局更新快照(启动自动检查驱动;见 domain/appUpdater)。 */
   const [updaterSnap, setUpdaterSnap] = useState<UpdaterSnapshot>(() => getUpdaterSnapshot());
 
@@ -135,11 +146,12 @@ export function StatusBar({ focusedProject, gitBranch, claudeStatuses, codexStat
 
   const path = focusedProject?.rootPath ?? "";
   const entry = HEALTH_TIPS[tipIdx];
+  const codexList = codexStatuses ?? [];
 
   // AI 会话计数:按语义态分组(running/retrying/waiting/error/bg/idle)。claude + codex 合并
   // (codex 的 kind 是 ClaudeSessionKind 子集)。只显活跃态;全 idle 时不显(避免噪声)。
   // 点击某态药丸 -> 跳该态第一个 tab。
-  const allAiStatuses = [...claudeStatuses, ...(codexStatuses ?? [])];
+  const allAiStatuses = [...claudeStatuses, ...codexList];
   const aiCounts: Record<ClaudeSessionKind, number> = { error: 0, retrying: 0, waiting: 0, running: 0, bg: 0, idle: 0 };
   for (const e of allAiStatuses) aiCounts[e.summary.kind]++;
   // 活跃态药丸列表(显示顺序:error > retrying > waiting > running > bg;idle 不显)。每态:label/颜色/计数。
@@ -251,6 +263,39 @@ export function StatusBar({ focusedProject, gitBranch, claudeStatuses, codexStat
             </>
           )}
         </div>
+      )}
+
+      {/* Fleet Workers 入口(git 分支图标):有聚焦项目才显;Popover 向上弹(side="top")列 worker 卡片。
+          计数徽标 = 该项目 worker 记录数(AppShell 挂载时拉一次,创建/面板刷新时更新;
+          状态栏自身不轮询,worker 明细/diff 统计打开面板才拉)。 */}
+      {focusedProject && (
+        <Popover open={fleetOpen} onOpenChange={setFleetOpen}>
+          <Tooltip>
+          <TooltipTrigger asChild>
+          <PopoverTrigger asChild>
+          <button
+            type="button"
+            className="relative flex shrink-0 cursor-pointer items-center gap-1 rounded px-1.5 py-0.5 text-[12px] leading-none transition-colors hover:bg-[var(--mx-hover-bg)]"
+          >
+            <FleetIcon className="h-3.5 w-3.5" />
+            {(fleetWorkerCount ?? 0) > 0 && (
+              <span className="tabular-nums text-[10px] text-[var(--mx-muted)]">{fleetWorkerCount}</span>
+            )}
+          </button>
+          </PopoverTrigger>
+          </TooltipTrigger>
+          <TooltipContent>{t("fleet.panel.title")}</TooltipContent>
+          </Tooltip>
+          <PopoverContent side="top" align="end" sideOffset={6} className="p-0">
+            <FleetPanel
+              projectId={focusedProject.id}
+              claudeStatuses={claudeStatuses}
+              codexStatuses={codexList}
+              onFocusFleetTab={onFocusFleetTab}
+              onWorkersChange={(n) => onFleetWorkerCount?.(focusedProject.id, n)}
+            />
+          </PopoverContent>
+        </Popover>
       )}
 
       <div className="flex shrink-0 items-center gap-4">

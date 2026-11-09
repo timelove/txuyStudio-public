@@ -43,6 +43,14 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "./ui/Tabs";
 function localDateStr(d: Date): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
+
+/** 请求日志行时间(UTC ISO → 本地 MM-DD HH:mm)。此前直接 slice 原文,时区差 8h
+ *  (聚合/筛选均已本地化,仅明细显示层漏转)。解析失败退原文。 */
+function fmtLogTime(ts: string): string {
+  const d = new Date(ts);
+  if (isNaN(d.getTime())) return ts.slice(5, 16).replace("T", " ");
+  return `${localDateStr(d).slice(5)} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
 function daysAgoStr(n: number): string {
   const d = new Date();
   return localDateStr(new Date(d.getFullYear(), d.getMonth(), d.getDate() - n));
@@ -263,7 +271,7 @@ export function UsagePanel() {
       const v = vendorOf(r.model) ?? "";
       const cur = map.get(v) ?? { vendor: v, requests: 0, input: 0, cacheRead: 0, output: 0, cost: 0 };
       cur.requests += r.requests;
-      cur.input += r.inputTokens + r.cacheCreationTokens;
+      cur.input += r.inputTokens;
       cur.cacheRead += r.cacheReadTokens;
       cur.output += r.outputTokens;
       cur.cost += estimateCost(r, overrides, modelsDev) ?? 0;
@@ -724,7 +732,7 @@ function monthOf(iso: string): Date {
   return Number.isFinite(y) && Number.isFinite(m) ? new Date(y, m - 1, 1) : new Date(d.getFullYear(), d.getMonth(), 1);
 }
 
-/** 请求日志表:时间 | 应用 | 模型 | ↑ | ⟳ | ↓ | 费用;每页 20 条,筛选变化重置页码。 */
+/** 请求日志表:时间 | 应用 | 模型 | 新增输入 | 缓存命中 | 输出 | 费用;每页 20 条,筛选变化重置页码。 */
 function RequestLogTable({
   rows,
   overrides,
@@ -749,7 +757,7 @@ function RequestLogTable({
         <span>{t("settings.usage.logTime")}</span>
         <span>{t("settings.usage.logApp")}</span>
         <span className="truncate">{t("settings.usage.byModel")}</span>
-        <span className="text-right">{t("settings.usage.input")}</span>
+        <span className="text-right">{t("settings.usage.newInput")}</span>
         <span className="text-right">{t("settings.usage.cacheRead")}</span>
         <span className="text-right">{t("settings.usage.output")}</span>
         <span className="text-right">{t("settings.usage.cost")}</span>
@@ -761,13 +769,13 @@ function RequestLogTable({
         {slice.map((r, i) => (
           <div
             key={`${r.ts}|${r.app}|${i}`}
-            title={`${r.sessionId.slice(0, 8)}${r.model}`}
+            title={`${r.sessionId.slice(0, 8)}${r.model}\n${t("settings.usage.cacheWrite")}: ${formatTokens(r.cacheCreationTokens)}`}
             className="grid grid-cols-[86px_52px_1fr_repeat(4,minmax(52px,auto))] items-baseline gap-x-2 rounded-[var(--mx-radius-sm)] px-2 py-1 text-[11px] transition-colors hover:bg-[var(--mx-hover-bg)]"
           >
-            <span className="truncate font-mono text-[10px] text-[var(--mx-faint)]">{r.ts.slice(5, 16).replace("T", " ")}</span>
+            <span className="truncate font-mono text-[10px] text-[var(--mx-faint)]">{fmtLogTime(r.ts)}</span>
             <span className="shrink-0 rounded bg-[var(--mx-surface-2)] px-1 py-px text-[9px] uppercase text-[var(--mx-muted)]">{r.app}</span>
             <span className="truncate font-mono text-[var(--mx-text)]">{r.model}</span>
-            <span className="text-right tabular-nums text-[var(--mx-muted)]">{formatTokens(r.inputTokens + r.cacheCreationTokens)}</span>
+            <span className="text-right tabular-nums text-[var(--mx-muted)]">{formatTokens(r.inputTokens)}</span>
             <span className="text-right tabular-nums text-[var(--mx-muted)]">{formatTokens(r.cacheReadTokens)}</span>
             <span className="text-right tabular-nums text-[var(--mx-muted)]">{formatTokens(r.outputTokens)}</span>
             <span className="text-right tabular-nums text-[var(--mx-accent-bright)]">≈{formatUsd(estimateCost(logToRollupLike(r), overrides, modelsDev))}</span>
@@ -820,7 +828,7 @@ function VendorRow({
           {row.requests} {t("settings.usage.requests")}
         </span>
         <span className="ml-auto flex shrink-0 items-baseline gap-2 tabular-nums text-[var(--mx-muted)]">
-          <span title={t("settings.usage.input")}>↑{formatTokens(row.input)}</span>
+          <span title={t("settings.usage.newInput")}>↑{formatTokens(row.input)}</span>
           <span title={t("settings.usage.cacheRead")}>⟳{formatTokens(row.cacheRead)}</span>
           <span title={t("settings.usage.output")}>↓{formatTokens(row.output)}</span>
           <span className="text-[var(--mx-accent-bright)]">≈{formatUsd(row.cost)}</span>
@@ -973,9 +981,10 @@ type TrendMetric = "tokens" | "requests" | "cost";
 type TrendPoint = {
   key: string; // 显示标签(日 YYYY-MM-DD 或月 YYYY-MM)
   sortKey: string; // 排序/连续填充键
-  input: number;
+  input: number; // 新增输入(不含缓存,cc-switch 口径)
   cacheRead: number;
   output: number;
+  cacheWrite: number;
   requests: number;
   cost: number;
 };
@@ -1030,6 +1039,7 @@ function UsageTrendChart({
         input: 0,
         cacheRead: 0,
         output: 0,
+        cacheWrite: 0,
         requests: 0,
         cost: 0,
       }));
@@ -1037,9 +1047,10 @@ function UsageTrendChart({
         const d = new Date(r.ts); // UTC ISO → 本地
         if (localDateStr(d) !== dateFrom) continue; // 保险:UTC 边界行不属于该本地日
         const p = buckets[d.getHours()];
-        p.input += r.inputTokens + r.cacheCreationTokens;
+        p.input += r.inputTokens;
         p.cacheRead += r.cacheReadTokens;
         p.output += r.outputTokens;
+        p.cacheWrite += r.cacheCreationTokens;
         p.requests += 1;
         p.cost += estimateCost(logToRollupLike(r), overrides, modelsDev) ?? 0;
       }
@@ -1047,10 +1058,11 @@ function UsageTrendChart({
     }
     const daily = new Map<string, TrendPoint>();
     for (const r of rows) {
-      const p = daily.get(r.date) ?? { key: r.date, sortKey: r.date, input: 0, cacheRead: 0, output: 0, requests: 0, cost: 0 };
-      p.input += r.inputTokens + r.cacheCreationTokens;
+      const p = daily.get(r.date) ?? { key: r.date, sortKey: r.date, input: 0, cacheRead: 0, output: 0, cacheWrite: 0, requests: 0, cost: 0 };
+      p.input += r.inputTokens;
       p.cacheRead += r.cacheReadTokens;
       p.output += r.outputTokens;
+      p.cacheWrite += r.cacheCreationTokens;
       p.requests += r.requests;
       p.cost += estimateCost(r, overrides, modelsDev) ?? 0;
       daily.set(r.date, p);
@@ -1060,10 +1072,11 @@ function UsageTrendChart({
       const monthly = new Map<string, TrendPoint>();
       for (const p of list) {
         const mk = p.sortKey.slice(0, 7);
-        const m = monthly.get(mk) ?? { key: mk, sortKey: mk, input: 0, cacheRead: 0, output: 0, requests: 0, cost: 0 };
+        const m = monthly.get(mk) ?? { key: mk, sortKey: mk, input: 0, cacheRead: 0, output: 0, cacheWrite: 0, requests: 0, cost: 0 };
         m.input += p.input;
         m.cacheRead += p.cacheRead;
         m.output += p.output;
+        m.cacheWrite += p.cacheWrite;
         m.requests += p.requests;
         m.cost += p.cost;
         monthly.set(mk, m);
@@ -1083,7 +1096,7 @@ function UsageTrendChart({
   const PAD_B = 20;
   const plotH = H - PAD_T - PAD_B;
   // 当前指标取值与轴格式化:tokens=三段和 / requests / cost。
-  const metricVal = (p: TrendPoint) => (metric === "tokens" ? p.input + p.cacheRead + p.output : metric === "requests" ? p.requests : p.cost);
+  const metricVal = (p: TrendPoint) => (metric === "tokens" ? p.input + p.cacheRead + p.cacheWrite + p.output : metric === "requests" ? p.requests : p.cost);
   const fmtMetric = (n: number) => (metric === "tokens" ? formatTokens(n) : metric === "requests" ? Math.round(n).toLocaleString() : formatUsd(n));
   const max = Math.max(1, ...points.map(metricVal));
   const innerW = Math.max(1, width - PAD_L - PAD_R);
@@ -1157,6 +1170,7 @@ function UsageTrendChart({
           }
           const hIn = (p.input / max) * plotH;
           const hCr = (p.cacheRead / max) * plotH;
+          const hCw = (p.cacheWrite / max) * plotH;
           const hOut = (p.output / max) * plotH;
           let y = PAD_T + plotH;
           const seg = (h: number) => {
@@ -1167,6 +1181,7 @@ function UsageTrendChart({
             <g key={p.key} opacity={active ? 1 : 0.45}>
               <rect x={x} y={seg(hOut)} width={barW} height={hOut} fill="var(--mx-accent)" rx={1} />
               <rect x={x} y={seg(hCr)} width={barW} height={hCr} fill="var(--mx-text)" opacity={0.3} rx={1} />
+              <rect x={x} y={seg(hCw)} width={barW} height={hCw} fill="var(--mx-accent)" opacity={0.5} rx={1} />
               <rect x={x} y={seg(hIn)} width={barW} height={hIn} fill="var(--mx-text)" opacity={0.75} rx={1} />
             </g>
           );
@@ -1196,8 +1211,12 @@ function UsageTrendChart({
               {t("settings.usage.trendRequests")} {fmtExact(hoverPoint.requests)}
             </div>
             <div>
-              <span className="inline-block w-2 rounded-sm bg-[var(--mx-text)] opacity-75" /> {t("settings.usage.input")}{" "}
+              <span className="inline-block w-2 rounded-sm bg-[var(--mx-text)] opacity-75" /> {t("settings.usage.newInput")}{" "}
               {fmtExact(hoverPoint.input)}
+            </div>
+            <div>
+              <span className="inline-block w-2 rounded-sm bg-[var(--mx-accent)] opacity-50" /> {t("settings.usage.cacheWrite")}{" "}
+              {fmtExact(hoverPoint.cacheWrite)}
             </div>
             <div>
               <span className="inline-block w-2 rounded-sm bg-[var(--mx-text)] opacity-30" /> {t("settings.usage.cacheRead")}{" "}
@@ -1256,7 +1275,7 @@ function ModelRow({
           {row.requests} {t("settings.usage.requests")}
         </span>
         <span className="ml-auto flex shrink-0 items-baseline gap-2 tabular-nums text-[var(--mx-muted)]">
-          <span title={t("settings.usage.input")}>↑{formatTokens(row.inputTokens + row.cacheCreationTokens)}</span>
+          <span title={t("settings.usage.newInput")}>↑{formatTokens(row.inputTokens)}</span>
           <span title={t("settings.usage.cacheRead")}>⟳{formatTokens(row.cacheReadTokens)}</span>
           <span title={t("settings.usage.output")}>↓{formatTokens(row.outputTokens)}</span>
           <span className="text-[var(--mx-accent-bright)]">≈{formatUsd(cost)}</span>

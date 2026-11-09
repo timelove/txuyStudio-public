@@ -113,6 +113,7 @@ pub async fn open_project(
         pane_tree: Some(default_pane_tree()),
         claude_allowed_tools: Vec::new(),
         claude_tab_sessions: Default::default(),
+        fleet_workers: Vec::new(),
     };
     let new_active = record.id.clone();
 

@@ -17,6 +17,10 @@ class TabInfo {
   /// 是否 AI 对话 tab(手机端唯一支持远程输入的类型)。
   bool get isAi => kind == "claudepane" || kind == "claude" || kind == "codexpane" || kind == "codex";
 
+  /// 是否 Fleet Worker tab(title=分支名 `fleet/<taskId>`,桌面建 tab 时落盘,
+  /// 见桌面端 `src/domain/fleet.ts` 的 FLEET_BRANCH_PREFIX;与 collect_tabs 不发 cwd 无关)。
+  bool get isFleet => title.startsWith("fleet/");
+
   /// provider 名("claude" / "codex"),非 AI tab 为 null。
   String? get provider => switch (kind) {
         "claudepane" || "claude" => "claude",
@@ -143,6 +147,37 @@ class ProjectInfo {
     }
     return firstAiTab;
   }
+}
+
+/// `fleet.list` 的 worker 视图记录(与桌面端 `FleetWorkerView` 逐字段对齐,camelCase)。
+/// 含实时 diff 统计与 worktree 孤儿检测;这些是 pane 树(projects.list)里没有的信息。
+class FleetWorkerInfo {
+  final String id;
+  final String projectId;
+  /// "claude" | "codex"
+  final String provider;
+  /// 分支名,固定 `fleet/<taskId>`。
+  final String branch;
+  final String worktreePath;
+  final int createdMs;
+  final String? tabId;
+  final int changedFiles;
+  final int addedLines;
+  final int removedLines;
+  final bool worktreeExists;
+  FleetWorkerInfo({
+    required this.id, required this.projectId, required this.provider,
+    required this.branch, required this.worktreePath, required this.createdMs,
+    this.tabId, required this.changedFiles, required this.addedLines,
+    required this.removedLines, required this.worktreeExists,
+  });
+  factory FleetWorkerInfo.fromJson(Map<String, dynamic> j) => FleetWorkerInfo(
+    id: j["id"] ?? "", projectId: j["projectId"] ?? "", provider: j["provider"] ?? "claude",
+    branch: j["branch"] ?? "", worktreePath: j["worktreePath"] ?? "",
+    createdMs: (j["createdMs"] as num?)?.toInt() ?? 0, tabId: j["tabId"],
+    changedFiles: j["changedFiles"] ?? 0, addedLines: j["addedLines"] ?? 0,
+    removedLines: j["removedLines"] ?? 0, worktreeExists: j["worktreeExists"] == true,
+  );
 }
 
 /// `chat.status` 结果。

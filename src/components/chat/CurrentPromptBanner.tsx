@@ -33,17 +33,33 @@ export function CurrentPromptBanner({
 
   return (
     <div className="pointer-events-none absolute inset-x-0 top-0 z-20 flex justify-center px-4 pt-3">
-      <button
-        type="button"
-        onClick={onToggle}
-        onMouseDown={(e) => e.stopPropagation()}
-        aria-expanded={expanded}
-        title={expanded ? t("chat.collapseCurrentPrompt") : t("chat.expandCurrentPrompt")}
-        className="pointer-events-auto flex w-full max-w-[54.25rem] cursor-pointer items-start gap-2 rounded-lg border border-[var(--mx-border-strong)] bg-[var(--mx-card-bg)]/95 px-3 py-2 text-left shadow-xl backdrop-blur transition-colors hover:border-[var(--mx-accent)]"
-      >
-        <span aria-hidden className="mt-[1px] shrink-0 font-mono text-[11px] font-semibold text-[var(--mx-accent)]">
-          ›
-        </span>
+        {/* 垂直对齐:单行(收起)用 items-center 真居中;展开多行时 icon/箭头贴首行
+            (items-start),mt 手工补正按 leading-relaxed 行高调,仅展开态需要——单行态
+            若保留 mt 会参与 flex 居中计算,反而把它顶偏。
+            图标用 SVG 而非文字字形 ›:字形在字体回退(尤其中文环境 CJK fallback)下
+            墨迹纵向位置不稳定,收起态盒居中、展开态 mt 补正都在赌字形 metrics;SVG
+            墨迹由 path 决定、盒内恒居中,且与右侧展开箭头同尺寸同 mt,展开态两箭头
+            互相严格对齐。 */}
+        <button
+          type="button"
+          onClick={onToggle}
+          onMouseDown={(e) => e.stopPropagation()}
+          aria-expanded={expanded}
+          title={expanded ? t("chat.collapseCurrentPrompt") : t("chat.expandCurrentPrompt")}
+          className={`pointer-events-auto flex w-full max-w-[54.25rem] cursor-pointer gap-2 rounded-lg border border-[var(--mx-border-strong)] bg-[var(--mx-card-bg)]/95 px-3 py-2 text-left shadow-xl backdrop-blur transition-colors hover:border-[var(--mx-accent)] ${expanded ? "items-start" : "items-center"}`}
+        >
+        <svg
+          className={`h-3 w-3 shrink-0 text-[var(--mx-accent)] ${expanded ? "mt-[3px]" : ""}`}
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2.5"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          aria-hidden
+        >
+          <path d="M9 6l6 6-6 6" />
+        </svg>
         <span className="min-w-0 flex-1">
           <span ref={textRef} className={expanded ? "block max-h-[35vh] overflow-y-auto whitespace-pre-wrap break-words text-xs leading-relaxed text-[var(--mx-text)]" : "block truncate text-xs text-[var(--mx-text)]"}>
             {text}
@@ -51,7 +67,7 @@ export function CurrentPromptBanner({
         </span>
         {expanded || overflows ? (
           <svg
-            className={`mt-[3px] h-3 w-3 shrink-0 text-[var(--mx-muted)] transition-transform ${expanded ? "rotate-180" : ""}`}
+            className={`h-3 w-3 shrink-0 text-[var(--mx-muted)] transition-transform ${expanded ? "mt-[3px] rotate-180" : ""}`}
             viewBox="0 0 24 24"
             fill="none"
             stroke="currentColor"

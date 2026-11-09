@@ -132,13 +132,40 @@ function fitWithMargin(terminal: Terminal, fitAddon: FitAddon, fontPx: number) {
     if (dims && dims.cols > 0 && dims.rows >= 2) {
       const alt = terminal.buffer.active.type === "alternate";
       const targetRows = alt ? dims.rows : Math.max(1, dims.rows - scrollMarginRows(fontPx));
-      terminal.resize(dims.cols, targetRows);
+      terminal.resize(paneCols(terminal, dims.cols), targetRows);
     } else {
       fitAddon.fit();
     }
   } catch {
     /* 容器尺寸为 0 时可能抛,忽略 */
   }
+}
+
+/**
+ * 自算 cols 修「极窄 pane 右侧截断」:FitAddon proposeDimensions 的 cols 公式有两个坑——
+ * ① 恒扣 14px 滚动条预留(scrollback>0 且无 overviewRuler 时):本项目 overlay 滚动条浮在
+ *   padding 区不占内容宽(xterm.css),这 14px 纯浪费,每个终端平白少 ~2 列;
+ * ② min-cols=2 钳制:嵌套分屏(每层再 ×0.15)可把 pane 内容宽压到 < 2 cell(~34px),cols
+ *   仍被钳 2 → canvas(2×cell)比容器宽 → 被 tab 容器 overflow-hidden 裁掉右侧,xterm 无
+ *   横向滚动,超出部分永远看不到。
+ * 自算 cols = max(1, floor(内容宽/cell)),不扣 14px、允许 1 列;xterm 内部 MINIMUM_COLS=2
+ * 仍会把 1 列抬到 2(public resize 硬钳),但那是 xterm 可达的最小画布,裁切阈值随之从
+ * ~48px 降到 ~34px,34px 以上不再浪费任何列。cell 宽走 _core._renderService.dimensions
+ * (与 FitAddon 同款私有访问,本文件 IME 修复亦有直接摸内部 DOM 的先例);cell/容器读
+ * 不到时回退 FitAddon 的 cols(仅多扣 14px,不比现状差)。
+ */
+function paneCols(terminal: Terminal, fitCols: number): number {
+  const el = terminal.element;
+  const parent = el?.parentElement;
+  if (!el || !parent) return fitCols;
+  const dims = (terminal as unknown as { _core?: { _renderService?: { dimensions?: { css?: { cell?: { width?: number } } } } } })
+    ._core?._renderService?.dimensions;
+  const cell = dims?.css?.cell?.width;
+  if (typeof cell !== "number" || cell <= 0) return fitCols;
+  const style = window.getComputedStyle(el);
+  const avail = parent.clientWidth - parseInt(style.paddingLeft, 10) - parseInt(style.paddingRight, 10);
+  if (!(avail > 0)) return fitCols;
+  return Math.max(1, Math.floor(avail / cell));
 }
 
 function refit(

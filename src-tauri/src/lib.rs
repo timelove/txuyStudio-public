@@ -1,6 +1,7 @@
 mod claude;
 mod codex;
 mod filetree;
+mod fleet;
 mod providers;
 mod pty;
 mod relay;
@@ -27,6 +28,10 @@ use codex::commands::{
 use codex::CodexRegistry;
 use filetree::commands::{ensure_dir, list_dir, list_files, read_file, start_fs_watch, stop_fs_watch, write_file};
 use filetree::FsWatcherRegistry;
+use fleet::commands::{
+    create_fleet_worker, list_fleet_workers, merge_fleet_worker, preview_fleet_merge,
+    remove_fleet_worker, set_fleet_worker_tab,
+};
 use log::LevelFilter;
 use providers::balance::query_provider_balance;
 use providers::commands::probe_provider_endpoint;
@@ -456,6 +461,13 @@ pub fn run() {
             save_window_bounds,
             save_pane_tree,
             add_claude_allowed_tool,
+            // Fleet Worker(worktree 隔离的多 AI 并行会话;建/列/合并/丢弃/tab 绑定)
+            create_fleet_worker,
+            list_fleet_workers,
+            preview_fleet_merge,
+            merge_fleet_worker,
+            remove_fleet_worker,
+            set_fleet_worker_tab,
             // 独立项目窗口(阶段 4:右击项目「在新窗口打开」)
             open_project_window,
             close_project_window,
