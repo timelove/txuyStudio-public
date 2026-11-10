@@ -2,7 +2,7 @@
 
 > 面向 Windows 开发者的 AI CLI 终端工作台 — 并行管理 `claude` / `codex` / 常规 shell / 测试命令的桌面工作台（Tauri · Rust · React · xterm.js）。
 
-**Status: MVP** · 自渲染 Claude/Codex 对话面板 · 真实 PTY（按项目隔离）· 多项目多主窗口 · 可弹出独立窗口 · WT 式分屏（每 pane 多 tab）· 内置 oh-my-posh + Nerd Font · 布局持久化
+**Status: MVP** · 自渲染 Claude/Codex 对话面板 · Fleet Worker（worktree 并行多 AI）· 真实 PTY（按项目隔离）· 用量面板 · 多项目多主窗口 · 可弹出独立窗口 · WT 式分屏（每 pane 多 tab）· 移动伴侣（Android APK + 自建中继）· 内置 oh-my-posh + Nerd Font · 布局持久化
 
 [English](#english) · [中文](#中文)
 
@@ -16,7 +16,7 @@
 
 txuyStudio is a desktop workbench (built with Tauri + Rust + React + xterm.js) for running and managing AI CLI tools — `claude`, `codex`, regular shells, and test commands — side by side within a per-project workspace. It is **not** a general-purpose terminal replacement; the differentiation is a UI and workflow designed around AI-coding-CLI usage.
 
-> **Status:** MVP — self-rendered Claude/Codex conversation panes (with thinking blocks), real PTY with per-project isolation, multi-project workspaces with multi-window support, detachable project windows, Windows-Terminal-style pane splitting (draggable dividers) with per-pane multi-tab, a Typora-style notes pane, switchable themes + custom wallpaper with frosted-glass panels, bundled oh-my-posh + Nerd Font, TUI tool windows (lazygit/yazi/fresh) with install prompts, WT-style shortcuts, and persisted layouts are all implemented. Destructive-command protection and one-click task launching are on the roadmap.
+> **Status:** MVP — self-rendered Claude/Codex conversation panes (with thinking blocks), Fleet Worker (worktree-isolated parallel AI sessions with merge-back), real PTY with per-project isolation, a usage panel (token accounting aligned with cc-switch), multi-project workspaces with multi-window support, close confirmation ("don't ask again"), detachable project windows, Windows-Terminal-style pane splitting (draggable dividers) with per-pane multi-tab, a Typora-style notes pane, switchable themes + custom wallpaper with frosted-glass panels, bundled oh-my-posh + Nerd Font, TUI tool windows (lazygit/yazi/fresh) with install prompts, WT-style shortcuts, and persisted layouts are all implemented. A mobile companion (Android APK) mirrors desktop sessions through a self-hostable E2E-encrypted relay. Destructive-command protection is on the roadmap.
 
 > To see it live: clone → `bun install` → `bun run tauri dev`.
 
@@ -33,8 +33,10 @@ txuyStudio is a desktop workbench (built with Tauri + Rust + React + xterm.js) f
 ### Highlights
 
 - **Per-project workspace** — switch projects from the top bar; each project keeps its own shell layout and restores on reopen. PTY processes are isolated per project (closing a project kills its PTY).
-- **Self-rendered AI conversation panes** — Claude & Codex each get a dedicated conversation UI (not a terminal): streaming markdown, collapsible thinking blocks (auto-expanded while the model reasons, collapsed when the turn ends), tool-call cards with in-place approval (executes locally and feeds the result back), session-history resume, per-tab model / effort / permission-mode switching, context-window % status, `/compact`, and `!` inline PowerShell commands. The `claude` executable is auto-located — native installer (`~/.local/bin`, recommended), PATH, or legacy `~/.claude/local`.
-- **Multi-window workbench** — the top-bar ＋ menu (new project / new window / recent projects) opens additional main windows with isolated projects; closing a project archives it to history, restorable in one click with its layout and AI sessions intact.
+- **Self-rendered AI conversation panes** — Claude & Codex each get a dedicated conversation UI (not a terminal): dual-track streaming markdown (the stable prefix renders live while the active tail streams raw — no flicker, no waiting for the full turn), collapsible thinking blocks (auto-expanded while the model reasons, collapsed when the turn ends), tool-call cards with in-place approval (executes locally and feeds the result back), session-history resume, per-tab model / effort / permission-mode switching, context-window % status, `/compact`, and `!` inline PowerShell commands. The `claude` executable is auto-located — native installer (`~/.local/bin`, recommended), PATH, or legacy `~/.claude/local`.
+- **Fleet Worker** — worktree-isolated parallel AI sessions: spawn claude/codex workers, each in its own git worktree + `fleet/<task>` branch (main workspace stays clean), watch live diff stats per worker, then merge back with a dry-run conflict preview (`git merge-tree`) before a confirmed `merge --no-ff` + auto cleanup. One AI tab per engine per working directory; Fleet is the escape hatch for parallelism.
+- **Usage panel** — token usage aggregated from `~/.claude/projects` + `~/.codex/sessions` jsonl: four-part breakdown (input / output / cache-read / cache-creation), cc-switch-compatible "real cost", per-request log, day-bucketed trends, and an activity graph.
+- **Multi-window workbench** — the top-bar ＋ menu (new project / new window / recent projects) opens additional main windows with isolated projects; closing a project archives it to history, restorable in one click with its layout and AI sessions intact. Closing a window that holds projects asks for confirmation (with a "don't ask again" escape, re-enableable in settings).
 - **Detachable project windows** — right-click a project chip → "Open in new window" pops it into an independent native window (move semantics: hidden in main window while detached). Dock back or close the window to restore; detached state is runtime-only (not persisted), so restart always re-docks everything into the main window.
 - **Windows-Terminal-style pane splitting** — split panes right/down (nestable), close-to-refill, directional focus switching, and drag dividers to resize ratios. Binary `paneTree` model, persisted to `state.json`.
 - **Per-pane multi-tab** — each pane leaf holds a stack of tabs (switch without disposing xterm; scrollback & input history preserved). Splitting (space) and tabs (time) are orthogonal dimensions.
@@ -58,7 +60,7 @@ txuyStudio is a desktop workbench (built with Tauri + Rust + React + xterm.js) f
 | Styling | Tailwind CSS v4 (`@tailwindcss/vite`) |
 | PTY | `portable-pty` (Windows ConPTY) |
 | Relay (self-hostable) | Go (`coder/websocket` + modernc sqlite, no CGO) |
-| Mobile companion | Flutter (mobile web) |
+| Mobile companion | Flutter (Android APK + web) |
 | Package manager | Bun |
 
 ### Project Layout
@@ -138,7 +140,7 @@ desktop (Tauri, all business logic) ──outbound WSS──> relay (dumb pipe) 
 - The relay is a **dumb pipe**: it routes encrypted frames between your desktop and phone by (user, device) and holds an encrypted snapshot for reconnects. It **never decrypts anything** — E2E encryption happens between the desktop and the phone; the auth boundary is a token check plus payload encryption.
 - **Self-host the relay.** It's ~4 Go files with no web framework (pure-Go sqlite, no CGO) — see [`relay/README.md`](relay/README.md) for deployment (systemd + TLS reverse proxy). Your code and tokens stay on machines you control.
 - The desktop makes **outbound-only** connections and listens on no port — the only thing exposed to the public internet is your own relay.
-- The companion (Flutter web) is a **second view** of the same desktop sessions: streaming AI conversations, approvals, usage stats, and a read-only shell mirror.
+- The companion (a Flutter app — Android APK, with a web build for development) is a **second view** of the same desktop sessions: streaming AI conversations, approvals, usage stats, Fleet worker overview, and a read-only shell mirror.
 
 ### Roadmap
 
@@ -150,6 +152,15 @@ desktop (Tauri, all business logic) ──outbound WSS──> relay (dumb pipe) 
 
 Implementation progress and the roadmap are listed above; ongoing tracking moves to GitHub Issues over time.
 
+### Download
+
+Prebuilt Windows binaries live on the [Releases](https://github.com/timelove/txuyStudio-public/releases) page:
+
+- `txuyStudio_<version>_x64-setup.exe` — NSIS installer with built-in auto-update (Tauri updater, signature-verified)
+- `txuyStudio-companion_<version>.apk` — Android companion app (pairs with the desktop via the relay account system; E2E-encrypted)
+
+Or build from source: `bun install` → `bun run tauri build`.
+
 ---
 
 <a id="中文"></a>
@@ -160,7 +171,7 @@ Implementation progress and the roadmap are listed above; ongoing tracking moves
 
 txuyStudio 是一个桌面工作台(基于 Tauri + Rust + React + xterm.js),用于在同一个项目工作区内并行运行和管理 AI CLI 工具——`claude`、`codex`、常规 shell、测试命令。它**不是**通用终端替代品,差异化在于为「AI 编程 CLI 工作流」专门设计的界面与流程。
 
-> **当前阶段:**MVP——自渲染 Claude/Codex 对话面板(含思考块)、真实 PTY(按项目隔离)、多项目多主窗口工作区、可弹出独立项目窗口、Windows Terminal 式分屏(分隔线可拖拽调比例,每 pane 多 tab)、Typora 式笔记 Pane、可切换主题 + 自定义背景图玻璃化、内置 oh-my-posh + Nerd Font、TUI 工具窗口(lazygit/yazi/fresh,未安装则提示)、WT 式快捷键、布局持久化均已实现。危险命令保护、一键启动任务在路线图上。
+> **当前阶段:**MVP——自渲染 Claude/Codex 对话面板(含思考块)、Fleet Worker(worktree 隔离的并行 AI 会话 + 合并回流)、真实 PTY(按项目隔离)、用量面板(与 cc-switch 对齐的 token 口径)、多项目多主窗口工作区、关闭窗口确认(防手抖)、可弹出独立项目窗口、Windows Terminal 式分屏(分隔线可拖拽调比例,每 pane 多 tab)、Typora 式笔记 Pane、可切换主题 + 自定义背景图玻璃化、内置 oh-my-posh + Nerd Font、TUI 工具窗口(lazygit/yazi/fresh,未安装则提示)、WT 式快捷键、布局持久化均已实现。移动伴侣(Android APK)经可自建的端到端加密中继镜像桌面会话。危险命令保护在路线图上。
 
 > 本地体验:`git clone` → `bun install` → `bun run tauri dev`。
 
@@ -177,8 +188,10 @@ txuyStudio 是一个桌面工作台(基于 Tauri + Rust + React + xterm.js),用�
 ### 核心特性
 
 - **按项目隔离的工作区**——顶栏切换项目,每个项目保存各自的 shell 布局,重开自动恢复。PTY 进程按项目隔离(关闭项目即 kill 对应 PTY)。
-- **AI 自渲染对话面板**——Claude/Codex 各有专属对话界面(非终端):流式 markdown、可折叠思考块(思考中自动展开、本轮结束自动收起)、工具卡片与批准原地执行(本地执行并把结果回传)、会话历史恢复、每 tab 独立 model/effort/权限模式、上下文占用 % 状态、`/compact`、`!` 内联 PowerShell。`claude` 可执行文件自动定位(原生安装包 `~/.local/bin`,推荐 > PATH > 旧版 `~/.claude/local`)。
-- **多主窗口工作台**——顶栏 ＋ 菜单(新项目/新窗口/历史项目)可开多个主窗口,各窗口项目隔离;关闭项目自动归档进历史,一键恢复(布局与 AI 会话完整还原)。
+- **AI 自渲染对话面板**——Claude/Codex 各有专属对话界面(非终端):双轨流式 markdown(稳定前缀实时渲染、活跃尾巴原文流式,不闪不卡)、可折叠思考块(思考中自动展开、本轮结束自动收起)、工具卡片与批准原地执行(本地执行并把结果回传)、会话历史恢复、每 tab 独立 model/effort/权限模式、上下文占用 % 状态、`/compact`、`!` 内联 PowerShell。`claude` 可执行文件自动定位(原生安装包 `~/.local/bin`,推荐 > PATH > 旧版 `~/.claude/local`)。
+- **Fleet Worker**——worktree 隔离的并行 AI 会话:创建的每个 claude/codex worker 自带 git worktree + `fleet/<任务>` 分支(主仓工作区零污染),面板实时看各 worker 的 diff 统计,合并前 `git merge-tree` 干跑预判冲突,确认后 `merge --no-ff` + 自动清理 worktree 与分支。同一工作目录每引擎限 1 个 AI tab,Fleet 是并行逃生阀。
+- **用量面板**——聚合 `~/.claude/projects` + `~/.codex/sessions` 的 jsonl:四段 token 分解(输入/输出/缓存读/缓存写)、与 cc-switch 对齐的「真实消耗」、请求日志逐条明细、按日趋势与活动图谱。
+- **多主窗口工作台**——顶栏 ＋ 菜单(新项目/新窗口/历史项目)可开多个主窗口,各窗口项目隔离;关闭项目自动归档进历史,一键恢复(布局与 AI 会话完整还原);关闭含项目的窗口前弹确认(可勾「不再提示」,设置里随时找回)。
 - **可弹出独立窗口**——右键顶栏项目 chip →「在新窗口打开」,把项目弹到独立原生窗口(move 语义:弹出后主窗口隐藏该项目)。dock back 或关窗即恢复;detached 状态仅运行期(不持久化),重启必定所有项目归位主窗口。
 - **Windows Terminal 式分屏**——向右/向下分屏(可嵌套)、关闭回填、方向切焦点,分隔线可拖拽调比例。二叉 `paneTree` 模型持久化到 `state.json`。
 - **每 pane 多 tab**——pane 叶子是 tab 栈(切 tab 不卸载 xterm,回滚与输入历史完整保留)。分屏(空间维度)与 tab(时间维度)正交。
@@ -202,7 +215,7 @@ txuyStudio 是一个桌面工作台(基于 Tauri + Rust + React + xterm.js),用�
 | 样式 | Tailwind CSS v4(`@tailwindcss/vite`) |
 | PTY | `portable-pty`(Windows ConPTY) |
 | 中继(可自建) | Go(`coder/websocket` + modernc sqlite,免 CGO) |
-| 移动伴侣 | Flutter(移动网页端) |
+| 移动伴侣 | Flutter(Android APK + 网页端) |
 | 包管理 | Bun |
 
 ### 目录结构
@@ -282,7 +295,7 @@ cargo check          # 后端类型/编译检查(在 src-tauri/ 下执行)
 - 中继是**哑管道**:按 (user, device) 在桌面端与手机之间路由**密文帧**,断线期间暂存一份加密快照,**永不解密**——端到端加密发生在桌面端与手机之间;鉴权边界 = token 校验 + 载荷加密。
 - **中继可自建**:约 4 个 Go 文件、无 Web 框架(纯 Go sqlite,免 CGO),部署见 [`relay/README.md`](relay/README.md)(systemd + TLS 反代)。代码与 token 全部留在你自己的机器上。
 - 桌面端**纯出站连接、不监听任何端口**——暴露在公网的只有你自己的中继。
-- 伴侣(Flutter 网页端)是同一批桌面会话的**第二视图**:流式 AI 对话、审批、用量统计、shell 只读镜像。
+- 伴侣(Flutter 应用——Android APK,另有开发用网页构建)是同一批桌面会话的**第二视图**:流式 AI 对话、审批、用量统计、Fleet 总览、shell 只读镜像。
 
 ### 路线图
 
@@ -293,6 +306,15 @@ cargo check          # 后端类型/编译检查(在 src-tauri/ 下执行)
 - AI 会话状态语义(running / waiting input / failed / done)
 
 实现进度与路线图见上方;后续跟踪逐步迁移到 GitHub Issues。
+
+### 下载
+
+预编译的 Windows 安装包在 [Releases](https://github.com/timelove/txuyStudio-public/releases) 页:
+
+- `txuyStudio_<版本>_x64-setup.exe` —— NSIS 安装器,内置自动更新(Tauri updater,签名校验)
+- `txuyStudio-companion_<版本>.apk` —— Android 伴侣应用(经中继账号体系与桌面端配对;端到端加密)
+
+也可从源码构建:`bun install` → `bun run tauri build`。
 
 ---
 
