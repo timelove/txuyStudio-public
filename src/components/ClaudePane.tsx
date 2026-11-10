@@ -62,6 +62,7 @@ import { SessionHeader } from "./chat/SessionHeader";
 import { ChatUserBubble } from "./chat/ChatUserBubble";
 import { MESSAGE_GAP_MS, TimeGapDivider, messageTimeMs } from "./chat/TimeGapDivider";
 import { Tabs, TabsList, TabsTrigger } from "./ui/Tabs";
+import { splitStableTail, useThrottledValue } from "../domain/streamingMarkdown";
 
 
 /** MdPreview 懒加载(避免 claudepane 首屏就拉 marked/dompurify,与探针共用 md-render 分包)。 */
@@ -4152,10 +4153,28 @@ function BlockView({
   /** 所在 fold 已展开:命令步骤恒显命令原文。 */
   bashCommandOpen?: boolean;
 }) {
+  // 流式双轨:text block 拆「稳定前缀(实时 markdown)+ 活跃尾巴(原文)」,边写边渲染。
+  // hooks 必须无条件常调(顺序稳定):非 text block 传空串,split 直接返回空 stable。
+  // 节流 120ms:delta 每 token 一发,不节流则每个 token 都跑一遍 marked 全量解析。
+  const textStable = block.type === "text" ? splitStableTail(block.text).stable : "";
+  const stableLive = useThrottledValue(textStable, 120);
   if (block.type === "text") {
     if (streaming) {
-      // 流式中:纯文本(高频 delta,避免逐 token 重渲染 marked)。
-      return <div dir="auto" className="whitespace-pre-wrap break-words leading-relaxed text-[var(--mx-text)]">{block.text}</div>;
+      // 流式中:稳定前缀走 markdown(实时渲染已写完的段落/代码块),活跃尾巴纯文本
+      // (正在写的最后一段/未闭合代码块)。live 模式不清空不缓存,见 MdPreview 注释。
+      const { tail } = splitStableTail(block.text);
+      return (
+        <div dir="auto" className="leading-relaxed text-[var(--mx-text)]">
+          {stableLive && (
+            <Suspense fallback={null}>
+              <MdPreviewLazy content={stableLive} inline live />
+            </Suspense>
+          )}
+          {tail && (
+            <div className="whitespace-pre-wrap break-words leading-relaxed">{tail}</div>
+          )}
+        </div>
+      );
     }
     if (!block.text.trim()) return null;
     // 纯 JSON 检测:整体是 {}/[] 时用 pre 代码块渲染(仿 claudecodeui JSON.response 分支)。

@@ -33,6 +33,29 @@ pub fn is_workspace_window(label: &str) -> bool {
     label.starts_with(WORKSPACE_WINDOW_PREFIX)
 }
 
+/// 判定窗口是否关联着项目(关闭确认弹窗的触发条件):有关联工作才需要手抖保护,
+/// 空白工作台窗口直接放行。
+///
+/// - `project-<id>`:该 id 仍在项目列表(detach 窗口理论必有,查不到视为已被移除 → 放行);
+/// - `main`:项目列表非空;
+/// - `workspace-N`:owner_window 指向该窗口的项目非空;
+/// - 其他 label(无项目窗口):false。
+pub fn window_has_projects(app: &AppHandle, label: &str) -> bool {
+    let Some(state) = app.try_state::<AppState>() else {
+        return false;
+    };
+    let Ok(snap) = state.inner.lock() else {
+        return false;
+    };
+    if let Some(project_id) = label.strip_prefix(PROJECT_WINDOW_PREFIX) {
+        return snap.projects.iter().any(|p| p.id == project_id);
+    }
+    if label == "main" {
+        return !snap.projects.is_empty();
+    }
+    snap.projects.iter().any(|p| p.owner_window == label)
+}
+
 /// 启动时恢复主窗口大小/位置(#132):`lib.rs` setup 在任何 show 之前调用。
 ///
 /// - bounds 以**逻辑像素**存取(前端保存时物理 px / scaleFactor 归一),恢复时 Tauri 按
@@ -319,10 +342,12 @@ pub fn kill_project_sessions(app: &AppHandle, project_id: &str) {
 /// 关闭指定独立项目窗口(dock back 时由前端调用)。
 /// 仅调用窗口的 `close()`;关闭事件统一由建窗时挂的 `CloseRequested` 监听处理
 /// (emit `project-window-closed`),覆盖用户叉窗 / dock-back / app 退出三种情形。
+/// dock back 是用户显式操作(非手抖),先登记关闭确认票据让 `CloseRequested` 直接放行。
 /// 找不到窗口(可能已被直接关掉)→ 幂等返回 Ok:此前窗口关闭时已 emit 过事件,
 /// 主窗口标记已被清除,此处无需再 emit。
 #[tauri::command]
 pub async fn close_project_window(app: AppHandle, window_label: String) -> Result<(), String> {
+    crate::grant_close_ticket(&app, &window_label);
     match app.get_webview_window(&window_label) {
         Some(win) => {
             win.close().map_err(|e| {
@@ -334,6 +359,30 @@ pub async fn close_project_window(app: AppHandle, window_label: String) -> Resul
         }
         None => {
             log::info!("close_project_window: {window_label} not found, idempotent ok");
+            Ok(())
+        }
+    }
+}
+
+/// 用户在关闭确认弹窗点「关闭」后由前端调用:登记一次性票据 + `close()`。
+///
+/// 票据让 close() 再触发的 `CloseRequested` 直接放行(归档/子进程回收照常走原路径),
+/// 与「不再提示」偏好解耦——不勾选记住时本次关闭也放行。窗口类型不限(主/项目/工作台
+/// 确认共用);找不到窗口 → 幂等 Ok(可能已被关)。
+#[tauri::command]
+pub async fn confirm_close_window(app: AppHandle, window_label: String) -> Result<(), String> {
+    crate::grant_close_ticket(&app, &window_label);
+    match app.get_webview_window(&window_label) {
+        Some(win) => {
+            win.close().map_err(|e| {
+                log::error!("confirm_close_window: failed to close {window_label}: {e}");
+                e.to_string()
+            })?;
+            log::info!("confirm_close_window: closed {window_label}");
+            Ok(())
+        }
+        None => {
+            log::info!("confirm_close_window: {window_label} not found, idempotent ok");
             Ok(())
         }
     }

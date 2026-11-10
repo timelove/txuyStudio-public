@@ -128,6 +128,16 @@ function scrollMarginRows(fontPx: number): number {
  * 拦截触发 refit,PTY 尺寸随之切换。 */
 function fitWithMargin(terminal: Terminal, fitAddon: FitAddon, fontPx: number) {
   try {
+    // 先强制按当前字体重测 cell:Web 字体(CaskaydiaCoveNF,font-display:swap)异步就绪,
+    // tab 首建时首测常落在 fallback 字体(Consolas 等,字形更窄)上 → cols 被算偏大,字体
+    // 就绪后真实字形更宽,行内容溢出画布右缘被裁(ls 表格尾部截断多)。xterm 不监听
+    // fonts.ready 也不自动重测(公开 API 无此入口),此处摸 _core._charSizeService 强制
+    // measure(与 paneCols 摸 _renderService.dimensions 同款私有访问先例)。measure 幂等
+    // 且廉价(measure element 一次强制布局读数,本函数随后读 clientWidth 同样强制布局),
+    // ResizeObserver 拖拽每帧路径可承受;charSize 变化时 dimensions 同步更新,下方
+    // proposeDimensions/paneCols 即用真实字形宽算 cols。
+    const core = (terminal as unknown as { _core?: { _charSizeService?: { measure?: () => void } } })._core;
+    core?._charSizeService?.measure?.();
     const dims = fitAddon.proposeDimensions();
     if (dims && dims.cols > 0 && dims.rows >= 2) {
       const alt = terminal.buffer.active.type === "alternate";
@@ -635,6 +645,29 @@ export function TerminalPane({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fontSize]);
+
+  // Web 字体(CaskaydiaCoveNF,font-display:swap)就绪后主动 refit 一轮:tab 首建抢跑在字体
+  // 加载前时,cols 按 fallback 字体(更窄)算偏大,行内容溢出画布右缘被裁(窄 pane 下 ls
+  // 表格尾部截断多)。fitWithMargin 内已强制重测 cell(见其注释),但字体就绪不触发容器
+  // ResizeObserver、也未必有切 tab,偏差会静默保留到下次拖窗——此处由 fonts.ready 事件
+  // 本身驱动一次修正。字体早已就绪时(重挂载/后建 tab)measure+refit 幂等无害;隐藏 tab
+  // 跳过,由「切活动 tab」effect 的 refit 兜底(彼时 fitWithMargin 内的 measure 同样生效)。
+  useEffect(() => {
+    let alive = true;
+    void document.fonts.ready.then(() => {
+      if (!alive) return;
+      for (const [tabId, tt] of terminalsRef.current) {
+        const container = tabContainerRefs.current.get(tabId);
+        if (!container || container.offsetParent === null) continue; // 隐藏 tab 跳过
+        const transport = getTransportRef.current(tabId);
+        refit(tt.terminal, tt.fitAddon, fontSize, (cols, rows) => void transport.resize(tabId, cols, rows));
+      }
+    });
+    return () => {
+      alive = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // 新建/分屏菜单的 open/close 由 Radix Popover 管理(点外、Esc 内置),无需手写 effect。
 

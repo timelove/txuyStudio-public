@@ -254,7 +254,7 @@ type SettingsPageProps = {
 export function SettingsPage({ initialTab, onClose, onTitlePointerDown, onTitleDoubleClick }: SettingsPageProps) {
   const { t } = useTranslation();
   const { locale, changeLanguage } = useI18n();
-  const { fontSize, changeFontSize, bgSetting, changeBgSetting, showPromptBanner, changeShowPromptBanner } = useSettings();
+  const { fontSize, changeFontSize, bgSetting, changeBgSetting, showPromptBanner, changeShowPromptBanner, skipCloseConfirm, changeSkipCloseConfirm } = useSettings();
   const { themeId, changeTheme, themes } = useTheme();
   // 主题切换控件的 ref:View Transitions 圆形 reveal 的触发点(控件中心)。
   const themeGroupRef = useRef<HTMLDivElement>(null);
@@ -480,6 +480,33 @@ export function SettingsPage({ initialTab, onClose, onTitlePointerDown, onTitleD
                     <span
                       className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-[left] ${
                         showPromptBanner ? "left-[18px]" : "left-0.5"
+                      }`}
+                    />
+                  </button>
+                </div>
+              </section>
+
+              {/* 关闭确认分区:开关 on = 跳过确认(等价弹窗里勾「不再提示」)。关掉确认
+                  的找回入口——手抖保护误开后在这里恢复。写后端 state.json 持久化。 */}
+              <section className="mt-4 border-t border-[var(--mx-border)] pt-3">
+                <div className="flex items-center justify-between">
+                  <div className="min-w-0 pr-3">
+                    <div className="text-[10px] uppercase tracking-wide text-[var(--mx-faint)]">{t("settings.closeConfirm.title")}</div>
+                    <div className="mt-1 text-[10px] text-[var(--mx-faint)]">{t("settings.closeConfirm.hint")}</div>
+                  </div>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={skipCloseConfirm}
+                    aria-label={t("settings.closeConfirm.title")}
+                    onClick={() => changeSkipCloseConfirm(!skipCloseConfirm)}
+                    className={`relative h-5 w-9 shrink-0 rounded-full transition-colors ${
+                      skipCloseConfirm ? "bg-(color:--mx-accent)" : "bg-(color:--mx-border-strong)"
+                    }`}
+                  >
+                    <span
+                      className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-[left] ${
+                        skipCloseConfirm ? "left-[18px]" : "left-0.5"
                       }`}
                     />
                   </button>

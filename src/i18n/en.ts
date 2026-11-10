@@ -419,6 +419,10 @@ const en = {
       title: "Prompt banner",
       hint: "Pin the current prompt banner at the top of the AI chat stream",
     },
+    closeConfirm: {
+      title: "Confirm window close",
+      hint: "Ask before closing windows that hold projects; re-enable here after ticking \"Don't ask again\"",
+    },
     updater: {
       title: "App update",
       check: "Check for updates",
@@ -431,6 +435,13 @@ const en = {
       relaunch: "Restart app",
       error: "Check failed",
     },
+  },
+  closeConfirm: {
+    title: "Close window?",
+    body: "Projects and running sessions in this window will be closed; unsaved work will be lost.",
+    neverAsk: "Don't ask again",
+    cancel: "Cancel",
+    confirm: "Close",
   },
   about: {
     description: "An AI CLI terminal workspace for Windows developers. Run claude, codex, regular shells, test commands and project tasks in parallel.",

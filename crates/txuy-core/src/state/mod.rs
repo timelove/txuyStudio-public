@@ -160,6 +160,9 @@ pub struct AppSnapshot {
     /// 界面主题 id("midnight"/"one-dark")。None = 默认(midnight)。
     /// Option + serde default 兼容旧 state.json 缺字段,无需迁移。
     pub theme_id: Option<String>,
+    /// 关闭含项目的窗口前是否跳过确认弹窗(手抖保护)。None/false = 弹确认。
+    /// Option + serde default 兼容旧 state.json 缺字段,无需迁移。
+    pub skip_close_confirm: Option<bool>,
     /// 最近项目历史(关闭/工作台窗口关窗时归档的项目记录,rootPath 去重、最新在前)。
     /// + 菜单「历史项目」数据源:点击重开(整份记录原样移回 projects,布局/claude 会话
     /// 映射保留),✕ 删除。空 Vec 不写盘,旧 state.json 缺字段 -> default 空,零迁移。

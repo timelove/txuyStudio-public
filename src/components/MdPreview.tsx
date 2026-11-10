@@ -141,17 +141,32 @@ function enrichCodeBlocks(root: HTMLElement): void {
   });
 }
 
-export const MdPreview = memo(function MdPreview({ content, inline = false }: { content: string; inline?: boolean }) {
+export const MdPreview = memo(function MdPreview({
+  content,
+  inline = false,
+  live = false,
+}: {
+  content: string;
+  inline?: boolean;
+  /**
+   * live(流式增量渲染,消息流双轨的稳定前缀):内容持续增长,每次 content 变
+   * ① **不清空旧 html**——照默认行为先清回 loading 再异步 parse,流式下就是
+   *    每个 delta 闪空一次;保留旧渲染直到新 html ready,视觉上是原地增量更新;
+   * ② **不进 LRU 缓存**——流式前缀每个 delta 都是不同 content,全 miss,会把
+   *    200 条缓存预算耗在中间态上,挤出真正需要缓存的历史消息/终态。
+   */
+  live?: boolean;
+}) {
   const { t } = useTranslation();
   const { fontSize } = useSettings();
-  // 命中缓存同步直出(切 tab/重渲染零解析、无 loading 闪烁)。
-  const [html, setHtml] = useState<string | null>(() => getCached(content) ?? null);
+  // 命中缓存同步直出(切 tab/重渲染零解析、无 loading 闪烁);live 模式不查缓存。
+  const [html, setHtml] = useState<string | null>(() => (live ? null : getCached(content)) ?? null);
   const [error, setError] = useState<string | null>(null);
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    // 先查缓存(同 content 在 effect 时可能已被别的实例解析完)。
-    const cached = getCached(content);
+    // 先查缓存(同 content 在 effect 时可能已被别的实例解析完;live 模式跳过)。
+    const cached = live ? undefined : getCached(content);
     if (cached !== undefined) {
       setHtml(cached);
       setError(null);
@@ -159,7 +174,8 @@ export const MdPreview = memo(function MdPreview({ content, inline = false }: { 
     }
     // 未命中且已有旧 html(content 变了,如笔记预览逐字输入):先清空回 loading 态,
     // 避免解析完成前短暂显示上一条内容的 html(陈旧闪现)。
-    setHtml((prev) => (prev === null ? prev : null));
+    // live(流式增量)模式不清空:保留旧 html 直到新 html ready,防每个 delta 闪空。
+    if (!live) setHtml((prev) => (prev === null ? prev : null));
     let alive = true;
     void getRenderPipeline()
       .then(({ render, highlightAll }) => {
@@ -170,7 +186,7 @@ export const MdPreview = memo(function MdPreview({ content, inline = false }: { 
         highlightAll(off);
         enrichCodeBlocks(off);
         const finalHtml = off.innerHTML;
-        setCached(content, finalHtml);
+        if (!live) setCached(content, finalHtml);
         setHtml(finalHtml);
         setError(null);
       })
@@ -181,7 +197,7 @@ export const MdPreview = memo(function MdPreview({ content, inline = false }: { 
     return () => {
       alive = false;
     };
-  }, [content]);
+  }, [content, live]);
 
   if (error) {
     return inline ? null : <div className="grid h-full place-items-center px-4 text-center text-[11px] text-[var(--mx-danger)]">{error}</div>;

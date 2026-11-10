@@ -403,7 +403,31 @@ pub async fn set_theme(
     Ok(snapshot)
 }
 
-/// 持久化主窗口大小/位置(#132 启用:前端 resize/移动防抖 350ms 调用)。
+/// 设置「关闭窗口确认」豁免(勾选「不再提示」后跳过手抖保护弹窗),持久化到 state.json。
+///
+/// 仿 [[set_locale]] 三段式。设置界面可重新打开确认(找回入口),弹窗勾选与设置开关
+/// 双写同一字段。
+#[tauri::command]
+pub async fn set_skip_close_confirm(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    skip: bool,
+) -> Result<AppSnapshot, String> {
+    let snapshot = {
+        let mut snap = state.inner.lock().map_err(|e| e.to_string())?;
+        snap.skip_close_confirm = Some(skip);
+        snap.clone()
+    };
+
+    log::info!("set_skip_close_confirm: skip = {skip}");
+    if let Err(e) = persistence::save(&app, &snapshot) {
+        log::error!("set_skip_close_confirm: persist failed: {e}");
+        return Err(e);
+    }
+    Ok(snapshot)
+}
+
+
 ///
 /// 阶段2 仅存 main 窗口 bounds;`windowLabel` 非 "main" 时忽略,
 /// 预留给阶段4/5 的独立项目窗口。bounds 为逻辑像素;`width == 0` 是「仅标志」条目

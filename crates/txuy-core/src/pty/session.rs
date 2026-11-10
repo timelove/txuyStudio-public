@@ -177,6 +177,8 @@ pub async fn spawn_pty_session(
     segments.push(PATH_REFRESH_PS.to_string());
     // pnpm wrapper:绕过 volta Rust shim 在 PTY 下的 bug(见 PNPM_WRAPPER_PS 注释)。
     segments.push(PNPM_WRAPPER_PS.to_string());
+    // 紧凑 ls/dir:窄 pane 下 Name 列拿满剩余宽度(见 TIGHT_LS_PS 注释)。
+    segments.push(TIGHT_LS_PS.to_string());
     if let Some(omp) = omp_init_str {
         segments.push(omp.to_string());
     }
@@ -350,6 +352,21 @@ pub const PATH_REFRESH_PS: &str = r#"$env:Path += ';' + (( ([Environment]::GetEn
 /// `Get-Command volta` 检测 volta 存在才定义 function(不破坏用 npm 等其他方式装 pnpm
 /// 的用户);`pnpm.exe` 仍可显式调用(走 shim)。
 pub const PNPM_WRAPPER_PS: &str = r#"if (Get-Command volta -ErrorAction SilentlyContinue) { function pnpm { volta run -- pnpm @args } }"#;
+
+/// 紧凑 `ls`/`dir`:重定义为 `Format-Table -AutoSize`,列宽按实际内容收缩。
+///
+/// 背景:pwsh 默认视图列宽固定(Mode 21 列/LastWriteTime 23 列),窄 pane(60 列)下 Name
+/// 只剩 ~9 列,文件名被折成多段堆叠(`.gitignore` → `.gitignor`+`e`)。AutoSize 后
+/// Mode→5、时间→19(带秒)、Name 拿剩余全部宽度,每条记录单行,长名尾部单字符 `…`
+/// 省略(60 列下 Name ~24 字符,ConPTY 探针实测,见 examples/pty_probe.rs)。
+///
+/// 语义保持:仅 FileSystem 提供程序走紧凑表;`ls -Name`(返回字符串)与注册表等其它
+/// provider 输出走原默认格式化;参数经 `@args` 全透传。恢复默认:
+/// `Remove-Item Function:ls,Function:dir` 或直接 `Get-ChildItem` 原名调用。
+///
+/// `Remove-Item Alias:ls,Alias:dir` 前置必须:PowerShell 命令解析 alias 优先于
+/// function,不删别名则 function 遮蔽不生效(探针验证过)。
+pub const TIGHT_LS_PS: &str = r#"Remove-Item Alias:ls,Alias:dir -Force -ErrorAction SilentlyContinue ; function ls { $i = Get-ChildItem @args ; if ($i -and ($i | Select-Object -First 1).PSProvider.Name -eq 'FileSystem') { $i | Format-Table Mode,LastWriteTime,Length,Name -AutoSize } else { $i } } ; function dir { ls @args }"#;
 
 /// PowerShell prompt hook：每次 prompt 渲染前输出不可见 OSC 标记，前端 transport 用它记录实时 cwd。
 ///

@@ -52,6 +52,7 @@ import { classifyCommand } from "../lib/commandClassifier";
 import { Tabs, TabsList, TabsTrigger } from "./ui/Tabs";
 import { TabCloseIcon } from "./icons";
 import { filterSlashCommands, parseSlashInput, type SlashCommandDef } from "../domain/slashCommands";
+import { splitStableTail, useThrottledValue } from "../domain/streamingMarkdown";
 
 /** MdPreview 懒加载(避免 codexpane 首屏就拉 marked/dompurify,与探针共用 md-render 分包)。 */
 const MdPreviewLazy = lazy(() =>
@@ -2510,12 +2511,12 @@ const MessageRow = memo(function MessageRow({
                     />
                   );
                 }
-                return m.blocks.map((b, bi) => <BlockView key={`wb-${k}-${bi}`} block={b} t={t} />);
+                return m.blocks.map((b, bi) => <BlockView key={`wb-${k}-${bi}`} block={b} t={t} streaming={m.streaming} />);
               })}
             </div>
           )}
           {message.blocks.map((b, i) => (
-            <BlockView key={i} block={b} t={t} />
+            <BlockView key={i} block={b} t={t} streaming={message.streaming} />
           ))}
           {message.blocks.length === 0 && message.streaming && (
             <div className="flex items-center gap-2 text-xs text-[var(--mx-muted)]">
@@ -2548,13 +2549,36 @@ const MessageRow = memo(function MessageRow({
 function BlockView({
   block,
   t,
+  streaming = false,
 }: {
   block: CodexBlock;
   t: (k: string) => string;
+  /** 所在消息仍在流式输出:text block 走双轨(稳定前缀 markdown + 活跃尾巴原文)。 */
+  streaming?: boolean;
 }) {
+  // 流式双轨:与 ClaudePane.BlockRow 同口径——稳定前缀实时渲染、活跃尾巴纯文本,
+  // 边写边渲染。hooks 无条件常调(顺序稳定);非 text block 传空串。
+  // 节流 120ms:delta 每 token 一发,不节流则每个 token 都跑一遍 marked 全量解析。
+  const textStable = block.type === "text" ? splitStableTail(block.text).stable : "";
+  const stableLive = useThrottledValue(textStable, 120);
   if (block.type === "text") {
     const trimmed = block.text.trim();
     if (!trimmed) return null;
+    if (streaming) {
+      const { tail } = splitStableTail(block.text);
+      return (
+        <div dir="auto" className="leading-relaxed text-[var(--mx-text)]">
+          {stableLive && (
+            <Suspense fallback={null}>
+              <MdPreviewLazy content={stableLive} inline live />
+            </Suspense>
+          )}
+          {tail && (
+            <div className="whitespace-pre-wrap break-words leading-relaxed">{tail}</div>
+          )}
+        </div>
+      );
+    }
     // 纯 JSON 检测:整体是 {}/[] 时用 pre 代码块渲染。
     if (
       (trimmed.startsWith("{") || trimmed.startsWith("[")) &&

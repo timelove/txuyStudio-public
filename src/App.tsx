@@ -4,6 +4,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import { mockProjects } from "./mock/mockProjects";
 import { AppShell } from "./components/AppShell";
+import { CloseConfirmDialog } from "./components/CloseConfirmDialog";
 import { I18nProvider } from "./i18n/I18nProvider";
 import { SettingsProvider } from "./settings/SettingsProvider";
 import { ThemeProvider } from "./theme/ThemeProvider";
@@ -69,6 +70,8 @@ export default function App() {
   const [terminalFontSize, setTerminalFontSize] = useState<number | undefined>(undefined);
   /** 后端持久化的主题 id(hydrate 后传入 ThemeProvider 作权威初始值;undefined -> 默认 midnight)。 */
   const [themeId, setThemeId] = useState<string | null | undefined>(undefined);
+  /** 后端持久化的关闭确认豁免(hydrate 后传入 SettingsProvider;未设 = false,弹确认)。 */
+  const [skipCloseConfirm, setSkipCloseConfirm] = useState<boolean | undefined>(undefined);
   /** 最近项目历史(+ 菜单「历史项目」数据源;关闭项目/工作台关窗时后端归档,随快照回传)。 */
   const [recentProjects, setRecentProjects] = useState<ProjectRecord[]>([]);
 
@@ -121,6 +124,7 @@ export default function App() {
         setLocale(snap.locale ?? null);
         setTerminalFontSize(snap.terminalFontSize);
         setThemeId(snap.themeId ?? null);
+        setSkipCloseConfirm(snap.skipCloseConfirm ?? false);
         setRecentProjects(snap.recentProjects ?? []);
         setLoadState("ready");
       })
@@ -412,7 +416,7 @@ export default function App() {
   return (
     <I18nProvider initialLocale={locale}>
       <ThemeProvider initialThemeId={themeId}>
-      <SettingsProvider initialFontSize={terminalFontSize}>
+      <SettingsProvider initialFontSize={terminalFontSize} initialSkipCloseConfirm={skipCloseConfirm}>
         <AppShell
           projects={projects}
           activeProjectId={activeProjectId}
@@ -430,6 +434,8 @@ export default function App() {
           onOpenRecentToWindow={mode.isMain ? handleOpenRecentToWindow : undefined}
           onNewWindow={mode.isMain ? handleNewWindow : undefined}
         />
+        {/* 关闭确认弹窗:全局挂载,按窗口 label 过滤只在本窗口弹(main/项目/工作台共用)。 */}
+        <CloseConfirmDialog />
       </SettingsProvider>
       </ThemeProvider>
     </I18nProvider>

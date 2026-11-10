@@ -51,6 +51,8 @@ export type BackendAppSnapshot = {
   terminalFontSize?: number;
   /** 界面主题 id;undefined/未设 = 默认(midnight)。 */
   themeId?: string | null;
+  /** 关闭含项目的窗口前是否跳过确认弹窗(手抖保护);undefined/未设 = 弹确认。 */
+  skipCloseConfirm?: boolean | null;
   /** 最近项目历史(关闭项目/工作台窗口关窗时后端归档;+ 菜单「历史项目」数据源)。 */
   recentProjects?: ProjectRecord[];
 };

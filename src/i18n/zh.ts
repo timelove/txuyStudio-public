@@ -410,6 +410,10 @@ const zh = {
       title: "消息流悬浮窗",
       hint: "AI 对话流顶部吸附「当前问题」横幅,滚动后可随时查看正在处理的问题",
     },
+    closeConfirm: {
+      title: "关闭窗口确认",
+      hint: "关闭含项目的窗口前弹确认,防手抖误关;在弹窗勾选「不再提示」后可在此恢复",
+    },
     updater: {
       title: "应用更新",
       check: "检查更新",
@@ -422,6 +426,13 @@ const zh = {
       relaunch: "重启应用",
       error: "检查失败",
     },
+  },
+  closeConfirm: {
+    title: "关闭窗口?",
+    body: "该窗口下的项目与运行中的会话将被关闭归档,未保存的操作会丢失。",
+    neverAsk: "不再提示",
+    cancel: "取消",
+    confirm: "关闭",
   },
   about: {
     description: "面向 Windows 开发者的 AI CLI 终端工作台。并行管理 claude、codex、常规 shell、测试命令与项目任务。",

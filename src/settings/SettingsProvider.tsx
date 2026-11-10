@@ -65,15 +65,22 @@ type SettingsContextValue = {
   showPromptBanner: boolean;
   /** 切换悬浮条显示 + localStorage 持久化。 */
   changeShowPromptBanner: (show: boolean) => void;
+  /** 关闭含项目的窗口前是否跳过确认弹窗(手抖保护);undefined = 弹确认。 */
+  skipCloseConfirm: boolean;
+  /** 切换关闭确认豁免 + 后端 state.json 持久化(弹窗勾选与设置开关双写同一字段)。 */
+  changeSkipCloseConfirm: (skip: boolean) => void;
 };
 
 const SettingsContext = createContext<SettingsContextValue | null>(null);
 
 export function SettingsProvider({
   initialFontSize,
+  initialSkipCloseConfirm,
   children,
 }: {
   initialFontSize?: number;
+  /** hydrate 读到的后端偏好(undefined/未设 = false,即默认弹确认)。 */
+  initialSkipCloseConfirm?: boolean;
   children: ReactNode;
 }) {
   const [fontSize, setFontSize] = useState<number>(
@@ -81,6 +88,16 @@ export function SettingsProvider({
   );
   const [bgSetting, setBgSetting] = useState<BgSetting>(loadBgSetting);
   const [showPromptBanner, setShowPromptBanner] = useState<boolean>(loadShowPromptBanner);
+  const [skipCloseConfirm, setSkipCloseConfirm] = useState<boolean>(
+    () => initialSkipCloseConfirm ?? false,
+  );
+
+  const changeSkipCloseConfirm = (skip: boolean) => {
+    setSkipCloseConfirm(skip);
+    invoke("set_skip_close_confirm", { skip }).catch((e) =>
+      console.warn("[settings] set_skip_close_confirm backend failed:", e),
+    );
+  };
 
   const changeShowPromptBanner = (show: boolean) => {
     setShowPromptBanner(show);
@@ -113,7 +130,7 @@ export function SettingsProvider({
 
   return (
     <SettingsContext.Provider
-      value={{ fontSize, changeFontSize, bgSetting, changeBgSetting, showPromptBanner, changeShowPromptBanner }}
+      value={{ fontSize, changeFontSize, bgSetting, changeBgSetting, showPromptBanner, changeShowPromptBanner, skipCloseConfirm, changeSkipCloseConfirm }}
     >
       {children}
     </SettingsContext.Provider>

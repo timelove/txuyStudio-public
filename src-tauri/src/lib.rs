@@ -218,6 +218,52 @@ fn show_window(app: tauri::AppHandle, window: tauri::Window) {
     }
 }
 
+/// 关闭确认的一次性放行票据(按窗口 label)。
+///
+/// `confirm_close_window`(用户在弹窗点「关闭」)与 `close_project_window`(dock back
+/// 显式操作)先登记票据再 `close()`——close 触发的 `CloseRequested` 消费票据直接放行
+/// (归档/子进程回收照常走原路径),与「不再提示」持久偏好解耦:不勾选记住时,
+/// 单次关闭同样放行,下次叉窗仍弹确认。
+#[derive(Default)]
+pub(crate) struct CloseConfirmTickets(std::sync::Mutex<std::collections::HashSet<String>>);
+
+/// 消费一次性关闭票据(命中即移除)。true = 本次 close 放行。
+pub(crate) fn take_close_ticket(app: &tauri::AppHandle, label: &str) -> bool {
+    let Some(tickets) = app.try_state::<CloseConfirmTickets>() else {
+        return false;
+    };
+    tickets.0.lock().map(|mut set| set.remove(label)).unwrap_or(false)
+}
+
+/// 登记一次性关闭票据(放行下一次该窗口的 CloseRequested)。
+pub(crate) fn grant_close_ticket(app: &tauri::AppHandle, label: &str) {
+    if let Some(tickets) = app.try_state::<CloseConfirmTickets>() {
+        if let Ok(mut set) = tickets.0.lock() {
+            set.insert(label.to_string());
+        }
+    }
+}
+
+/// 判定窗口本次关闭是否需要弹确认(手抖保护)。需要 = 有关联项目 且 未被偏好/票据豁免。
+///
+/// - `skip_close_confirm == Some(true)`(用户勾过「不再提示」):放行;
+/// - 一次性票据命中(confirm/dock-back 程序性关闭):放行;
+/// - 窗口无关联项目(空白工作台/已移除项目的 detach 窗口):无损失,放行;
+/// - 其余(有关联工作):需确认——`prevent_close` + emit 让前端弹窗。
+fn close_needs_confirm(app: &tauri::AppHandle, label: &str) -> bool {
+    if let Some(state) = app.try_state::<state::AppState>() {
+        if let Ok(snap) = state.inner.lock() {
+            if snap.skip_close_confirm == Some(true) {
+                return false;
+            }
+        }
+    }
+    if take_close_ticket(app, label) {
+        return false;
+    }
+    windows::window_has_projects(app, label)
+}
+
 /// 应用退出前同步回收全部子进程/句柄(PTY/claude/codex/`!` shell/fs watcher)。
 ///
 /// portable-pty child drop 不 kill,`.cmd` 包装下 node 更是孙子进程——不主动回收,
@@ -249,8 +295,17 @@ pub fn run() {
         // 主窗口据此清除 detached 标记、恢复项目显示。统一在 Builder 挂载,
         // 覆盖所有关闭路径,无需在建窗处逐个挂。
         .on_window_event(|window, event| {
-            if let tauri::WindowEvent::CloseRequested { .. } = event {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 let label = window.label();
+                // 关闭确认(手抖保护):有关联项目的窗口且未被偏好/票据豁免 → 阻止本次
+                // 关闭,emit 让前端弹确认;用户确认后走 confirm_close_window(票据放行,
+                // 归档/回收逻辑在放行路径照常执行)。空白工作台/勾过「不再提示」直接放行。
+                if close_needs_confirm(window.app_handle(), label) {
+                    log::info!("close confirm: blocking close of {label}, emitting close-confirm-requested");
+                    api.prevent_close();
+                    let _ = window.app_handle().emit("close-confirm-requested", label);
+                    return;
+                }
                 if let Some(project_id) = label.strip_prefix(windows::PROJECT_WINDOW_PREFIX) {
                     log::info!("project window close requested: {label}, emitting project-window-closed");
                     let _ = window.app_handle().emit("project-window-closed", label);
@@ -386,12 +441,17 @@ pub fn run() {
         .manage(ClaudeRegistry::default())
         .manage(CodexRegistry::default())
         .manage(ShellRunRegistry::default())
+        .manage(CloseConfirmTickets::default())
         .invoke_handler(tauri::generate_handler![
             get_app_info,
             // 休眠唤醒后重设窗口图标(任务栏图标退化恢复)。
             refresh_window_icons,
             // 启动白屏消除:窗口默认 hidden,前端首帧渲染后调 show_window 显示。
             show_window,
+            // 关闭确认(手抖保护):用户在确认弹窗点「关闭」后的票据放行关窗。
+            windows::confirm_close_window,
+            // 「不再提示」偏好写入(弹窗勾选与设置开关双写同一字段)。
+            state::commands::set_skip_close_confirm,
             // PTY（阶段 3：已按 projectId 归属分桶，close_project 时 kill 整个项目）
             spawn_pty,
             write_pty,
