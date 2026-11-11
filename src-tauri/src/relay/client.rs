@@ -123,8 +123,24 @@ async fn serve_inner(
     handle.set_online();
     log::info!("[relay] 已上线 ({})", cfg.device_id);
 
+    // 发送侧走无界队列 + 独立 writer 任务(2026-11-10):此前所有发送点都直持
+    // split 出的 tx,而读循环内联 `api::dispatch(...).await` —— 一个慢请求
+    // (chat.history 数 MB 传输+加解密、sessions.list 扫 jsonl)就把后续帧全堵住,
+    // 手机端 15s 超时误报但请求最终完成(「明明加载了却总报 timeout」)。
+    // 现在:每个请求 spawn 并发分发,发送统一压进队列由 writer 排空。
+    let (out_tx, mut out_rx) = tokio::sync::mpsc::unbounded_channel::<Message>();
+    let _writer = tokio::spawn(async move {
+        while let Some(msg) = out_rx.recv().await {
+            if tx.send(msg).await.is_err() {
+                log::warn!("[relay] writer 写失败,连接作废");
+                break;
+            }
+        }
+        // writer 退出即 drop out_rx:所有 out_tx.send 立刻报错,读循环随之退场重连。
+    });
+
     // 上线即推快照 + 周期刷新;失败只记日志(快照是锦上添花,不致命)。
-    if let Err(e) = push_snapshot(app, &mut tx, cfg).await {
+    if let Err(e) = push_snapshot(app, &out_tx, cfg).await {
         log::warn!("[relay] 首推快照失败: {e}");
     }
 
@@ -154,29 +170,40 @@ async fn serve_inner(
                     Message::Text(t) => {
                         let v: Value = match serde_json::from_str(&t) { Ok(v) => v, Err(_) => continue };
                         match v.get("type").and_then(|t| t.as_str()).unwrap_or("") {
-                            // 手机端密文请求:解密 → 分发 → 加密回。
+                            // 手机端密文请求:解密 → 分发 → 加密回。**每请求独立 spawn**
+                            // (2026-11-10):dispatch 可能很慢(chat.history 几 MB、
+                            // sessions.list 扫全量 jsonl),内联 await 会串行堵死读循环,
+                            // 手机端超时误报。解密/分发失败只影响这一条请求,不再连坐断连。
                             "recv" => {
                                 let from = v.get("from").and_then(|f| f.as_str()).unwrap_or("").to_string();
-                                let enc = v.get("enc").and_then(|e| e.as_str()).unwrap_or("");
+                                // owned:spawn 的任务必须 'static,不能借用循环里的 v。
+                                let enc = v.get("enc").and_then(|e| e.as_str()).unwrap_or("").to_string();
                                 // 发过请求 = 这台手机在线且想收东西;记下来,AI 事件才推给它。
                                 if !from.is_empty() {
                                     phones.insert(from.clone());
                                 }
-                                let resp = match crypto::open(&key, enc) {
-                                    Ok(plain) => {
-                                        let frame: Value = serde_json::from_slice(&plain)
-                                            .unwrap_or_else(|_| json!({"id": null, "method": ""}));
-                                        api::dispatch(app, frame).await
-                                    }
-                                    Err(e) => json!({"id": null, "ok": false, "error": format!("decrypt: {e}")}),
-                                };
-                                let body = serde_json::to_string(&resp).unwrap_or_default();
-                                let enc_out = crypto::seal(&key, body.as_bytes())
-                                    .map_err(|e| (format!("seal resp: {e}"), true))?;
-                                let out = json!({"type": "send", "to": from, "enc": enc_out});
-                                tx.send(Message::Text(out.to_string().into()))
-                                    .await
-                                    .map_err(|e| (format!("send resp: {e}"), true))?;
+                                let app = app.clone();
+                                let key = key.clone();
+                                let out_tx = out_tx.clone();
+                                tokio::spawn(async move {
+                                    let resp = match crypto::open(&key, &enc) {
+                                        Ok(plain) => {
+                                            let frame: Value = serde_json::from_slice(&plain)
+                                                .unwrap_or_else(|_| json!({"id": null, "method": ""}));
+                                            api::dispatch(&app, frame).await
+                                        }
+                                        Err(e) => json!({"id": null, "ok": false, "error": format!("decrypt: {e}")}),
+                                    };
+                                    let body = serde_json::to_string(&resp).unwrap_or_default();
+                                    let Ok(enc_out) = crypto::seal(&key, body.as_bytes()) else {
+                                        log::warn!("[relay] seal resp 失败,丢弃该响应");
+                                        return;
+                                    };
+                                    let out = json!({"type": "send", "to": from, "enc": enc_out});
+                                    // send 失败 = 连接已死(writer 退出),任务直接收尾;
+                                    // 重连由读循环的 ping/snap 分支或下一次请求触发。
+                                    let _ = out_tx.send(Message::Text(out.to_string().into()));
+                                });
                             }
                             "pong" | "snapshot_result" | "send_result" => {}
                             "bye" => return drop("replaced by new connection".into(), true),
@@ -189,12 +216,12 @@ async fn serve_inner(
                 }
             }
             _ = ping_tick.tick() => {
-                tx.send(Message::Text(json!({"type":"ping"}).to_string().into()))
-                    .await
+                // 队列已关 = writer 写失败连接作废,退出重连(读循环自身不再直接碰 tx)。
+                out_tx.send(Message::Text(json!({"type":"ping"}).to_string().into()))
                     .map_err(|e| (format!("ping: {e}"), true))?;
             }
             _ = snap_tick.tick() => {
-                if let Err(e) = push_snapshot(app, &mut tx, cfg).await {
+                if let Err(e) = push_snapshot(app, &out_tx, cfg).await {
                     log::warn!("[relay] 周期快照失败: {e}");
                 }
             }
@@ -208,8 +235,7 @@ async fn serve_inner(
                 let Ok(enc) = crypto::seal(&key, body.as_bytes()) else { continue };
                 for phone in phones.iter() {
                     let out = json!({"type": "send", "to": phone, "enc": enc});
-                    tx.send(Message::Text(out.to_string().into()))
-                        .await
+                    out_tx.send(Message::Text(out.to_string().into()))
                         .map_err(|e| (format!("send chat.event: {e}"), true))?;
                 }
             }
@@ -241,18 +267,18 @@ pub(super) async fn next_ai_event(
     }
 }
 
-/// 构建快照 → 加密 → snapshot_put。
-async fn push_snapshot<S>(app: &AppHandle, tx: &mut S, cfg: &RelayConfig) -> Result<(), String>
-where
-    S: SinkExt<Message> + Unpin,
-    S::Error: std::fmt::Display,
-{
+/// 构建快照 → 加密 → snapshot_put(经出站队列,不再直接持 WS sink)。
+async fn push_snapshot(
+    app: &AppHandle,
+    out_tx: &tokio::sync::mpsc::UnboundedSender<Message>,
+    cfg: &RelayConfig,
+) -> Result<(), String> {
     let snap = api::build_snapshot(app).await;
     let key = cfg.pair_key_bytes()?;
     let enc = crypto::seal(&key, serde_json::to_string(&snap).unwrap_or_default().as_bytes())?;
     let out = json!({"type": "snapshot_put", "enc": enc});
-    tx.send(Message::Text(out.to_string().into()))
-        .await
+    out_tx
+        .send(Message::Text(out.to_string().into()))
         .map_err(|e| format!("send snapshot: {e}"))?;
     Ok(())
 }

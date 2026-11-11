@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { selectEnclosingPre } from "../lib/selectEnclosingPre";
 import { useCurrentPromptStick } from "../lib/useCurrentPromptStick";
 import { useMessageWindow } from "../lib/useMessageWindow";
+import { fuzzyRankBy } from "../lib/mentionPath";
 import { homeDir } from "@tauri-apps/api/path";
 import { useTranslation } from "react-i18next";
 import type { ShellKind, SplitDirection } from "../domain/paneTree";
@@ -536,12 +537,12 @@ export function CodexPane(props: CodexPaneProps) {
     return () => ro.disconnect();
   }, [activeTabId, hasMessages]);
 
-  // @ 文件引用:fuzzy 过滤(路径含 query),限 50 条。
+  // @ 文件引用:fuzzy 过滤(子序列打分,与 ClaudePane 同款;见 mentionPath.ts),限 50 条。
   const atMatches = useMemo(() => {
     if (!atOpen) return [];
-    const q = atQuery.trim().toLowerCase();
-    const filtered = q ? atFiles.filter((f) => f.path.toLowerCase().includes(q)) : atFiles;
-    return filtered.slice(0, 50);
+    const q = atQuery.trim();
+    const ranked = q ? fuzzyRankBy(atFiles, (f) => f.path, q) : atFiles;
+    return ranked.slice(0, 50);
   }, [atOpen, atQuery, atFiles]);
   useEffect(() => {
     setAtIndex(0);
@@ -581,7 +582,12 @@ export function CodexPane(props: CodexPaneProps) {
           atLoadedCwdRef.current = cwd;
           invoke<{ id: string; name: string }[]>("list_files", { path: cwd })
             .then((files) => setAtFiles(files.map((f) => ({ path: f.id.replace(/\\/g, "/"), name: f.name }))))
-            .catch(() => setAtFiles([]));
+            .catch(() => {
+              // 失败回滚已加载标记:否则 ref 已指向 cwd,本项目内再敲 @ 永不重拉,
+              // 面板一直是空列表(「输入 @ 没效果」的一种根因)。下次敲 @ 自动重试。
+              if (atLoadedCwdRef.current === cwd) atLoadedCwdRef.current = null;
+              setAtFiles([]);
+            });
         }
         return;
       }
@@ -2101,10 +2107,28 @@ export function CodexPane(props: CodexPaneProps) {
                           t={t}
                         />
                       )}
-                      <span className="shrink-0">
-                        ↑{formatTokens(sessionTokens.input)} ↓{formatTokens(sessionTokens.output)}
-                      </span>
-                      <span className="shrink-0 whitespace-nowrap"><ElapsedText start={sessionStart} prefix="⏱ " /></span>
+                      {/* 本轮 token/耗时收进悬浮按钮(2026-11-11 用户:常显不关注,
+                          hover 展示即可;与 ClaudePane 同款,codex 无成本项)。 */}
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <button
+                            type="button"
+                            className="shrink-0 rounded p-0.5 text-[var(--mx-faint)] transition-colors hover:text-[var(--mx-text)]"
+                            aria-label={t("codexpane.composerStatsTitle")}
+                          >
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" aria-hidden>
+                              <path d="M5 20V10M12 20V4M19 20v-6" strokeLinecap="round" />
+                            </svg>
+                          </button>
+                        </TooltipTrigger>
+                        <TooltipContent>
+                          <div className="flex flex-col gap-0.5 font-mono text-[10px] tabular-nums text-[var(--mx-text)]">
+                            <span className="font-sans font-semibold">{t("codexpane.composerStatsTitle")}</span>
+                            <span>↑{formatTokens(sessionTokens.input)} ↓{formatTokens(sessionTokens.output)}</span>
+                            <span>⏱ <ElapsedText start={sessionStart} /></span>
+                          </div>
+                        </TooltipContent>
+                      </Tooltip>
                     </div>
                   </div>
                 </PopoverAnchor>
@@ -2114,7 +2138,9 @@ export function CodexPane(props: CodexPaneProps) {
                   sideOffset={6}
                   onOpenAutoFocus={(e) => e.preventDefault()}
                   onCloseAutoFocus={(e) => e.preventDefault()}
-                  className="mx-menu w-[360px] max-w-[calc(100vw-2rem)] overflow-hidden border border-[var(--mx-border)] bg-[var(--mx-surface)] p-1.5 shadow-xl"
+                  // 宽度自适应内容,上限=锚点(输入框)宽:Radix Popper 在 content 上暴露
+                  // anchor 宽度变量——短列表不撑满,长路径最宽到输入框宽再换行(见 break-all)。
+                  className="mx-menu max-w-[var(--radix-popper-anchor-width)] overflow-hidden border border-[var(--mx-border)] bg-[var(--mx-surface)] p-1.5 shadow-xl"
                 >
                   <div className="mx-scroll-pretty max-h-[min(50vh,420px)] overflow-y-auto p-0.5">
                   {cmdOpen && cmdMatches.length > 0
@@ -2143,10 +2169,10 @@ export function CodexPane(props: CodexPaneProps) {
                       onMouseDown={(e) => e.stopPropagation()}
                       onClick={() => applyAtFile(f)}
                       onMouseEnter={() => setAtIndex(i)}
-                      className={`flex w-full items-center gap-2 rounded px-2 py-1 text-left transition-colors ${i === atIndex ? "bg-[var(--mx-selected-bg)]" : "hover:bg-[var(--mx-hover-bg)]"}`}
+                      className={`flex w-full items-start gap-2 rounded px-2 py-1 text-left transition-colors ${i === atIndex ? "bg-[var(--mx-selected-bg)]" : "hover:bg-[var(--mx-hover-bg)]"}`}
                     >
                       <span className="shrink-0 text-[10px] text-[var(--mx-faint)]">@</span>
-                      <span className="truncate font-mono text-[11px] text-[var(--mx-text)]" title={f.path}>{f.path}</span>
+                      <span className="min-w-0 flex-1 whitespace-normal break-all font-mono text-[11px] leading-4 text-[var(--mx-text)]">{f.path}</span>
                     </button>
                   ))}
                   </div>

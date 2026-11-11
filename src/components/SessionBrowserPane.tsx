@@ -8,6 +8,7 @@ import type { WorkspaceSession } from "../domain/sessions";
 import { ShellMenu } from "./ShellMenu";
 import { SplitPaneButtons } from "./SplitPaneButtons";
 import { Button } from "./ui/Button";
+import { FleetIcon } from "./ui/FleetIcon";
 import { Popover, PopoverTrigger } from "./ui/Popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/Tooltip";
 import { Tabs, TabsList, TabsTrigger } from "./ui/Tabs";
@@ -266,11 +267,10 @@ export function SessionBrowserPane({ paneId, focused, sessions, activeTabId, onF
           {sessions.map((s) => {
             const isActive = s.id === activeTabId;
             return (
-              <Tooltip>
+              <Tooltip key={s.id}>
               <TooltipTrigger asChild>
               <TabsTrigger asChild value={s.id}>
               <div
-                key={s.id}
                 className={`mx-tab-item group/tab flex h-[length:var(--mx-tab-h)] min-w-0 shrink cursor-pointer items-center gap-1 px-2 transition-colors ${
                   isActive
                     ? "text-[var(--mx-text-bright)]"
@@ -712,7 +712,19 @@ function SessionRow({
         {item.gitBranch && (
           <Tooltip>
           <TooltipTrigger asChild>
-          <span className="truncate font-mono text-[var(--mx-muted)]">⎇ {item.gitBranch}</span>
+          {/* fleet worker 的会话分支(fleet/<taskId>)用琥珀 + 分支图标,与 FleetPanel 视觉同源。 */}
+          <span
+            className={`flex min-w-0 items-center gap-0.5 font-mono ${
+              item.gitBranch.startsWith("fleet/") ? "text-[#f59e0b]" : "text-[var(--mx-muted)]"
+            }`}
+          >
+            {item.gitBranch.startsWith("fleet/") ? (
+              <FleetIcon className="h-2.5 w-2.5" />
+            ) : (
+              <span className="shrink-0">⎇</span>
+            )}
+            <span className="truncate">{item.gitBranch}</span>
+          </span>
           </TooltipTrigger>
           <TooltipContent>{item.gitBranch}</TooltipContent>
           </Tooltip>

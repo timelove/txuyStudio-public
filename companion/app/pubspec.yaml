@@ -18,7 +18,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # of the product and file versions while build-number is used as the build suffix.
 # 版本跟随桌面端(package.json/tauri.conf.json)同步 bump——AppUpdateService 以 release
 # tag(v0.2.x)与本字段比对判断更新,口径必须同源;build number(+N)仅在同名版本内递增。
-version: 0.2.19+1
+version: 0.2.21+1
 
 environment:
   sdk: ^3.13.5
@@ -44,8 +44,12 @@ dependencies:
   http: ^1.2.0
   # 读取当前 App 版本,用于 GitHub Releases 更新比较
   package_info_plus: ^8.3.1
-  # 手动更新:打开 GitHub Release / APK 下载页,由系统浏览器完成下载安装
+  # 更新回退路径:打开 GitHub Release / APK 下载页,由系统浏览器完成下载安装
   url_launcher: ^6.3.1
+  # 应用内更新(Android):APK 下载到缓存目录后唤起系统安装器
+  open_filex: ^4.5.0
+  # 应用内更新的缓存目录(getTemporaryDirectory)
+  path_provider: ^2.1.0
   # 配对凭证 + 手机自身 deviceId 持久化
   shared_preferences: ^2.3.0
   # web 平台 API(location.hash 直达链接);dart:html 在 3.47 已 deprecated

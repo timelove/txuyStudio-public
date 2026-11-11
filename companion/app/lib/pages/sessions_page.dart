@@ -46,6 +46,28 @@ String _cwdKey(String? cwd) {
   return v.toLowerCase();
 }
 
+/// fleet worktree cwd → 主项目 cwd + taskId(桌面 `parseFleetCwd` 同口径,对齐后端
+/// `fleet_root_dir` 的 `<项目根>-fleet\<taskId>` 约定):倒数第二段以 `-fleet` 结尾时命中,
+/// worker 会话归主项目组而不是碎成 taskId 组;启发式识别,worker 合并/删除后历史仍正确归组。
+({String mainCwd, String taskId})? _parseFleetCwd(String? cwd) {
+  var v = (cwd ?? "").trim();
+  if (v.isEmpty) return null;
+  if (v.length >= 4 && (v.startsWith(r"\\?\") || v.startsWith(r"\\.\"))) v = v.substring(4);
+  final parts = v.split(RegExp(r"[\\/]")).where((p) => p.isNotEmpty).toList();
+  if (parts.length < 3) return null;
+  const suffix = "-fleet";
+  final carrier = parts[parts.length - 2];
+  final taskId = parts.last;
+  if (taskId.isEmpty || carrier.length <= suffix.length || !carrier.endsWith(suffix)) return null;
+  final projectDir = carrier.substring(0, carrier.length - suffix.length);
+  if (projectDir.isEmpty) return null;
+  final sep = v.contains("\\") ? "\\" : "/";
+  return (
+    mainCwd: [...parts.sublist(0, parts.length - 2), projectDir].join(sep),
+    taskId: taskId,
+  );
+}
+
 /// 取路径末段作项目名(Windows `\` / POSIX `/` 都兼容)。
 String _pathBasename(String value) {
   final normalized = value.trim().replaceAll(RegExp(r"[\\/]+$"), "");
@@ -110,13 +132,15 @@ class _SessionsPageState extends State<SessionsPage> {
   List<_SessionGroup> _group(List<SessionItem> items) {
     final map = <String, _SessionGroup>{};
     for (final it in items) {
-      final key = _cwdKey(it.cwd);
+      // fleet worktree 会话归主项目组(cwd 语义见 _parseFleetCwd 注释)。
+      final fleet = _parseFleetCwd(it.cwd);
+      final groupCwd = fleet?.mainCwd ?? (it.cwd ?? "").trim();
+      final key = _cwdKey(groupCwd.isEmpty ? null : groupCwd);
       final group = map.putIfAbsent(key, () {
-        final cwd = (it.cwd ?? "").trim();
         return _SessionGroup(
           key: key,
-          cwd: cwd.isEmpty ? null : cwd,
-          label: cwd.isEmpty ? "未知项目" : _pathBasename(cwd),
+          cwd: groupCwd.isEmpty ? null : groupCwd,
+          label: groupCwd.isEmpty ? "未知项目" : _pathBasename(groupCwd),
           sessions: [],
         );
       });
@@ -274,9 +298,21 @@ class _SessionsPageState extends State<SessionsPage> {
         maxLines: 1, overflow: TextOverflow.ellipsis,
         style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500, color: Mx.textBright),
       ),
-      subtitle: Text(
-        "${_fmtTime(s.lastAt)} · ${s.messageCount} 条${s.gitBranch != null && s.gitBranch != "HEAD" ? " · ${s.gitBranch}" : ""}",
-        style: const TextStyle(fontSize: 11, color: Mx.muted),
+      subtitle: Text.rich(
+        TextSpan(
+          style: const TextStyle(fontSize: 11, color: Mx.muted),
+          children: [
+            TextSpan(text: "${_fmtTime(s.lastAt)} · ${s.messageCount} 条"),
+            if (s.gitBranch != null && s.gitBranch != "HEAD")
+              // fleet worker 的分支(fleet/<taskId>)用琥珀,与 Fleet 总览视觉同源。
+              TextSpan(
+                text: " · ${s.gitBranch}",
+                style: s.gitBranch!.startsWith("fleet/")
+                    ? const TextStyle(color: Mx.warning)
+                    : null,
+              ),
+          ],
+        ),
       ),
       trailing: Text(_fmtTime(s.startedAt), style: const TextStyle(fontSize: 10, color: Mx.faint)),
     ));

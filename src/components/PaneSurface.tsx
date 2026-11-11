@@ -172,8 +172,9 @@ function renderNode(
         </div>
       );
     }
+    // key 不放 paneProps 里:经 {...spread} 传 key React 会报「key in spread」警告,
+    // 各分发点显式 key={k(node.id)}。
     const paneProps = {
-      key: k(node.id),
       paneId: node.id,
       sessions: paneSessions,
       activeTabId,
@@ -198,7 +199,7 @@ function renderNode(
     if (activeTab?.shellKind === "sessionbrowser") {
       return (
         <Suspense fallback={lazyFallback}>
-          <SessionBrowserPane {...paneProps} onResumeSession={onResumeSession} />
+          <SessionBrowserPane key={k(node.id)} {...paneProps} onResumeSession={onResumeSession} />
         </Suspense>
       );
     }
@@ -208,14 +209,14 @@ function renderNode(
     if (activeTab?.shellKind === "graph") {
       return (
         <Suspense fallback={lazyFallback}>
-          <GraphPane {...paneProps} />
+          <GraphPane key={k(node.id)} {...paneProps} />
         </Suspense>
       );
     }
     if (activeTab?.shellKind === "filetree") {
       return (
         <Suspense fallback={lazyFallback}>
-          <FileTreePane {...paneProps} projectId={projectId ?? ""} />
+          <FileTreePane key={k(node.id)} {...paneProps} projectId={projectId ?? ""} />
         </Suspense>
       );
     }
@@ -223,7 +224,7 @@ function renderNode(
     if (activeTab?.shellKind === "htmlpreview") {
       return (
         <Suspense fallback={lazyFallback}>
-          <HtmlPreviewPane {...paneProps} />
+          <HtmlPreviewPane key={k(node.id)} {...paneProps} />
         </Suspense>
       );
     }
@@ -233,6 +234,7 @@ function renderNode(
       return (
         <Suspense fallback={lazyFallback}>
           <NotesPane
+            key={k(node.id)}
             {...paneProps}
             rootPath={rootPath ?? ""}
             onRenameTab={(tabId, title) => onRenameTab?.(node.id, tabId, title)}
@@ -247,6 +249,7 @@ function renderNode(
       return (
         <Suspense fallback={lazyFallback}>
           <ClaudePane
+            key={k(node.id)}
             {...paneProps}
             getClaudeTransport={(tabId: string) => getClaudeTransport(node.id, tabId)}
             getShellRunTransport={(tabId: string) => getShellRunTransport(node.id, tabId)}
@@ -269,6 +272,7 @@ function renderNode(
       return (
         <Suspense fallback={lazyFallback}>
           <CodexPane
+            key={k(node.id)}
             {...paneProps}
             getCodexTransport={(tabId: string) => getCodexTransport(node.id, tabId)}
             getShellRunTransport={(tabId: string) => getShellRunTransport(node.id, tabId)}
@@ -287,6 +291,7 @@ function renderNode(
     }
     return (
       <TerminalPane
+        key={k(node.id)}
         {...paneProps}
         getTransport={(tabId: string) => getTransport(node.id, tabId)}
         onMeasurePane={onMeasurePane}

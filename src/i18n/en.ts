@@ -586,6 +586,9 @@ const en = {
     killTaskMsg: "[txuyStudio system action] Immediately call the TaskStop tool to stop background task {{id}} ({{desc}}), then reply only \"ok\" and do nothing else.",
     killTaskQueuedShort: "queued",
     killTaskQueuedMsg: "[txuyStudio system action] Call the TaskStop tool for each of the following background tasks to stop them: {{tasks}}. Then reply only \"ok\" and do nothing else.",
+    killTaskIssuedShort: "stopping",
+    composerStatsTitle: "Turn stats",
+    composerStatsCostNote: "session total (est.)",
     thinkingExpand: "Expand thinking",
     interrupt: "Interrupt",
     send: "Send",
@@ -692,6 +695,7 @@ modelSwitchTitle: "Switch model",
   // (no approval/compact/retry copy; includes sandbox denial). `!` command copy reuses claudepane.shell*.
   codexpane: {
     inputHint: "Message… (@ to reference files)",
+    composerStatsTitle: "Turn stats",
     toolsTooltip: "Tools (MCP / plugins…)",
     toolsGroupResources: "Resources",
     toolsMcp: "MCP servers",

@@ -60,6 +60,28 @@ class _ChatPageState extends State<ChatPage> {
   bool _sending = false;
   String _provider = "claude";
 
+  /// 后台同步中(SWR 刷新历史/状态进行中):旧内容保持可见,AppBar 出一个轻量
+  /// 「同步中」pill 告知正在拉新(2026-11-10 用户要求:静默刷新要有可见状态)。
+  bool _syncing = false;
+
+  /// 待中断的后台任务(busy 时在任务列表点中断先入队,回 idle 后合并一条系统指令
+  /// 发出)。与桌面 ClaudePane 的 pendingKillTasks 同机制:CLI 控制协议没有单任务
+  /// kill(interrupt 连坐全停),借道模型层 TaskStop 工具,见 `_sendKillTasks`。
+  final List<Map<String, String>> _pendingKillTasks = [];
+  /// 已发出停止指令、等快照确认的任务 id(idle 直发 + 排队合并发送都记)。
+  /// TaskStop 借道模型层 ~数秒生效,期间任务仍在列表——弹层里标「停止中」+ 顶部
+  /// pill 提示,否则「点了取消但还显示」以为没点上。任务从快照消失即撤销。
+  final Set<String> _killIssued = {};
+
+  /// 断线横幅防抖(2026-11-10):offline 不立刻亮横幅,持续断线超过阈值才提示——
+  /// 公网链路几秒一抖,横幅闪现比不提示更糟。恢复即取消。
+  Timer? _offlineTimer;
+  bool _showOffline = false;
+
+  /// 历史加载自动重试(2026-11-10):失败后间隔重试「一直刷新」直到拉到,
+  /// 成功清错误条。公网大载荷 round-trip 偶发超时,让用户手点刷新太糙。
+  Timer? _historyRetry;
+
   /// —— 快捷指令面板数据(按 tab 缓存)——
   ///
   /// 2026-11-05 用户定调:点 ⌘ 先弹面板再加载(原来 await 整个公网 round-trip 才弹,
@@ -148,6 +170,8 @@ class _ChatPageState extends State<ChatPage> {
     _poll?.cancel();
     _sub?.cancel();
     _connSub?.cancel();
+    _offlineTimer?.cancel();
+    _historyRetry?.cancel();
     _scroll.removeListener(_scheduleCurrentPromptCheck);
     _input.dispose();
     _scroll.dispose();
@@ -204,11 +228,19 @@ class _ChatPageState extends State<ChatPage> {
   /// 断线期间桌面端可能已经跑完一轮(甚至需要审批):重连后重拉 status + 历史。
   void _onConn(RelayConnState s) {
     if (s == RelayConnState.online) {
-      if (!_wasOffline) return;
+      _offlineTimer?.cancel();
+      _offlineTimer = null;
+      if (!_wasOffline && !_showOffline) return;
       _wasOffline = false;
+      if (mounted) setState(() => _showOffline = false);
       _bootstrap();
     } else {
       _wasOffline = true;
+      // 防抖:短暂抖动(数秒)横幅不亮;持续断线超过阈值才提示。
+      _offlineTimer ??= Timer(const Duration(seconds: 4), () {
+        _offlineTimer = null;
+        if (mounted) setState(() => _showOffline = true);
+      });
     }
   }
 
@@ -221,24 +253,35 @@ class _ChatPageState extends State<ChatPage> {
   }
 
   Future<void> _bootstrap() async {
-    setState(() {
-      _loading = true;
-      _error = null;
-    });
+    // SWR 增量刷新:已有内容(缓存/上一轮)时保持旧内容可见,后台静默拉新;
+    // 仅空列表(首次进入无缓存)才显示整页 spinner——有缓存还整页转圈 = 白等。
+    // 拉新全程挂「同步中」pill(覆盖进页与断线重连补齐两条路径,都走这里)。
+    if (mounted) {
+      setState(() {
+        _loading = _stream.messages.isEmpty;
+        _syncing = true;
+        _error = null;
+      });
+    }
     // 开缓冲:拉历史期间到达的实时事件先攒着,历史落地重建后按序重放(见 ChatStream._liveBuffer)。
     _stream.beginBuffering();
     try {
       // 先渲染缓存的历史(SWR:归并是幂等重建,回填覆盖即可),网络到了再替换。
       // 400 条事件可达数 MB,公网 round-trip 秒级——没有缓存每进页都盯 spinner。
       await _loadCachedHistory();
+      // 缓存落地即撤 spinner:网络刷新继续在后台走,页面保持可读可滚。
+      if (mounted && _stream.messages.isNotEmpty && _loading) {
+        setState(() => _loading = false);
+      }
       // 顺序有讲究:**先历史、后状态**。history 里的 `result` 事件会把 status 归到 done,
       // 若先取状态再归并历史,状态就被过期快照盖住了;反过来则是服务端现况最后落地。
       await _loadHistory();
-      await _refreshStatus();
+      // 静默拉状态:失败不出错误条(有缓存时整条红 bar 只制造噪音;断线本身有横幅)。
+      await _refreshStatus(quiet: true);
     } finally {
       // 缓冲重放要在 setState 外做(applyClaude 改 state,重放后统一刷一次 UI)。
       _stream.replayBuffered();
-      if (mounted) setState(() => _loading = false);
+      if (mounted) setState(() { _loading = false; _syncing = false; });
     }
   }
 
@@ -271,6 +314,7 @@ class _ChatPageState extends State<ChatPage> {
         // 后台任务快照补齐(实时由 backgroundTasksChanged 事件推,这里覆盖断线期错过)。
         if (status.provider == "claude") {
           _stream.backgroundTasks = status.backgroundTasks;
+          _pruneKillIssued();
         }
         // codex:后端只回最近一轮实际用的值;用户尚未在手机端改过就跟着后端走。
         if (status.provider != "claude") {
@@ -288,6 +332,8 @@ class _ChatPageState extends State<ChatPage> {
           _claudeMode = status.permissionMode;
         }
       });
+      // 状态校准完冲一次杀任务队列:busy 期间点的中断,回 idle 后在这里落地。
+      _maybeFlushPendingKills();
     } catch (e) {
       if (mounted && !quiet) setState(() => _error = "$e");
     }
@@ -295,17 +341,45 @@ class _ChatPageState extends State<ChatPage> {
 
   Future<void> _loadHistory() async {
     try {
-      final resp = await widget.client.request("chat.history", {
-        "projectId": widget.projectId,
-        "tabId": widget.tabId,
-      });
+      // 第三个位置参数 = 超时(数 MB 载荷的公网 round-trip + 桌面端残余排队;
+      // 2026-11-10 用户实测 30s 仍偶发超时,提到 60s)。
+      final resp = await widget.client.request(
+        "chat.history",
+        {
+          "projectId": widget.projectId,
+          "tabId": widget.tabId,
+        },
+        const Duration(seconds: 60),
+      );
       final result = (resp["result"] as Map).cast<String, dynamic>();
       // 写缓存失败不影响主流程(裁剪后的 payload,几十~几百 KB)。
       unawaited(PageCache.write(_historyCacheKey, result));
       if (mounted) _applyHistoryPayload(result);
+      // 拉到了:停重试、清错误条(刚刷到最新,旧错误已过时)。
+      _historyRetry?.cancel();
+      _historyRetry = null;
+      if (mounted && _error != null) setState(() => _error = null);
     } catch (e) {
-      if (mounted) setState(() => _error = "历史加载失败: $e");
+      // 有内容(缓存/前次拉取)时静默保留旧内容:整页换红条 = SWR 被一次网络抖动打碎。
+      if (mounted && _stream.messages.isEmpty) {
+        setState(() => _error = "历史加载失败: $e");
+      }
+      // 「一直刷新」:失败自动重试直到拉到,不让用户手点刷新按钮。
+      _scheduleHistoryRetry();
     }
+  }
+
+  /// 历史重试调度:间隔 8s(与状态轮询同拍),在线才重试。
+  /// 重试也走缓冲(beginBuffering/replayBuffered)——历史落地会 clear 重建,
+  /// 不缓冲会把重试窗口内到达的实时事件洗掉(竞态同 `_bootstrap`)。
+  void _scheduleHistoryRetry() {
+    if (!mounted || _historyRetry != null) return;
+    _historyRetry = Timer(const Duration(seconds: 8), () {
+      _historyRetry = null;
+      if (!mounted || widget.client.state != RelayConnState.online) return;
+      _stream.beginBuffering();
+      _loadHistory().whenComplete(_stream.replayBuffered);
+    });
   }
 
   /// 历史与实时事件同构,同一套归并(缓存与网络回填共用;重复归并幂等)。
@@ -348,6 +422,8 @@ class _ChatPageState extends State<ChatPage> {
       // 装载期(拉历史 round-trip 中)事件先进缓冲,历史落地重建后重放,
       // 否则 clear() 会把装载期到达的新消息洗掉(竞态,2026-11-05 用户实测)。
       _stream.applyLive(provider, payload);
+      // background_tasks_changed 落地后顺带清「停止中」标记(任务真停了)。
+      _pruneKillIssued();
     });
     _scrollToBottom();
   }
@@ -364,8 +440,15 @@ class _ChatPageState extends State<ChatPage> {
 
   Future<void> _send() async {
     final text = _input.text.trim();
-    if (text.isEmpty || _sending) return;
+    if (text.isEmpty) return;
     _input.clear();
+    await _sendText(text);
+  }
+
+  /// 发送一条已 trim 非空的文本。消息与「后台任务中断」(借道 TaskStop 系统指令,
+  /// 见 `_sendKillTasks`)共用这条路径,行为与用户手打消息完全一致。
+  Future<void> _sendText(String text) async {
+    if (_sending) return;
     // id 随请求发给桌面端:后端回显 user 事件时带上同一个 id,本机 `_applyUser` 的
     // msgIndex 去重就会把自己这条吞掉(否则手机屏幕上会出现两条同样的提问)。
     final messageId = "local-${DateTime.now().microsecondsSinceEpoch}";
@@ -421,6 +504,60 @@ class _ChatPageState extends State<ChatPage> {
     // 否则中断失败(例如后端正在启动)时会误显「空闲」而实际还在跑。
   }
 
+  /// 任务列表逐条中断(弹层行按钮):关弹层 → busy 入队 / idle 直发。
+  void _killBgTask(Map<String, String> task) {
+    Navigator.pop(context);
+    if (_busy || _sending) {
+      // 已有同任务在队列就不重复塞(连点两下 = 一条指令里出现两次,模型会困惑)。
+      setState(() {
+        if (!_pendingKillTasks.any((t) => t["taskId"] == task["taskId"])) {
+          _pendingKillTasks.add(task);
+        }
+      });
+      _toast("本轮运行中,中断指令已排队(本轮结束后自动执行)");
+      return;
+    }
+    setState(() => _killIssued.add(task["taskId"] ?? ""));
+    _sendKillTasks([task]);
+    _toast("停止指令已发送,任务约数秒后消失");
+  }
+
+  /// 合并发送 TaskStop 系统指令,借道模型层工具停后台任务(桌面 ClaudePane 同款:
+  /// CLI 控制协议无单任务 kill,interrupt 会连坐全停)。文案与桌面 i18n
+  /// killTaskMsg/killTaskQueuedMsg **逐字一致**,模型端才认得这个系统操作前缀。
+  Future<void> _sendKillTasks(List<Map<String, String>> tasks) async {
+    final id = tasks.first["taskId"] ?? "";
+    final desc = tasks.first["description"] ?? "";
+    final text = tasks.length == 1
+        ? "[txuyStudio 系统操作] 请立即调用 TaskStop 工具停止后台任务 $id($desc),完成后仅回复 ok,不要做任何其他事。"
+        : "[txuyStudio 系统操作] 请依次调用 TaskStop 工具停止以下后台任务:"
+            "${tasks.map((t) => "${t["description"]?.isNotEmpty == true ? t["description"] : t["taskId"]}(${t["taskId"]})").join("、")}"
+            ",完成后仅回复 ok,不要做任何其他事。";
+    await _sendText(text);
+  }
+
+  /// 回 idle 后冲队列(8s 轮询的 _refreshStatus 末尾调用)。发前按快照过滤已
+  /// 自然结束的任务(等一轮的时间足够任务自己跑完);全没了就不发。
+  void _maybeFlushPendingKills() {
+    if (_pendingKillTasks.isEmpty || _busy || _sending) return;
+    final alive = _pendingKillTasks
+        .where((t) => _stream.backgroundTasks.any((b) => b["taskId"] == t["taskId"]))
+        .toList();
+    _pendingKillTasks.clear();
+    if (alive.isEmpty) return;
+    for (final t in alive) {
+      _killIssued.add(t["taskId"] ?? "");
+    }
+    _sendKillTasks(alive);
+  }
+
+  /// 快照确认清理:任务从列表消失(TaskStop 已生效/自然结束)即撤「停止中」标记。
+  /// 在 _refreshStatus(覆盖断线期)与 _onEvent(实时)的 setState 块内调用。
+  void _pruneKillIssued() {
+    final alive = _stream.backgroundTasks.map((b) => b["taskId"]).toSet();
+    _killIssued.retainWhere(alive.contains);
+  }
+
   Future<void> _answer(String requestId, bool allow) async {
     final ask = _stream.permissions.firstWhere(
       (a) => a.requestId == requestId,
@@ -466,7 +603,10 @@ class _ChatPageState extends State<ChatPage> {
 
   @override
   Widget build(BuildContext context) {
-    final online = widget.client.state == RelayConnState.online;
+    // online 用防抖后的视图(不是实时 socket 状态):几秒的链路抖动横幅与输入框
+    // 都不闪,持续断线才降级为离线态。防抖窗口内真发消息会因未连接立即报错,
+    // 那是显式操作的失败提示,可以接受。
+    final online = !_showOffline;
     WidgetsBinding.instance.addPostFrameCallback((_) => _updateCurrentPromptOverlay());
     return Scaffold(
       appBar: AppBar(
@@ -482,6 +622,7 @@ class _ChatPageState extends State<ChatPage> {
           ],
         ),
         actions: [
+          _syncPill(),
           _bgPill(),
           // 会话用量(claude=当前上下文口径每轮覆盖,codex=逐轮累计):从消息底部
           // 挪进 AppBar(2026-10-30 用户「放消息底部太丑」),小字弱化不抢视线。
@@ -819,7 +960,9 @@ class _ChatPageState extends State<ChatPage> {
   }
 
   Widget _composer(bool online) {
-    final canSend = online && !_sending;
+    // busy 时禁发:桌面端后端会拒收 busy 期间的 chat.send(原先 busy 换成停止按钮,
+    // 现在停止收进快捷面板/任务列表,发送钮干脆禁用,免得点了必报「发送失败」)。
+    final canSend = online && !_sending && !_busy;
     return Container(
       decoration: const BoxDecoration(
         color: Mx.tabbar,
@@ -851,30 +994,21 @@ class _ChatPageState extends State<ChatPage> {
             ),
           ),
           const SizedBox(width: 8),
-          _busy
-              ? FilledButton(
-                  onPressed: _stop,
-                  style: FilledButton.styleFrom(
-                    backgroundColor: Mx.danger,
-                    foregroundColor: Colors.white,
-                    minimumSize: const Size(0, 44),
-                    padding: const EdgeInsets.symmetric(horizontal: 14),
-                  ),
-                  child: const Text("停止", style: TextStyle(fontSize: 12)),
-                )
-              : FilledButton(
-                  onPressed: canSend ? _send : null,
-                  style: FilledButton.styleFrom(
-                    minimumSize: const Size(0, 44),
-                    padding: const EdgeInsets.symmetric(horizontal: 16),
-                  ),
-                  child: _sending
-                      ? const SizedBox(
-                          width: 14, height: 14,
-                          child: CircularProgressIndicator(strokeWidth: 1.6, color: Mx.accentContrast),
-                        )
-                      : const Text("发送", style: TextStyle(fontSize: 12)),
-                ),
+          // 停止按钮已移除(2026-11-10):中断分散到任务列表逐个做,主轮整体停止
+          // 收进快捷面板「本轮 · 停止本轮」——busy 时发送钮禁用兜住误发。
+          FilledButton(
+            onPressed: canSend ? _send : null,
+            style: FilledButton.styleFrom(
+              minimumSize: const Size(0, 44),
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+            ),
+            child: _sending
+                ? const SizedBox(
+                    width: 14, height: 14,
+                    child: CircularProgressIndicator(strokeWidth: 1.6, color: Mx.accentContrast),
+                  )
+                : const Text("发送", style: TextStyle(fontSize: 12)),
+          ),
         ]),
         ]),
       ),
@@ -990,6 +1124,24 @@ class _ChatPageState extends State<ChatPage> {
         ]),
       ),
     ];
+
+    // 主轮中断入口:composer 的停止按钮已移除(中断集中在任务列表逐个做),主轮的
+    // 「整体停下」收进快捷面板——与桌面端 ⋯ 菜单的 Stop 同位。
+    if (_busy) {
+      rows
+        ..add(_sectionLabel("本轮"))
+        ..add(_cmdTile(
+          icon: Icons.stop_circle_outlined,
+          title: "停止本轮",
+          subtitle: "中断当前正在执行的一轮回答",
+          enabled: true,
+          danger: true,
+          onTap: () {
+            Navigator.pop(sheetCtx);
+            _stop();
+          },
+        ));
+    }
 
     if (_provider == "claude") {
       rows
@@ -1162,6 +1314,26 @@ class _ChatPageState extends State<ChatPage> {
     }
   }
 
+  /// AppBar 的「同步中」pill(SWR 增量刷新进行中):小转圈 + 文字,拉完即隐。
+  /// 整页 spinner(_loading)期间不重复显示——那时页面本身就是「在加载」。
+  Widget _syncPill() {
+    if (!_syncing || _loading) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.only(right: 6),
+      child: Center(
+        child: Row(mainAxisSize: MainAxisSize.min, children: [
+          const SizedBox(
+            width: 10,
+            height: 10,
+            child: CircularProgressIndicator(strokeWidth: 1.4, color: Mx.accent),
+          ),
+          const SizedBox(width: 4),
+          const Text("同步中", style: TextStyle(fontSize: 10, color: Mx.muted)),
+        ]),
+      ),
+    );
+  }
+
   /// AppBar 的后台任务 pill(有任务才显示;点开任务列表)。
   Widget _bgPill() {
     final tasks = _stream.backgroundTasks;
@@ -1182,13 +1354,18 @@ class _ChatPageState extends State<ChatPage> {
             const SizedBox(width: 3),
             Text("后台 ${tasks.length}",
                 style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w600, color: Mx.violet)),
+            // 有已发停止指令未落地时给个被动提示(不用点开列表就知道指令在途)。
+            if (_killIssued.isNotEmpty) ...[
+              const SizedBox(width: 4),
+              const Text("停止中", style: TextStyle(fontSize: 10, color: Mx.warning)),
+            ],
           ]),
         ),
       ),
     );
   }
 
-  /// 后台任务列表(底部弹层:类型 + 描述)。
+  /// 后台任务列表(底部弹层:类型 + 描述 + 逐条中断)。
   Future<void> _showBackgroundTasks() async {
     final tasks = _stream.backgroundTasks;
     await showModalBottomSheet<void>(
@@ -1233,6 +1410,32 @@ class _ChatPageState extends State<ChatPage> {
                         ],
                       ),
                     ),
+                    // 逐条中断(2026-11-10):每个任务独立停,与桌面任务面板一致;
+                    // composer 的统一停止按钮已移除。busy 时由 _killBgTask 入队。
+                    // 已排队/已发指令的行按钮换文字状态(弹层是打开时快照,kill 会
+                    // 关弹层;重开即见最新标记),防止重复发指令让模型困惑。
+                    Builder(builder: (_) {
+                      final id = t["taskId"] ?? "";
+                      final queued = _pendingKillTasks.any((p) => p["taskId"] == id);
+                      if (queued) {
+                        return const Padding(
+                          padding: EdgeInsets.only(left: 10),
+                          child: Text("待停止", style: TextStyle(fontSize: 10, color: Mx.muted)),
+                        );
+                      }
+                      if (_killIssued.contains(id)) {
+                        return const Padding(
+                          padding: EdgeInsets.only(left: 10),
+                          child: Text("停止中…", style: TextStyle(fontSize: 10, color: Mx.muted)),
+                        );
+                      }
+                      return IconButton(
+                        visualDensity: VisualDensity.compact,
+                        icon: const Icon(Icons.stop_circle_outlined, size: 20, color: Mx.danger),
+                        tooltip: "中断",
+                        onPressed: () => _killBgTask(t),
+                      );
+                    }),
                   ]),
                 ),
             ],

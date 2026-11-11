@@ -11,6 +11,15 @@ import 'credentials.dart';
 
 enum RelayConnState { disconnected, connecting, online }
 
+/// 桌面端业务错误帧(ok:false)转成的异常:message 就是桌面 error 原文,
+/// toString 不带前缀,错误条里直接是人话(「会话不存在」)而非 cast 崩栈。
+class RelayApiException implements Exception {
+  final String message;
+  RelayApiException(this.message);
+  @override
+  String toString() => message;
+}
+
 class RelayClient {
   final PairCredentials cred;
   final String selfId;
@@ -151,7 +160,16 @@ class RelayClient {
       final id = frame["id"] as String?;
       if (id != null && _pending.containsKey(id)) {
         debugPrint("[relay] recv resp $id ok=${frame["ok"]}");
-        _pending.remove(id)!.complete(frame);
+        final completer = _pending.remove(id)!;
+        if (frame["ok"] == true) {
+          completer.complete(frame);
+        } else {
+          // 桌面端业务错误(会话不存在 / unknown method / busy 拒绝…):错误帧没有
+          // result 字段,若照常 complete,调用点 `resp["result"] as Map` 会炸
+          // TypeError("type 'Null' is not a subtype of type 'Map'"),真因被吞。
+          // 这里转成异常,让调用点 catch 到桌面端的真实错误文案。
+          completer.completeError(RelayApiException("${frame["error"] ?? "未知错误"}"));
+        }
         return;
       }
       // 无 id = 桌面端主动推送(chat.event 等),交给订阅方。
@@ -162,9 +180,16 @@ class RelayClient {
     }
   }
 
-  /// 密文请求(15s 超时;桌面端离线由 send_result 立即触发失败)。
-  Future<Map<String, dynamic>> request(String method, [Map<String, dynamic>? params]) async {
-    // 未连接立即失败:帧发出去也到不了中继(_send 静默丢帧),干等 15s 超时只会让
+  /// 密文请求([timeout] 缺省 20s;桌面端离线由 send_result 立即触发失败)。
+  ///
+  /// 大载荷方法(chat.history 数 MB 传输+加解密、sessions.list 扫 jsonl)传更长
+  /// 超时——桌面端串行分发的残余排队也会吃掉时间,15s 对它们太紧。
+  Future<Map<String, dynamic>> request(
+    String method, [
+    Map<String, dynamic>? params,
+    Duration? timeout,
+  ]) async {
+    // 未连接立即失败:帧发出去也到不了中继(_send 静默丢帧),干等超时只会让
     // 用户看到莫名其妙的「timeout」。典型场景:锁屏/切后台被系统掐了 WS,回前台
     // 重连还没完成就点了发送。
     if (state != RelayConnState.online || _ws == null) {
@@ -180,7 +205,7 @@ class RelayClient {
     }().catchError((e) {
       _pending.remove(id)?.completeError(StateError("seil: $e"));
     });
-    return completer.future.timeout(const Duration(seconds: 15), onTimeout: () {
+    return completer.future.timeout(timeout ?? const Duration(seconds: 20), onTimeout: () {
       _pending.remove(id);
       throw TimeoutException("连接超时,请稍后重试");
     });

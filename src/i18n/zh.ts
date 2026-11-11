@@ -578,6 +578,9 @@ const zh = {
     killTaskMsg: "[txuyStudio 系统操作] 请立即调用 TaskStop 工具停止后台任务 {{id}}({{desc}}),完成后仅回复 ok,不要做任何其他事。",
     killTaskQueuedShort: "待停止",
     killTaskQueuedMsg: "[txuyStudio 系统操作] 请依次调用 TaskStop 工具停止以下后台任务:{{tasks}},完成后仅回复 ok,不要做任何其他事。",
+    killTaskIssuedShort: "停止中",
+    composerStatsTitle: "本轮统计",
+    composerStatsCostNote: "会话累计(估算)",
     thinkingExpand: "展开思考",
     interrupt: "中断",
     send: "发送",
@@ -684,6 +687,7 @@ modelSwitchTitle: "切换模型确认",
   // (无审批/压缩/重试文案;含 sandbox 拦截提示)。`!` 命令文案复用 claudepane.shell*。
   codexpane: {
     inputHint: "发送消息(@ 引用文件)",
+    composerStatsTitle: "本轮统计",
     toolsTooltip: "工具(MCP / 插件…)",
     toolsGroupResources: "资源",
     toolsMcp: "MCP 服务器",

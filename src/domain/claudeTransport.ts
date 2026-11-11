@@ -151,6 +151,13 @@ export class ClaudeTransport {
     this.loadPrefs();
   }
 
+  /** 会话工作目录。构造时由 AppShell 注入(tab cwd/项目根),**刷新重挂后立即可用**——
+   *  不依赖 init 事件回填的 stream meta.cwd(attach 存活会话不重发 init,@ 文件引用
+   *  的 list_files 拉取曾因此永不触发)。 */
+  getCwd(): string | null {
+    return this.cwd;
+  }
+
   // —— per-tab 启动参数持久化(localStorage)——
   // mode/effort/model 都是启动 flag 标记(内存态),重开 tab / 重启应用即回默认,用户
   // 选过的档丢失。tabId 在 pane tree 里稳定(state.json 落盘),按 (projectId, tabId)

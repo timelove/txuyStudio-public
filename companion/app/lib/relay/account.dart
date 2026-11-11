@@ -187,7 +187,7 @@ Future<List<VaultEntry>> fetchVault(AccountSession s) async {
   final resp = await http.get(
     Uri.parse("$base/vault"),
     headers: _bearer(s),
-  ).timeout(const Duration(seconds: 10));
+  ).timeout(const Duration(seconds: 20));
   if (resp.statusCode == 401) throw "会话已过期,请重新登录";
   if (resp.statusCode != 200) throw "读取保险箱失败(HTTP ${resp.statusCode})";
   final list = jsonDecode(resp.body) as List;
@@ -311,7 +311,7 @@ Future<List<DeviceInfo>> fetchDevices(AccountSession s) async {
   final resp = await http.get(
     Uri.parse("$base/devices"),
     headers: _bearer(s),
-  ).timeout(const Duration(seconds: 10));
+  ).timeout(const Duration(seconds: 20));
   if (resp.statusCode != 200) return const [];
   final list = jsonDecode(resp.body) as List;
   return [

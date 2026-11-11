@@ -95,63 +95,12 @@ class _UserPageState extends State<UserPage> {
       if (release == null) {
         _toast("当前已是最新版本");
       } else {
-        await _showUpdateDialog(release);
+        await showAppUpdateDialog(context, release, _updateService);
       }
     } catch (e) {
       if (mounted) _toast("检查更新失败:$e");
     } finally {
       if (mounted) setState(() => _updateChecking = false);
-    }
-  }
-
-  Future<void> _showUpdateDialog(AppRelease release) async {
-    await showDialog<void>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text("发现新版本 v${release.version}"),
-        content: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 480, maxHeight: 420),
-          child: SingleChildScrollView(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                if (release.publishedAt != null)
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 8),
-                    child: Text(
-                      "发布时间:${_fmtTime(release.publishedAt!)}",
-                      style: const TextStyle(fontSize: 11, color: Mx.muted),
-                    ),
-                  ),
-                SelectableText(
-                  release.notes.trim().isEmpty ? "本次发布未提供更新说明。" : release.notes.trim(),
-                  style: const TextStyle(fontSize: 12, height: 1.5, color: Mx.text),
-                ),
-              ],
-            ),
-          ),
-        ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("稍后再说")),
-          FilledButton(
-            onPressed: () {
-              Navigator.pop(ctx);
-              unawaited(_openDownload(release));
-            },
-            child: const Text("手动更新"),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Future<void> _openDownload(AppRelease release) async {
-    try {
-      final ok = await _updateService.openDownload(release);
-      if (!mounted || ok) return;
-      _toast("无法打开下载页,请检查浏览器设置");
-    } catch (e) {
-      if (mounted) _toast("打开下载页失败:$e");
     }
   }
 

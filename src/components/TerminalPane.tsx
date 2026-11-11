@@ -724,11 +724,10 @@ export function TerminalPane({
           {sessions.map((s) => {
             const isActive = s.id === activeTabId;
             return (
-              <Tooltip>
+              <Tooltip key={s.id}>
               <TooltipTrigger asChild>
               <TabsTrigger asChild value={s.id}>
               <div
-                key={s.id}
                 className={`mx-tab-item group/tab flex h-[length:var(--mx-tab-h)] min-w-0 shrink cursor-pointer items-center gap-1 px-2 transition-colors ${
                   isActive
                     ? "text-[var(--mx-text-bright)]"

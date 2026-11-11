@@ -56,22 +56,94 @@ function joinPath(base: string, rest: string): string {
   return trimmedBase + sep + trimmedRest;
 }
 
-/** fuzzy 排名:workspace 根下的文件,空 query 时按字母排,非空时按 startsWith 优先 + includes 次之。 */
+/**
+ * fuzzy 打分(2026-11-11 二次升级:文件名匹配语义)。`usc` 命中 `userCard.tsx`,
+ * 且纯名字 query **只看文件名**——目录段的 incidental 命中不再把无关文件搅进来。
+ *
+ * 打分规则(VSCode/fzf 式简化):
+ * - 纯名字 query 对 basename 子序列打分;含 `/`/`\` 的 query 对整条 path 打分;
+ * - 每命中字符基础 2 分;连续 run 第 n 个字符额外 +(n-1)×2(连续远优于跳跃);
+ * - 边界命中(路径分隔符/`.`/`-`/`_`/空格之后、驼峰首字母、串首)+3;
+ * - basename 以整个 query 开头大加分(文件名越短加成越高)、basename 含 query 次加成;
+ * - 长度惩罚:匹配主体长度为主,整条 path 长度小权重 tie-break;
+ * - 任意字符接不上(query 不是匹配主体的子序列)→ null,不匹配。
+ */
+export function fuzzyMatchScore(candidate: string, query: string): number | null {
+  if (!query) return 0;
+  const sep = Math.max(candidate.lastIndexOf("/"), candidate.lastIndexOf("\\"));
+  const basePath = candidate.slice(sep + 1);
+  // 纯名字 query 只对 basename 匹配(目录命中不算数,2026-11-11 用户反馈「不准」
+  // 的根源:整条 path 子序列会把目录段 incidental 命中的无关文件排进来);
+  // 带分隔符的 query 按整条 path 匹配(搜「目录 + 文件名」场景)。
+  const pathMode = /[/\\]/.test(query);
+  const target = pathMode ? candidate : basePath;
+  const lower = target.toLowerCase();
+  const q = query.toLowerCase();
+  let score = 0;
+  let qi = 0;
+  let run = 0;
+  let prevHit = -2;
+  let firstHit = -1;
+  for (let i = 0; i < target.length && qi < q.length; i++) {
+    if (lower[i] !== q[qi]) {
+      run = 0;
+      continue;
+    }
+    if (firstHit === -1) firstHit = i;
+    run = prevHit === i - 1 ? run + 1 : 1;
+    score += 2 + (run - 1) * 2;
+    const prev = i > 0 ? target[i - 1] : "";
+    const ch = target[i];
+    if (i === 0 || /[/\\._\- ]/.test(prev) || (ch >= "A" && ch <= "Z" && prev >= "a" && prev <= "z")) {
+      score += 3;
+    }
+    prevHit = i;
+    qi++;
+  }
+  if (qi < q.length) return null; // 子序列未走完
+  const base = basePath.toLowerCase();
+  // basename 命中加分按文件名长度衰减:同是 startsWith,"Button.tsx" 应排在
+  // "button.test.ts" 前(匹配占文件名比例更高,更贴合搜索意图)。
+  if (base.startsWith(q)) {
+    // 前缀命中大加分,文件名越短加成越高("Button.tsx" 排 "button.test.ts" 前)。
+    score += Math.max(4, 14 - basePath.length * 0.2);
+  } else if (base.includes(q)) {
+    score += Math.max(2, 8 - basePath.length * 0.1);
+  }
+  if (firstHit === 0) score += 2; // 首字符即命中
+  // 长度惩罚:匹配主体(basename 模式=文件名,path 模式=整条)为主,path 长度小权重 tie-break。
+  score -= (pathMode ? target.length : basePath.length) * 0.15;
+  score -= candidate.length * 0.02;
+  return score;
+}
+
+/**
+ * fuzzy 排名:空 query 按字母排;非空按 [fuzzyMatchScore] 降序(同分按字母),
+ * **一个都不匹配时保留原序**(兜底语义,与旧实现一致)。
+ */
 export function rankMentionCandidates(
   candidates: string[],
   query: string,
 ): string[] {
   if (!query) return [...candidates].sort();
-  const q = query.toLowerCase();
-  const starts: string[] = [];
-  const includes: string[] = [];
-  const rest: string[] = [];
+  const scored: { c: string; s: number }[] = [];
   for (const c of candidates) {
-    const lower = c.toLowerCase();
-    if (lower.startsWith(q)) starts.push(c);
-    else if (lower.includes(q)) includes.push(c);
-    else rest.push(c);
+    const s = fuzzyMatchScore(c, query);
+    if (s != null) scored.push({ c, s });
   }
-  // 无匹配也保留原序(rest 保持 candidates 顺序)
-  return starts.length + includes.length === 0 ? candidates : [...starts, ...includes, ...rest];
+  if (scored.length === 0) return candidates;
+  scored.sort((a, b) => b.s - a.s || a.c.localeCompare(b.c));
+  return scored.map((x) => x.c);
+}
+
+/** [rankMentionCandidates] 的对象版:按 label 打分排序,无匹配返回空(调用方自行兜底)。 */
+export function fuzzyRankBy<T>(items: T[], label: (t: T) => string, query: string): T[] {
+  if (!query) return [...items].sort((a, b) => label(a).localeCompare(label(b)));
+  const scored: { it: T; s: number }[] = [];
+  for (const it of items) {
+    const s = fuzzyMatchScore(label(it), query);
+    if (s != null) scored.push({ it, s });
+  }
+  scored.sort((a, b) => b.s - a.s || label(a.it).localeCompare(label(b.it)));
+  return scored.map((x) => x.it);
 }

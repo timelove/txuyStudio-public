@@ -8,6 +8,10 @@ import 'package:http/http.dart' as http;
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import 'app_update_install_stub.dart'
+    if (dart.library.io) 'app_update_install_io.dart' as install;
+import 'theme.dart';
+
 /// GitHub Release 摘要。`downloadUrl` 优先匹配 Android APK;其他平台回退 Release 页。
 @immutable
 class AppRelease {
@@ -66,15 +70,26 @@ class AppUpdateService {
     return compute(_parseRelease, resp.body);
   }
 
+  /// 浏览器下载页(更新回退路径;web 平台的主路径)。
   Future<bool> openDownload(AppRelease release) {
     return launchUrl(
       Uri.parse(release.downloadUrl),
       mode: LaunchMode.externalApplication,
     );
   }
+
+  /// 应用内更新(Android):流式下载 APK 到缓存并唤起系统安装器。
+  /// web 不支持——调用方([showAppUpdateDialog])已按平台分流,不会在 web 走到这里。
+  Future<bool> downloadAndInstall(
+    AppRelease release,
+    void Function(int received, int? total) onProgress,
+  ) {
+    return install.downloadAndInstallApk(_client, release.downloadUrl, onProgress);
+  }
 }
 
-/// 新版本提示弹窗:展示 Release Notes,并把“手动更新”落到外部下载页。
+/// 新版本提示弹窗:Release Notes 按 markdown 渲染;「立即更新」在 Android 上应用内
+/// 下载(进度弹窗)→ 系统安装器,web 回退浏览器下载页。
 Future<void> showAppUpdateDialog(
   BuildContext context,
   AppRelease release,
@@ -87,9 +102,19 @@ Future<void> showAppUpdateDialog(
       content: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: 480, maxHeight: 420),
         child: SingleChildScrollView(
-          child: SelectableText(
-            release.notes.trim().isEmpty ? '本次发布未提供更新说明。' : release.notes.trim(),
-            style: const TextStyle(fontSize: 12, height: 1.5),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              if (release.publishedAt != null)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: Text(
+                    '发布时间:${_fmtTime(release.publishedAt!)}',
+                    style: const TextStyle(fontSize: 11, color: Mx.muted),
+                  ),
+                ),
+              ...buildReleaseNotes(release.notes),
+            ],
           ),
         ),
       ),
@@ -98,13 +123,192 @@ Future<void> showAppUpdateDialog(
         FilledButton(
           onPressed: () {
             Navigator.pop(ctx);
-            unawaited(service.openDownload(release));
+            unawaited(_startUpdate(context, release, service));
           },
-          child: const Text('手动更新'),
+          child: const Text('立即更新'),
         ),
       ],
     ),
   );
+}
+
+/// 更新执行分流:web 走浏览器(无文件系统/安装器);Android 应用内下载 + 安装器。
+/// 下载期间展示不可关的进度弹窗,完成即关(安装器接管);失败回退浏览器下载页。
+Future<void> _startUpdate(
+  BuildContext context,
+  AppRelease release,
+  AppUpdateService service,
+) async {
+  if (kIsWeb) {
+    await service.openDownload(release);
+    return;
+  }
+  if (!context.mounted) return;
+  final navigator = Navigator.of(context, rootNavigator: true);
+  final progress = ValueNotifier<(String, double?)>(('准备下载…', null));
+  final dlgFuture = showDialog<void>(
+    context: context,
+    barrierDismissible: false,
+    builder: (ctx) => ValueListenableBuilder<(String, double?)>(
+      valueListenable: progress,
+      builder: (ctx, v, _) => PopScope(
+        canPop: false,
+        child: AlertDialog(
+          title: const Text('正在下载更新'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              LinearProgressIndicator(value: v.$2),
+              const SizedBox(height: 10),
+              Text(v.$1, style: const TextStyle(fontSize: 12, color: Mx.muted)),
+            ],
+          ),
+        ),
+      ),
+    ),
+  );
+  bool ok = false;
+  Object? error;
+  try {
+    ok = await service.downloadAndInstall(release, (received, total) {
+      String mb(int n) => (n / 1024 / 1024).toStringAsFixed(1);
+      progress.value = total != null && total > 0
+          ? ('${mb(received)} / ${mb(total)} MB', received / total)
+          : ('已下载 ${mb(received)} MB', null);
+    });
+  } catch (e) {
+    error = e;
+  } finally {
+    progress.dispose();
+  }
+  navigator.pop();
+  await dlgFuture;
+  if (!ok || error != null) {
+    // 应用内路径失败(网络/安装器)→ 回退浏览器下载页,不让用户卡死。
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('应用内更新失败(${error ?? '安装器未拉起'}),已转浏览器下载')),
+      );
+    }
+    await service.openDownload(release);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Release Notes 轻量 markdown 渲染
+// ---------------------------------------------------------------------------
+
+/// 自家 release notes 用到的 md 子集 → Widget 列表:#+标题、- 列表、> 引用、
+/// **粗体**、`行内代码`、空行段距。不引第三方包(flutter_markdown 已 discontinued,
+/// notes 格式我们自己控,手写更贴奶油金主题)。
+List<Widget> buildReleaseNotes(String md) {
+  final trimmed = md.trim();
+  if (trimmed.isEmpty) {
+    return const [Text('本次发布未提供更新说明。')];
+  }
+  final blocks = <Widget>[];
+  final lines = trimmed.split(RegExp(r'\r?\n'));
+  for (final raw in lines) {
+    final line = raw.trimRight();
+    if (line.trim().isEmpty) {
+      blocks.add(const SizedBox(height: 8));
+      continue;
+    }
+    final heading = RegExp(r'^(#{1,3})\s+(.*)$').firstMatch(line);
+    if (heading != null) {
+      final level = heading[1]!.length;
+      blocks.add(Padding(
+        padding: EdgeInsets.only(top: blocks.isEmpty ? 0 : 8, bottom: 2),
+        child: Text.rich(
+          _inlineSpans(heading[2]!),
+          style: TextStyle(
+            fontSize: level == 1 ? 14 : level == 2 ? 13 : 12,
+            fontWeight: FontWeight.w700,
+            color: Mx.text,
+            height: 1.4,
+          ),
+        ),
+      ));
+      continue;
+    }
+    if (line.startsWith('> ')) {
+      blocks.add(Padding(
+        padding: const EdgeInsets.only(left: 8, top: 2, bottom: 2),
+        child: DecoratedBox(
+          decoration: const BoxDecoration(
+            border: Border(left: BorderSide(color: Mx.borderStrong, width: 2)),
+          ),
+          child: Padding(
+            padding: const EdgeInsets.only(left: 8),
+            child: Text.rich(
+              _inlineSpans(line.substring(2)),
+              style: const TextStyle(fontSize: 11.5, color: Mx.muted, height: 1.5),
+            ),
+          ),
+        ),
+      ));
+      continue;
+    }
+    final item = RegExp(r'^\s*[-*]\s+(.*)$').firstMatch(line);
+    if (item != null) {
+      blocks.add(Padding(
+        padding: const EdgeInsets.only(top: 2),
+        child: Text.rich(
+          TextSpan(children: [
+            const TextSpan(text: '· ', style: TextStyle(fontWeight: FontWeight.w700)),
+            ...?_inlineSpans(item[1]!).children,
+          ]),
+          style: const TextStyle(fontSize: 12, color: Mx.text, height: 1.55),
+        ),
+      ));
+      continue;
+    }
+    blocks.add(Text.rich(
+      _inlineSpans(line),
+      style: const TextStyle(fontSize: 12, color: Mx.text, height: 1.55),
+    ));
+  }
+  return blocks;
+}
+
+/// 行内标记解析:`**粗体**` 与 `` `代码` ``(未匹配段原样继承外层样式)。
+TextSpan _inlineSpans(String text) {
+  final children = <TextSpan>[];
+  final re = RegExp(r'\*\*(.+?)\*\*|`([^`]+)`');
+  var last = 0;
+  for (final m in re.allMatches(text)) {
+    if (m.start > last) {
+      children.add(TextSpan(text: text.substring(last, m.start)));
+    }
+    if (m[1] != null) {
+      children.add(TextSpan(
+        text: m[1],
+        style: const TextStyle(fontWeight: FontWeight.w700),
+      ));
+    } else {
+      children.add(TextSpan(
+        text: m[2],
+        style: const TextStyle(
+          fontFamily: 'monospace',
+          fontSize: 11,
+          color: Mx.accentBright,
+          backgroundColor: Mx.cardInner,
+        ),
+      ));
+    }
+    last = m.end;
+  }
+  if (last < text.length) {
+    children.add(TextSpan(text: text.substring(last)));
+  }
+  return TextSpan(children: children);
+}
+
+String _fmtTime(DateTime t) {
+  final local = t.toLocal();
+  String two(int n) => n.toString().padLeft(2, '0');
+  return '${local.year}-${two(local.month)}-${two(local.day)} ${two(local.hour)}:${two(local.minute)}';
 }
 
 AppRelease? _parseRelease(String body) {

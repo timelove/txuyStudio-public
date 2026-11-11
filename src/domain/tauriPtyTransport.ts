@@ -28,6 +28,10 @@ export class TauriPtyTransport implements TerminalTransport {
   private readonly maxTranscriptLength = 1_000_000;
   /** 进行中的 spawn（去重用）：React StrictMode 双 mount 或并发 start 只会真正 spawn 一次。 */
   private startingPromise: Promise<void> | null = null;
+  /** spawn 在途期间的键盘输入缓冲:刷新后 pane 重挂 + PowerShell 冷启动有秒级窗口,
+   *  直接 throw「session not started」会把窗口期击键丢掉 + Uncaught(in promise) 噪音
+   *  (TerminalPane 的 onData 不接 catch);缓冲到 doStart 尾部统一 flush。 */
+  private pendingWrites: string[] | null = null;
   /** 请求中的确定性 sessionId(spawn 前端已知,即传入的 tabId)。后端 attach/死会话重建路径会在
    *  spawn_pty 返回**之前**就 emit transcript 回放,此时 ptySessionId 仍为 null——事件与 invoke
    *  响应是两条通道无顺序保证,只按 ptySessionId 过滤会把先到的回放丢掉(重挂 pane 空白)。
@@ -103,6 +107,18 @@ export class TauriPtyTransport implements TerminalTransport {
       this.ptySessionId = await invoke<string>("spawn_pty", { projectId: this.projectId, rows, cols, cwd: cwd ?? null, shellKind, launchOverride: launchOverride ?? null, sessionId });
       this.launchOverride = null;
       this.requestedSessionId = null;
+      // 启动窗口期的击键缓冲统一送达(顺序保持;单条失败丢后续缓冲,会话已异常)。
+      if (this.pendingWrites?.length) {
+        const buffered = this.pendingWrites;
+        this.pendingWrites = null;
+        for (const d of buffered) {
+          try {
+            await invoke("write_pty", { projectId: this.projectId, sessionId: this.ptySessionId, data: d });
+          } catch {
+            break;
+          }
+        }
+      }
     } finally {
       this.startingPromise = null;
     }
@@ -110,7 +126,16 @@ export class TauriPtyTransport implements TerminalTransport {
 
   async write(_sessionId: string, data: string) {
     if (!this.ptySessionId) {
-      throw new Error("TauriPtyTransport: session not started");
+      if (this.startingPromise) {
+        // spawn 在途:缓冲等启动(flush 在 doStart 尾部),不丢击键。
+        (this.pendingWrites ??= []).push(data);
+        await this.startingPromise.catch(() => {});
+        return;
+      }
+      // 无会话且不在启动:真正异常(未 start 就写)。静默丢弃——xterm onData 高频,
+      // throw 只会变成 Uncaught(in promise) 噪音;warn 保留排查线索。
+      console.warn("[TauriPtyTransport] write before start, dropped:", JSON.stringify(data.slice(0, 40)));
+      return;
     }
     await invoke("write_pty", { projectId: this.projectId, sessionId: this.ptySessionId, data });
   }
@@ -130,6 +155,7 @@ export class TauriPtyTransport implements TerminalTransport {
       this.ptySessionId = null;
     }
     this.requestedSessionId = null;
+    this.pendingWrites = null;
     this.unlisten?.();
     this.unlisten = null;
   }

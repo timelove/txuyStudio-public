@@ -95,7 +95,13 @@ class CodexStatusRegistry {
 
   private invalidate(): void {
     this.cachedEntries = null;
-    for (const cb of this.listeners) cb();
+    // 通知微任务化:register/setPaneId 会在组件 render 期间被同步触发(如 CodexPane
+    // render 中 getCodexTransport 首建 transport → 构造器 register → 此处通知订阅者
+    // re-render),React 不允许在渲染 A 组件时更新 B 组件(AppShell 报 warning)。
+    // 快照缓存同步失效(getSnapshot 立即见新数据),仅把 listener 回调推迟出 render 相。
+    queueMicrotask(() => {
+      for (const cb of this.listeners) cb();
+    });
   }
 }
 

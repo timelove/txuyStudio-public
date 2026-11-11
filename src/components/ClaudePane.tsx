@@ -5,6 +5,7 @@ import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialo
 import { selectEnclosingPre } from "../lib/selectEnclosingPre";
 import { useCurrentPromptStick } from "../lib/useCurrentPromptStick";
 import { useMessageWindow } from "../lib/useMessageWindow";
+import { fuzzyRankBy } from "../lib/mentionPath";
 import { formatCost, formatTokens, formatTokensPerSecond } from "../lib/turnMetrics";
 import { deriveAlwaysAllowLabel } from "../lib/permissionSuggest";
 import { toolStepDetail, toolStepObject, toolStepTitle, toolStepVerbKey } from "../lib/toolStep";
@@ -207,6 +208,7 @@ function TaskListContent({
   doneNotices,
   onKillTask,
   pendingKillIds,
+  killIssuedIds,
 }: {
   t: (k: string, opts?: Record<string, unknown>) => string;
   main: { label: string; color: string; pulse: boolean };
@@ -216,6 +218,8 @@ function TaskListContent({
   onKillTask: (taskId: string, description: string) => void;
   /** 已排队待停止的任务 id(busy 期间点停止,回 idle 后合并发送)。这些项按钮替换为「待停止」。 */
   pendingKillIds: Set<string>;
+  /** 指令已发出、等快照回流确认的任务 id(idle 直发 + 合并发送共用)。按钮替换为「停止中」。 */
+  killIssuedIds: Set<string>;
 }) {
   return (
     <div className="flex flex-col gap-0.5">
@@ -252,6 +256,10 @@ function TaskListContent({
             {pendingKillIds.has(task.taskId) ? (
               /* busy 期间点停止已入队:等主轮回 idle 自动合并发送(不能 interrupt——会杀进程树连坐全部后台任务)。 */
               <span className="shrink-0 text-[9px] text-[var(--mx-faint)]">{t("claudepane.killTaskQueuedShort")}</span>
+            ) : killIssuedIds.has(task.taskId) ? (
+              /* 指令已发出:TaskStop 借道模型层 ~数秒生效,任务行等 background_tasks_changed
+                 快照回流后自动消失。这期间标「停止中」,否则用户以为点了没反应。 */
+              <span className="shrink-0 text-[9px] text-[var(--mx-faint)]">{t("claudepane.killTaskIssuedShort")}</span>
             ) : (
               /* 停止单个后台任务:借道模型层 TaskStop(官方工具;stdin 控制协议无单任务 kill)。
                  走一轮对话(~数秒),claude 杀掉任务后 background_tasks_changed 快照自动回流。 */
@@ -844,12 +852,12 @@ export function ClaudePane(props: ClaudePaneProps) {
     return () => ro.disconnect();
   }, [activeTabId, hasMessages]);
 
-  // @ 文件引用:fuzzy 过滤(路径含 query),限 50 条防巨列表卡。
+  // @ 文件引用:fuzzy 过滤(子序列打分,`usc` 可命中 `userCard.tsx`;见 mentionPath.ts),限 50 条防巨列表卡。
   const atMatches = useMemo(() => {
     if (!atOpen) return [];
-    const q = atQuery.trim().toLowerCase();
-    const filtered = q ? atFiles.filter((f) => f.path.toLowerCase().includes(q)) : atFiles;
-    return filtered.slice(0, 50);
+    const q = atQuery.trim();
+    const ranked = q ? fuzzyRankBy(atFiles, (f) => f.path, q) : atFiles;
+    return ranked.slice(0, 50);
   }, [atOpen, atQuery, atFiles]);
   useEffect(() => {
     setAtIndex(0);
@@ -883,19 +891,27 @@ export function ClaudePane(props: ClaudePaneProps) {
         setAtOpen(true);
         setAtIndex(0);
         setAtQuery(atMatch[1]);
-        const cwd = state?.meta?.cwd;
+        // cwd 兜底链:meta.cwd(init 回填,可能被校准)→ transport cwd(构造即有)。
+        // 刷新后 attach 存活会话不重发 init,meta.cwd 为空——此前 list_files 因此
+        // 永不拉取,@ 面板一直空列表(「敲 @ 没反应」的根因)。
+        const cwd = state?.meta?.cwd ?? getClaudeTransportRef.current(activeTabId)?.getCwd();
         if (cwd && atLoadedCwdRef.current !== cwd) {
           atLoadedCwdRef.current = cwd;
           invoke<{ id: string; name: string }[]>("list_files", { path: cwd })
             .then((files) => setAtFiles(files.map((f) => ({ path: f.id.replace(/\\/g, "/"), name: f.name }))))
-            .catch(() => setAtFiles([]));
+            .catch(() => {
+              // 失败回滚已加载标记:否则 ref 已指向 cwd,本项目内再敲 @ 永不重拉,
+              // 面板一直是空列表(「输入 @ 没效果」的一种根因)。下次敲 @ 自动重试。
+              if (atLoadedCwdRef.current === cwd) atLoadedCwdRef.current = null;
+              setAtFiles([]);
+            });
         }
         return;
       }
       setAtOpen(false);
       atPositionRef.current = -1;
     },
-    [state],
+    [state, activeTabId],
   );
 
   /** 拉 MCP 服务器列表(弹窗与工具侧栏共用):~/.claude.json(user/local scope:顶层
@@ -2104,6 +2120,12 @@ export function ClaudePane(props: ClaudePaneProps) {
   const [pendingKillTasks, setPendingKillTasks] = useState<
     { taskId: string; description: string }[]
   >([]);
+  /**
+   * 已发出停止指令、等快照确认的任务 id(idle 直发 + 排队合并发送都记)。
+   * TaskStop 借道模型层 ~数秒生效,期间任务仍在列表——标「停止中」,否则用户
+   * 「点了取消但还显示」以为没点上。任务从 backgroundTasks 快照消失即撤销。
+   */
+  const [killIssuedIds, setKillIssuedIds] = useState<Set<string>>(new Set());
   const [pendingModel, setPendingModel] = useState<string | null>(null);
   /** 供应商+模型整体切换的待确认项(分组下拉点模型 → 确认弹窗 → switchProviderModel)。 */
   const [pendingProviderModel, setPendingProviderModel] = useState<{ p: ClaudeProvider; m: string } | null>(null);
@@ -2127,6 +2149,7 @@ export function ClaudePane(props: ClaudePaneProps) {
         return;
       }
       void transport.send(t("claudepane.killTaskMsg", { id: taskId, desc: description || taskId }));
+      setKillIssuedIds((prev) => (prev.has(taskId) ? prev : new Set(prev).add(taskId)));
     },
     [busy, compactRunning, activeTabId, t],
   );
@@ -2145,8 +2168,23 @@ export function ClaudePane(props: ClaudePaneProps) {
     if (due.length === 0) return;
     const tasksStr = due.map((t) => `${t.description || t.taskId}(${t.taskId})`).join("、");
     void transport.send(t("claudepane.killTaskQueuedMsg", { tasks: tasksStr }));
+    setKillIssuedIds((prev) => {
+      const next = new Set(prev);
+      for (const d of due) next.add(d.taskId);
+      return next;
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [busy, compactRunning, pendingKillTasks, activeTabId]);
+  // 快照确认清理:任务从 backgroundTasks 消失(TaskStop 已生效/自然结束)即撤「停止中」。
+  // state 逐 token 变化频繁,无删减时返回原引用,React bail out 不触发多余重渲染。
+  useEffect(() => {
+    setKillIssuedIds((prev) => {
+      if (prev.size === 0) return prev;
+      const alive = new Set((state?.backgroundTasks ?? []).map((t) => t.taskId));
+      const next = new Set([...prev].filter((id) => alive.has(id)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [state?.backgroundTasks]);
   // 弹框确认(plan/permission)出现时,若 Claude 还在跑(被拒后它会继续尝试别的工具,把 denied
   // block 移出「最后消息」会让确认框消失),自动 interrupt 让它停下等用户决策——而非一边转圈思考
   // 一边等确认。headless 单轮已退(plan)时 interrupt 幂等,无害。
@@ -2571,7 +2609,7 @@ export function ClaudePane(props: ClaudePaneProps) {
                         onOpenAutoFocus={(e) => e.preventDefault()}
                         className="mx-menu w-[340px] max-w-[calc(100vw-2rem)] border border-[var(--mx-border)] bg-[var(--mx-surface)] p-1 shadow-xl"
                       >
-                        <TaskListContent t={t} main={mainTask} bgTasks={state?.backgroundTasks ?? []} doneNotices={bgDoneNotices} onKillTask={handleKillBgTask} pendingKillIds={pendingKillIds} />
+                        <TaskListContent t={t} main={mainTask} bgTasks={state?.backgroundTasks ?? []} doneNotices={bgDoneNotices} onKillTask={handleKillBgTask} pendingKillIds={pendingKillIds} killIssuedIds={killIssuedIds} />
                       </PopoverContent>
                     )}
                   </Popover>
@@ -2604,7 +2642,7 @@ export function ClaudePane(props: ClaudePaneProps) {
                     onOpenAutoFocus={(e) => e.preventDefault()}
                     className="mx-menu w-[340px] max-w-[calc(100vw-2rem)] border border-[var(--mx-border)] bg-[var(--mx-surface)] p-1 shadow-xl"
                   >
-                    <TaskListContent t={t} main={mainTask} bgTasks={state?.backgroundTasks ?? []} doneNotices={bgDoneNotices} onKillTask={handleKillBgTask} pendingKillIds={pendingKillIds} />
+                    <TaskListContent t={t} main={mainTask} bgTasks={state?.backgroundTasks ?? []} doneNotices={bgDoneNotices} onKillTask={handleKillBgTask} pendingKillIds={pendingKillIds} killIssuedIds={killIssuedIds} />
                   </PopoverContent>
                 )}
               </Popover>
@@ -3176,11 +3214,29 @@ export function ClaudePane(props: ClaudePaneProps) {
                           t={t}
                         />
                       )}
-                      <span className="shrink-0">
-                        ↑{formatTokens(turnTokens.input)} ↓{formatTokens(turnTokens.output)}
-                      </span>
-                      <span className="shrink-0 whitespace-nowrap"><ElapsedText start={sessionStart} prefix="⏱ " /></span>
-                      <span className="shrink-0 tabular-nums" title="本会话累计成本(估算)">{formatCost(state?.lastResult?.totalCostUsd)}</span>
+                      {/* 本轮 token/耗时/成本收进悬浮按钮(2026-11-11 用户:常显不关注,
+                          hover 展示即可,给输入卡状态条腾地)。 */}
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <button
+                            type="button"
+                            className="shrink-0 rounded p-0.5 text-[var(--mx-faint)] transition-colors hover:text-[var(--mx-text)]"
+                            aria-label={t("claudepane.composerStatsTitle")}
+                          >
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" aria-hidden>
+                              <path d="M5 20V10M12 20V4M19 20v-6" strokeLinecap="round" />
+                            </svg>
+                          </button>
+                        </TooltipTrigger>
+                        <TooltipContent>
+                          <div className="flex flex-col gap-0.5 font-mono text-[10px] tabular-nums text-[var(--mx-text)]">
+                            <span className="font-sans font-semibold">{t("claudepane.composerStatsTitle")}</span>
+                            <span>↑{formatTokens(turnTokens.input)} ↓{formatTokens(turnTokens.output)}</span>
+                            <span>⏱ <ElapsedText start={sessionStart} /></span>
+                            <span>{formatCost(state?.lastResult?.totalCostUsd)} · {t("claudepane.composerStatsCostNote")}</span>
+                          </div>
+                        </TooltipContent>
+                      </Tooltip>
                     </div>
                   </div>
                 </PopoverAnchor>
@@ -3193,7 +3249,9 @@ export function ClaudePane(props: ClaudePaneProps) {
                   // Popover 当 combobox 锚定到输入框时的标准修法——保持焦点在 textarea。
                   onOpenAutoFocus={(e) => e.preventDefault()}
                   onCloseAutoFocus={(e) => e.preventDefault()}
-                  className="mx-menu w-[360px] max-w-[calc(100vw-2rem)] overflow-hidden border border-[var(--mx-border)] bg-[var(--mx-surface)] p-1.5 shadow-xl"
+                  // 宽度自适应内容,上限=锚点(输入框)宽:Radix Popper 在 content 上暴露
+                  // anchor 宽度变量——短列表不撑满,长路径最宽到输入框宽再换行(见 break-all)。
+                  className="mx-menu max-w-[var(--radix-popper-anchor-width)] overflow-hidden border border-[var(--mx-border)] bg-[var(--mx-surface)] p-1.5 shadow-xl"
                 >
                   <div className="mx-scroll-pretty max-h-[min(50vh,420px)] overflow-y-auto p-0.5">
                   {cmdOpen && cmdMatches.length > 0
@@ -3226,10 +3284,10 @@ export function ClaudePane(props: ClaudePaneProps) {
                       onMouseDown={(e) => e.stopPropagation()}
                       onClick={() => applyAtFile(f)}
                       onMouseEnter={() => setAtIndex(i)}
-                      className={`flex w-full items-center gap-2 rounded px-2 py-1 text-left transition-colors ${i === atIndex ? "bg-[var(--mx-selected-bg)]" : "hover:bg-[var(--mx-hover-bg)]"}`}
+                      className={`flex w-full items-start gap-2 rounded px-2 py-1 text-left transition-colors ${i === atIndex ? "bg-[var(--mx-selected-bg)]" : "hover:bg-[var(--mx-hover-bg)]"}`}
                     >
                       <span className="shrink-0 text-[10px] text-[var(--mx-faint)]">@</span>
-                      <span className="truncate font-mono text-[11px] text-[var(--mx-text)]" title={f.path}>{f.path}</span>
+                      <span className="min-w-0 flex-1 whitespace-normal break-all font-mono text-[11px] leading-4 text-[var(--mx-text)]">{f.path}</span>
                     </button>
                   ))}
                   </div>

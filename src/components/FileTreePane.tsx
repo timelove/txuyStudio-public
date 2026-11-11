@@ -690,7 +690,7 @@ export function FileTreePane({
                   {({ node, style }: { node: NodeApi<FileNode>; style: CSSProperties }) => {
                     const isSel = activeFilePath === node.data.id;
                     return (
-                      <Tooltip>
+                      <Tooltip key={node.id}>
                       <TooltipTrigger asChild>
                       <div
                         style={{ ...style, fontSize, lineHeight: `${treeRowHeight}px` }}

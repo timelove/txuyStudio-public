@@ -88,9 +88,40 @@ function pathBasename(value?: string | null): string {
 }
 
 /**
+ * fleet worktree cwd → `{ mainCwd, taskId }`(与后端 `fleet::commands::fleet_root_dir` 的
+ * `<项目根>-fleet\<taskId>` 约定对齐):倒数第二段以 `-fleet` 结尾且末段(taskId)非空时命中,
+ * 主项目 cwd = 倒数第二段去掉 `-fleet` 后缀还原。启发式识别,不查 fleet 记录——worker
+ * 已合并/删除后其历史会话仍能正确归组。
+ */
+export function parseFleetCwd(
+  cwd: string | null | undefined,
+): { mainCwd: string; taskId: string } | null {
+  if (!cwd) return null;
+  let s = cwd.trim();
+  // Windows verbatim 前缀(claude/codex 写 jsonl 的 cwd 可能带),与 normalizeCwdForCompare 同处理。
+  if (s.length >= 4 && (s.startsWith("\\\\?\\") || s.startsWith("\\\\.\\"))) {
+    s = s.slice(4);
+  }
+  const parts = s.split(/[\\/]/).filter(Boolean);
+  if (parts.length < 3) return null;
+  const carrier = parts[parts.length - 2];
+  if (!carrier.endsWith("-fleet") || carrier === "-fleet") return null;
+  const projectDir = carrier.slice(0, -"-fleet".length);
+  const taskId = parts[parts.length - 1];
+  if (!projectDir || !taskId) return null;
+  const sep = s.includes("\\") ? "\\" : "/";
+  const mainCwd = [...parts.slice(0, -2), projectDir].join(sep);
+  return { mainCwd, taskId };
+}
+
+/**
  * 按 cwd 末段(项目)分组会话(全局扫后的前端聚合)。
  *
- * - 分组 key 用 cwd 小写(Windows 路径不区分大小写,避免同项目分两组);无 cwd 归 UNKNOWN_PROJECT_KEY。
+ * - 分组 key 用 [[normalizeCwdForCompare]](去 verbatim 前缀 + 小写,Windows 路径不区分
+ *   大小写,避免同项目分两组);无 cwd 归 UNKNOWN_PROJECT_KEY。
+ * - **Fleet worker 会话归主项目组**:cwd 命中 [[parseFleetCwd]](`<项目根>-fleet\<taskId>`)
+ *   时按主项目 cwd 归组(否则每个 worker 碎成一个 taskId 组);会话行的 `item.cwd` 保持
+ *   worktree 原值,行级 fleet 标识由 UI 从 `gitBranch`(fleet/<taskId>)呈现。
  * - label 取 cwd 末段(项目名);无 cwd → "未知项目"。
  * - 组内会话按 lastAt 降序;组间按组内最新 lastAt 降序(活跃项目在前)。
  * - `currentCwd` 传入时:匹配该 cwd 的组**强制排第一**(当前项目置顶),其余仍按 lastAt 降序。
@@ -102,19 +133,21 @@ export function groupSessionsByProject(
   items: AiCliSessionListItem[],
   currentCwd?: string | null,
 ): SessionProjectGroup[] {
-  const currentKey = currentCwd?.trim() ? currentCwd.trim().toLowerCase() : null;
+  const currentKey = currentCwd?.trim() ? normalizeCwdForCompare(currentCwd) : null;
   const groupMap = new Map<string, SessionProjectGroup>();
   const order: string[] = [];
 
   for (const it of items) {
     const cwd = it.cwd?.trim() || null;
-    const key = cwd ? cwd.toLowerCase() : UNKNOWN_PROJECT_KEY;
+    const fleet = cwd ? parseFleetCwd(cwd) : null;
+    const groupCwd = fleet ? fleet.mainCwd : cwd;
+    const key = groupCwd ? normalizeCwdForCompare(groupCwd) : UNKNOWN_PROJECT_KEY;
     let group = groupMap.get(key);
     if (!group) {
       group = {
         key,
-        cwd,
-        label: cwd ? (pathBasename(cwd) || cwd) : "session.unknownProject",
+        cwd: groupCwd,
+        label: groupCwd ? (pathBasename(groupCwd) || groupCwd) : "session.unknownProject",
         sessions: [],
       };
       groupMap.set(key, group);
@@ -139,9 +172,9 @@ export function groupSessionsByProject(
   return groups;
 }
 
-/** 判断某分组是否是「当前项目组」(cwd 大小写不敏感匹配)。供 UI 高亮用。 */
+/** 判断某分组是否是「当前项目组」(cwd 规范化匹配,与分组 key 同口径)。供 UI 高亮用。 */
 export function isCurrentProjectGroup(group: SessionProjectGroup, currentCwd?: string | null): boolean {
-  const currentKey = currentCwd?.trim() ? currentCwd.trim().toLowerCase() : null;
+  const currentKey = currentCwd?.trim() ? normalizeCwdForCompare(currentCwd) : null;
   return !!currentKey && group.key === currentKey;
 }
 
