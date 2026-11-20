@@ -73,9 +73,20 @@ pub async fn send_codex_message(
     new_session: Option<bool>,
     // 手机经中继发来的消息:`Some(id)` = 轮启动后补发一条 user 事件(带该 id),桌面端才
     // 看得见「手机问的那句话」。桌面 transport 传 None——它已在前端 `appendUserMessage`
-    // 乐观插入(app-server 也会以 userMessage item 回显,前端消费层负责去重)。
+    // 乐观插入(app-server 也会以 userMessage item 回显,前端消费层负责去重)。conductor
+    // 投递也传 Some(uuid):双保险(app-server 回显 + 后端补发,前端按 id/userMessage 去重)。
     client_message_id: Option<String>,
+    // per-tab 供应商 override(-c 覆盖集合;None=跟随全局 config.toml)。前端从供应商配置
+    // 解析(model_provider="txuy-<tabId>" + model_providers.txuy-<tabId>.* 段键),集合与
+    // session 快照不同 → 杀进程重拉(thread id 保留,上下文不丢)。
+    provider_overrides: Option<std::collections::BTreeMap<String, String>>,
+    // 人触达登记开关(2026-11-17):None/Some(true) = 照旧登记;Some(false) = conductor
+    // 机器投递不登记(与 send_claude_message 同口径,防占用锁/建议抑制被机器投递污染)。
+    human_touch: Option<bool>,
 ) -> Result<(), String> {
+    if human_touch.unwrap_or(true) {
+        crate::conductor::note_human_touch(&app, &project_id, &tab_id);
+    }
     // 1) busy 检查(先于 ensure:busy 时别拉进程)。
     {
         let by_project = state.by_project.lock().map_err(|e| e.to_string())?;
@@ -100,35 +111,61 @@ pub async fn send_codex_message(
     };
 
     // 3) ensure app-server 进程(fresh=true = 本次新拉起,thread 需要 start/resume 而非复用)。
-    let fresh = ensure_app_server(&app, &state, &project_id, &tab_id, cwd_v.as_deref()).await?;
+    let mut fresh = ensure_app_server(&app, &state, &project_id, &tab_id, cwd_v.as_deref(), provider_overrides.as_ref()).await?;
 
-    // 3.5) 供应商/模型目录配置变化检测(文件 IO 在锁外):config.toml+catalog 哈希与上次
-    //    spawn 基线不同 → 杀进程重拉(app-server 启动时读一次 config,cc-switch 切供应商/
-    //    改认证后必须重启进程才生效;live thread id 保留,下方 thread 决策走 resume 续接,
-    //    上下文不丢)。首次无基线不触发。
+    // 3.5) 供应商/模型目录配置变化检测(文件 IO 在锁外),两路合流:
+    //    a) 全局 config.toml+catalog 哈希与上次 spawn 基线不同 → 杀进程重拉(app-server
+    //       启动时读一次 config,cc-switch 切供应商/改认证后必须重启进程才生效;live thread
+    //       id 保留,下方 thread 决策走 resume 续接,上下文不丢)。首次无基线不触发。
+    //    b) per-tab 供应商 override 集合与 session 快照不同 → 杀进程重拉(-c 覆盖集合变了)。
+    //       **有 override 的 tab 跳过 a)**:该 tab 用自己的供应商段,-c 压过全局,cc-switch
+    //       切全局不连坐(2026-11-12 per-tab 供应商,与 claude 侧同口径);config_hash 基线
+    //       也不更新——override 期间全局改没改无所谓,清回全局时 b)(Some→None)必触发重拉。
     let spawn_hash = codex_config_hash();
-    let config_changed = {
+    let (config_changed, overrides_changed) = {
         let by_project = state.by_project.lock().map_err(|e| e.to_string())?;
         let session = by_project
             .get(&project_id)
             .and_then(|s| s.get(&tab_id))
             .ok_or("codex session missing after ensure")?;
-        let changed = session
-            .config_hash
+        let overrides_changed = session
+            .provider_overrides
             .lock()
             .ok()
-            .and_then(|g| *g)
-            .map(|h| h != spawn_hash)
-            .unwrap_or(false);
-        if let Ok(mut h) = session.config_hash.lock() {
-            *h = Some(spawn_hash);
+            .map(|g| g.as_ref() != provider_overrides.as_ref())
+            .unwrap_or(true);
+        if let Ok(mut g) = session.provider_overrides.lock() {
+            *g = provider_overrides.clone();
         }
-        changed
+        let has_override = provider_overrides.is_some();
+        let config_changed = if has_override {
+            false
+        } else {
+            session
+                .config_hash
+                .lock()
+                .ok()
+                .and_then(|g| *g)
+                .map(|h| h != spawn_hash)
+                .unwrap_or(false)
+        };
+        if !has_override {
+            if let Ok(mut h) = session.config_hash.lock() {
+                *h = Some(spawn_hash);
+            }
+        }
+        (config_changed, overrides_changed)
     };
-    if config_changed {
-        log::info!("send_codex_message: codex config changed, restarting app-server process (thread id kept)");
+    if config_changed || overrides_changed {
+        log::info!(
+            "send_codex_message: codex config{} changed, restarting app-server process (thread id kept)",
+            if overrides_changed { "/provider-overrides" } else { "" }
+        );
         kill_session_process(&app, &state, &project_id, &tab_id).await;
-        ensure_app_server(&app, &state, &project_id, &tab_id, cwd_v.as_deref()).await?;
+        // 重启后必须按「本次新拉起」处理:新进程不认识旧 thread id,沿用旧 fresh=false 会直接
+        // 复用 id → turn/start 报 thread not found(2026-11-13 日志实锤:02:38:05 重启,
+        // 02:38:08 fresh=false 复用 id 失败)。
+        fresh = ensure_app_server(&app, &state, &project_id, &tab_id, cwd_v.as_deref(), provider_overrides.as_ref()).await?;
     }
 
     // 4) 文件 IO 在锁外:config.toml 默认 model。
@@ -199,29 +236,22 @@ pub async fn send_codex_message(
         "full-access" => "never",
         _ => "on-request",
     };
+    let mut reused_live = false;
     let thread_id = if let (false, Some(id)) = (fresh, live_id.as_deref()) {
+        reused_live = true;
         id.to_string() // 进程未换 + live thread:直接复用(model/sandbox 变化由下方 per-turn override 传递)
     } else {
         // v2 协议(2026-11-04 schema 实测):thread 级沙箱字段是 `sandbox`(SandboxMode 字符串
         // "read-only"|"workspace-write"|"danger-full-access"),不是 v1 的 sandboxPolicy:{mode}
         // ——旧字段名会被 deny_unknown_fields 整体拒绝 → 降级裸参数,审批/沙箱从未生效过。
+        // start/resume 均**无 effort 字段**(0.166 generate-json-schema 实测),推理档只走
+        // 下方 turn/start per-turn。
         let cwd_json = cwd_v.as_ref().map(|p| p.display().to_string()).unwrap_or_default();
-        let mut start_params = json!({
-            "cwd": cwd_json,
-            "approvalPolicy": approval,
-            "sandbox": sandbox_str,
-        });
-        if let Some(m) = &model {
-            if !m.is_empty() {
-                start_params["model"] = json!(m);
-            }
-        }
-        // 注:schema ThreadStartParams **无 effort 字段**(0.166 generate-json-schema 实测),
-        // 推理档只能在 turn/start per-turn 传;此前这里发 effort 被服务端静默忽略。
-        let want_resume = live_id.is_some(); // 新拉进程 + registry 有 id(或用户指定 resume)→ resume
+        let start_params = build_start_params(&cwd_json, &approval, &sandbox_str, model.as_deref());
+        // 新拉进程 + registry 有 id(或用户指定 resume)→ resume;否则 start。
+        let want_resume = live_id.is_some();
         let thread = if want_resume {
-            // resume 同样收 model/sandbox/approvalPolicy(schema 支持;effort 无对应字段,
-            // 交给下方 turn/start per-turn 覆盖)。
+            // resume 同样收 model/sandbox/approvalPolicy(schema 支持;effort 无对应字段)。
             let id = live_id.clone().unwrap();
             let mut params = json!({
                 "threadId": id,
@@ -235,26 +265,32 @@ pub async fn send_codex_message(
                     params["model"] = json!(m);
                 }
             }
-            // 同 start:schema ThreadResumeParams 无 effort 字段,不发。
-            rpc_request(&app, &project_id, &tab_id, "thread/resume", params).await
+            thread_resume_rpc(&app, &project_id, &tab_id, params).await
         } else {
-            rpc_request(&app, &project_id, &tab_id, "thread/start", start_params.clone()).await
+            thread_start_rpc(&app, &project_id, &tab_id, start_params.clone(), &cwd_json).await
         };
-        // 参数不被识别(server 端 deny_unknown_fields 会报 unknown field)→ 降级重试(裸参数):
-        // start 退 bare start;resume 退 bare resume(threadId 必填字段,任何版本都认)。
+        // resume 整体失败(典型:跨供应商 resume 被拒「This chat uses custom, but your
+        // current provider is txuy-…」,rollout 损坏等):不把 tab 打死,回退开新 thread,
+        // 原错误以 ⚠ 提示进对话流(上下文丢失对用户可见,错误文案自带可行动指引)。
         let thread = match thread {
             Ok(v) => v,
-            Err(e) if !want_resume => {
-                log::warn!("send_codex_message: thread/start with params failed ({e}), retry bare");
-                let bare = json!({ "cwd": cwd_json });
-                rpc_request(&app, &project_id, &tab_id, "thread/start", bare).await?
+            Err(resume_err) if want_resume => {
+                log::warn!(
+                    "send_codex_message: thread/resume failed ({resume_err}), fallback to thread/start (new thread)"
+                );
+                emit_error_notice(
+                    &app,
+                    &project_id,
+                    &tab_id,
+                    &format!("原会话无法续接({resume_err}),已自动开新会话继续。"),
+                );
+                thread_start_rpc(&app, &project_id, &tab_id, start_params.clone(), &cwd_json)
+                    .await
+                    .map_err(|e| {
+                        format!("thread/resume failed ({resume_err}); fallback thread/start also failed: {e}")
+                    })?
             }
-            Err(e) => {
-                log::warn!("send_codex_message: thread/resume with params failed ({e}), retry bare");
-                let id = live_id.clone().unwrap();
-                let bare = json!({ "threadId": id, "excludeTurns": true });
-                rpc_request(&app, &project_id, &tab_id, "thread/resume", bare).await?
-            }
+            Err(e) => return Err(format!("thread/start failed: {e}")),
         };
         let id = thread
             .pointer("/thread/id")
@@ -318,22 +354,61 @@ pub async fn send_codex_message(
             }
         }
     }
-    let turn = (match rpc_request(&app, &project_id, &tab_id, "turn/start", turn_params).await {
-        Ok(v) => Ok(v),
-        Err(e) => {
+    let turn = match rpc_request(&app, &project_id, &tab_id, "turn/start", turn_params.clone()).await {
+        Ok(v) => v,
+        Err(e1) => {
             // 旧版 server 不认 per-turn 字段 → 裸参数重试(轮必发,失败才上抛)。
-            log::warn!("send_codex_message: turn/start with overrides failed ({e}), retry bare");
-            rpc_request(
-                &app,
-                &project_id,
-                &tab_id,
-                "turn/start",
-                json!({ "threadId": thread_id, "input": [{ "type": "text", "text": prompt }] }),
-            )
-            .await
+            log::warn!("send_codex_message: turn/start with overrides failed ({e1}), retry bare");
+            let bare = json!({ "threadId": thread_id, "input": [{ "type": "text", "text": prompt }] });
+            match rpc_request(&app, &project_id, &tab_id, "turn/start", bare).await {
+                Ok(v) => v,
+                Err(e2) => {
+                    // 复用 live thread 且两段尝试都报 thread not found:registry 的 id 与当前
+                    // 进程脱节(重启竞态/app-server 内部丢线程),自愈——开新 thread 重发本轮,
+                    // ⚠ 提示进对话流;全新 thread 的失败是硬错误,上抛给前端 terminated 显示。
+                    let not_found = e1.contains("thread not found") || e2.contains("thread not found");
+                    if reused_live && not_found {
+                        log::warn!(
+                            "send_codex_message: live thread not found in app-server, self-healing via thread/start ({e1}; {e2})"
+                        );
+                        emit_error_notice(
+                            &app,
+                            &project_id,
+                            &tab_id,
+                            "原会话在当前进程中丢失(thread not found),已自动开新会话重发本轮消息。",
+                        );
+                        let cwd_json = cwd_v.as_ref().map(|p| p.display().to_string()).unwrap_or_default();
+                        let start_params = build_start_params(&cwd_json, &approval, &sandbox_str, model.as_deref());
+                        let thread = thread_start_rpc(&app, &project_id, &tab_id, start_params, &cwd_json)
+                            .await
+                            .map_err(|e| {
+                                format!("turn/start failed ({e1}; {e2}); self-heal thread/start also failed: {e}")
+                            })?;
+                        let new_id = thread
+                            .pointer("/thread/id")
+                            .and_then(Value::as_str)
+                            .ok_or("thread/start response missing thread.id")?
+                            .to_string();
+                        update_codex_session_id(&app, &project_id, &tab_id, new_id.clone());
+                        let _ = app.emit(
+                            "codex-event",
+                            CodexEvent {
+                                project_id: project_id.clone(),
+                                tab_id: tab_id.clone(),
+                                payload: CodexEventPayload::Init { session_id: new_id.clone() },
+                            },
+                        );
+                        turn_params["threadId"] = json!(new_id);
+                        rpc_request(&app, &project_id, &tab_id, "turn/start", turn_params)
+                            .await
+                            .map_err(|e| format!("turn/start after self-heal failed: {e}"))?
+                    } else {
+                        return Err(format!("turn/start failed: {e1}; bare retry also failed: {e2}"));
+                    }
+                }
+            }
         }
-    })
-    .map_err(|e| format!("turn/start failed: {e}"))?;
+    };
     if let Some(turn_id) = turn.pointer("/turn/id").and_then(Value::as_str) {
         store_turn_id(&app, &project_id, &tab_id, Some(turn_id.to_string()));
     }
@@ -357,6 +432,85 @@ pub async fn send_codex_message(
     }
 
     Ok(())
+}
+
+/// thread/start 全参数(v2 schema:cwd/approvalPolicy/sandbox 字符串 + 可选 model;**无
+/// effort 字段**,推理档只走 turn/start per-turn)。resume 失败回退与 turn/start 自愈各建一份。
+fn build_start_params(cwd_json: &str, approval: &str, sandbox_str: &str, model: Option<&str>) -> Value {
+    let mut p = json!({
+        "cwd": cwd_json,
+        "approvalPolicy": approval,
+        "sandbox": sandbox_str,
+    });
+    if let Some(m) = model {
+        if !m.is_empty() {
+            p["model"] = json!(m);
+        }
+    }
+    p
+}
+
+/// thread/start 全参数 → 失败降级裸参数重试(旧版 server deny_unknown_fields 拒全量参数时,
+/// 裸 `{cwd}` 任何版本都认)。两段错误合并返回:裸重试不吞原始错误(原始文案常含可行动指引)。
+async fn thread_start_rpc(
+    app: &AppHandle,
+    project_id: &str,
+    tab_id: &str,
+    params: Value,
+    cwd_json: &str,
+) -> Result<Value, String> {
+    let bare = json!({ "cwd": cwd_json });
+    match rpc_request(app, project_id, tab_id, "thread/start", params).await {
+        Ok(v) => Ok(v),
+        Err(e1) => {
+            log::warn!("send_codex_message: thread/start with params failed ({e1}), retry bare");
+            rpc_request(app, project_id, tab_id, "thread/start", bare)
+                .await
+                .map_err(|e2| format!("{e1}; bare retry also failed: {e2}"))
+        }
+    }
+}
+
+/// thread/resume 全参数 → 失败降级裸参数重试(threadId 必填字段,任何版本都认)。
+/// 两段错误合并返回,理由同上(跨供应商 resume 被拒的「Switch to custom to continue」
+/// 就在原始错误里,不能被裸重试的报错顶掉)。
+async fn thread_resume_rpc(app: &AppHandle, project_id: &str, tab_id: &str, params: Value) -> Result<Value, String> {
+    let bare = json!({
+        "threadId": params.get("threadId").cloned().unwrap_or(Value::Null),
+        "excludeTurns": true,
+    });
+    match rpc_request(app, project_id, tab_id, "thread/resume", params).await {
+        Ok(v) => Ok(v),
+        Err(e1) => {
+            log::warn!("send_codex_message: thread/resume with params failed ({e1}), retry bare");
+            rpc_request(app, project_id, tab_id, "thread/resume", bare)
+                .await
+                .map_err(|e2| format!("{e1}; bare retry also failed: {e2}"))
+        }
+    }
+}
+
+/// 发一条 ⚠ 提示 item 到对话流(复用前端 error item 渲染:`⚠ {message}`,文案须避开
+/// isConfigDeprecationWarning 的过滤词,当前不含 "is deprecated"/"`[features]`")。
+/// id 带序号+毫秒时间戳:前端按 id upsert,重复 id 会把多条提示并成一条。
+fn emit_error_notice(app: &AppHandle, project_id: &str, tab_id: &str, message: &str) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NOTICE_SEQ: AtomicU64 = AtomicU64::new(0);
+    let n = NOTICE_SEQ.fetch_add(1, Ordering::SeqCst);
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let _ = app.emit(
+        "codex-event",
+        CodexEvent {
+            project_id: project_id.to_string(),
+            tab_id: tab_id.to_string(),
+            payload: CodexEventPayload::ItemCompleted {
+                item: json!({ "id": format!("txuy-notice-{n}-{ms}"), "type": "error", "message": message }),
+            },
+        },
+    );
 }
 
 /// 中断当前轮:优先 `turn/interrupt`(协议级,进程与 thread 保留,下轮继续用);
@@ -432,6 +586,7 @@ pub async fn respond_codex_approval(
     // for_session:「本会话允许」(新代 acceptForSession);旧代审批无此形态,退化成普通批准。
     for_session: Option<bool>,
 ) -> Result<(), String> {
+    crate::conductor::note_human_touch(&app, &project_id, &tab_id);
     respond_approval(
         &app,
         &project_id,

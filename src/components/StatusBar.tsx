@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { useTranslation } from "react-i18next";
 import type { ProjectSnapshot } from "../domain/projects";
 import { projectAccentColor } from "../domain/projects";
@@ -7,6 +8,10 @@ import type { ClaudeStatusEntry } from "../domain/claudeStatusRegistry";
 import type { CodexStatusEntry } from "../domain/codexStatusRegistry";
 import type { ClaudeSessionKind } from "../domain/claudeStream";
 import { autoCheckUpdate, getUpdaterSnapshot, subscribeUpdater, type UpdaterSnapshot } from "../domain/appUpdater";
+import type { ConductorToolEventPayload, StageBeatsReadonly, ToolBeat } from "../domain/conductor";
+import { mergeToolBeats } from "../domain/conductor";
+import { sessionColor, toolColor } from "../conductor/StagePanel";
+import { relativeTime } from "../conductor/ui";
 import type { SettingsTab } from "./SettingsModal";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/Tooltip";
 import { Popover, PopoverContent, PopoverTrigger } from "./ui/Popover";
@@ -180,7 +185,7 @@ export function StatusBar({ focusedProject, gitBranch, claudeStatuses, codexStat
           >
             <span aria-hidden className="h-1.5 w-1.5 animate-pulse rounded-full bg-[var(--mx-success-bright)]" />
             <span className="tabular-nums">{t("statusbar.updateAvailable")}</span>
-            <span className="font-[600] tabular-nums">v{updaterSnap.update.version}</span>
+            <span className="font-[600] tabular-nums">v{updaterSnap.info.version}</span>
           </button>
         )}
         {/* 聚焦项目 chip:项目色点 + 项目名 + ⎇ 分支合成一个胶囊(与顶栏项目 chip 同
@@ -207,7 +212,7 @@ export function StatusBar({ focusedProject, gitBranch, claudeStatuses, codexStat
               {gitBranch && (
                 <span className="flex min-w-0 shrink-0 items-center gap-[3px] text-[var(--mx-text)]">
                   <span aria-hidden>⎇</span>
-                  <span className="max-w-[140px] truncate font-mono text-[11px]">{gitBranch}</span>
+                  <span className="max-w-[140px] truncate font-mono text-[11px]" title={gitBranch}>{gitBranch}</span>
                 </span>
               )}
             </button>
@@ -229,75 +234,78 @@ export function StatusBar({ focusedProject, gitBranch, claudeStatuses, codexStat
         ) : (
           <span className="text-[var(--mx-faint)]">—</span>
         )}
+        {/* 中:AI 会话状态汇总(所有 claude tab)。有活跃态(running/retrying/waiting/error)才显;
+            点击某态药丸跳该态第一个 claude tab。全 idle / 无 claude tab 不显。 */}
+        {aiActive > 0 && (
+          <div className="flex shrink-0 items-center gap-1.5">
+            {aiActive > 0 && (
+              <>
+                <span className="text-[var(--mx-muted)]">{t("statusbar.aiSessions")}</span>
+                {aiPills.filter((p) => aiCounts[p.kind] > 0).map((p) => {
+                  const first = allAiStatuses.find((e) => e.summary.kind === p.kind);
+                  return (
+                    <Tooltip key={p.kind}>
+                    <TooltipTrigger asChild>
+                    <button
+                      type="button"
+                      disabled={!onFocusClaudeTab || !first}
+                      onClick={() => {
+                        if (first && onFocusClaudeTab) onFocusClaudeTab(first.projectId, first.tabId);
+                      }}
+                      className="flex items-center gap-1 rounded px-1.5 py-0.5 tabular-nums transition-colors hover:bg-[var(--mx-border)] disabled:cursor-default disabled:hover:bg-transparent"
+                    >
+                      <span className="h-1.5 w-1.5 rounded-full" style={{ background: p.color }} />
+                      <span className="text-[var(--mx-text)]">{p.label}</span>
+                    </button>
+                    </TooltipTrigger>
+                    <TooltipContent>{t("statusbar.aiSessions")}</TooltipContent>
+                    </Tooltip>
+                  );
+                })}
+              </>
+            )}
+          </div>
+        )}
+
+        {/* Fleet Workers 入口(git 分支图标):有聚焦项目才显;Popover 向上弹(side="top")列 worker 卡片。
+            计数徽标 = 该项目 worker 记录数(AppShell 挂载时拉一次,创建/面板刷新时更新;
+            状态栏自身不轮询,worker 明细/diff 统计打开面板才拉)。 */}
+        {focusedProject && (
+          <Popover open={fleetOpen} onOpenChange={setFleetOpen}>
+            <Tooltip>
+            <TooltipTrigger asChild>
+            <PopoverTrigger asChild>
+            <button
+              type="button"
+              className="relative flex shrink-0 cursor-pointer items-center gap-1 rounded px-1.5 py-0.5 text-[12px] leading-none transition-colors hover:bg-[var(--mx-hover-bg)]"
+            >
+              <FleetIcon className="h-3.5 w-3.5" />
+              {(fleetWorkerCount ?? 0) > 0 && (
+                <span className="tabular-nums text-[10px] text-[var(--mx-muted)]">{fleetWorkerCount}</span>
+              )}
+            </button>
+            </PopoverTrigger>
+            </TooltipTrigger>
+            <TooltipContent>{t("fleet.panel.title")}</TooltipContent>
+            </Tooltip>
+            <PopoverContent side="top" align="end" sideOffset={6} className="p-0">
+              <FleetPanel
+                projectId={focusedProject.id}
+                claudeStatuses={claudeStatuses}
+                codexStatuses={codexList}
+                onFocusFleetTab={onFocusFleetTab}
+                onWorkersChange={(n) => onFleetWorkerCount?.(focusedProject.id, n)}
+              />
+            </PopoverContent>
+          </Popover>
+        )}
+
+        {/* Agent 实况微条(2026-11-19):最近 60s 有拍才显,静默隐身零噪声;
+            hover 列最近 5 拍,点击开实况大屏。 */}
+        <StageMiniBar />
       </div>
 
       {/* 右:内存 已用/总量(GB) + 健康 tip。 */}
-      {/* 中:AI 会话状态汇总(所有 claude tab)。有活跃态(running/retrying/waiting/error)才显;
-          点击某态药丸跳该态第一个 claude tab。全 idle / 无 claude tab 不显。 */}
-      {aiActive > 0 && (
-        <div className="flex shrink-0 items-center gap-1.5">
-          {aiActive > 0 && (
-            <>
-              <span className="text-[var(--mx-muted)]">{t("statusbar.aiSessions")}</span>
-              {aiPills.filter((p) => aiCounts[p.kind] > 0).map((p) => {
-                const first = allAiStatuses.find((e) => e.summary.kind === p.kind);
-                return (
-                  <Tooltip key={p.kind}>
-                  <TooltipTrigger asChild>
-                  <button
-                    type="button"
-                    disabled={!onFocusClaudeTab || !first}
-                    onClick={() => {
-                      if (first && onFocusClaudeTab) onFocusClaudeTab(first.projectId, first.tabId);
-                    }}
-                    className="flex items-center gap-1 rounded px-1.5 py-0.5 tabular-nums transition-colors hover:bg-[var(--mx-border)] disabled:cursor-default disabled:hover:bg-transparent"
-                  >
-                    <span className="h-1.5 w-1.5 rounded-full" style={{ background: p.color }} />
-                    <span className="text-[var(--mx-text)]">{p.label}</span>
-                  </button>
-                  </TooltipTrigger>
-                  <TooltipContent>{t("statusbar.aiSessions")}</TooltipContent>
-                  </Tooltip>
-                );
-              })}
-            </>
-          )}
-        </div>
-      )}
-
-      {/* Fleet Workers 入口(git 分支图标):有聚焦项目才显;Popover 向上弹(side="top")列 worker 卡片。
-          计数徽标 = 该项目 worker 记录数(AppShell 挂载时拉一次,创建/面板刷新时更新;
-          状态栏自身不轮询,worker 明细/diff 统计打开面板才拉)。 */}
-      {focusedProject && (
-        <Popover open={fleetOpen} onOpenChange={setFleetOpen}>
-          <Tooltip>
-          <TooltipTrigger asChild>
-          <PopoverTrigger asChild>
-          <button
-            type="button"
-            className="relative flex shrink-0 cursor-pointer items-center gap-1 rounded px-1.5 py-0.5 text-[12px] leading-none transition-colors hover:bg-[var(--mx-hover-bg)]"
-          >
-            <FleetIcon className="h-3.5 w-3.5" />
-            {(fleetWorkerCount ?? 0) > 0 && (
-              <span className="tabular-nums text-[10px] text-[var(--mx-muted)]">{fleetWorkerCount}</span>
-            )}
-          </button>
-          </PopoverTrigger>
-          </TooltipTrigger>
-          <TooltipContent>{t("fleet.panel.title")}</TooltipContent>
-          </Tooltip>
-          <PopoverContent side="top" align="end" sideOffset={6} className="p-0">
-            <FleetPanel
-              projectId={focusedProject.id}
-              claudeStatuses={claudeStatuses}
-              codexStatuses={codexList}
-              onFocusFleetTab={onFocusFleetTab}
-              onWorkersChange={(n) => onFleetWorkerCount?.(focusedProject.id, n)}
-            />
-          </PopoverContent>
-        </Popover>
-      )}
-
       <div className="flex shrink-0 items-center gap-4">
         {mem !== null && mem.totalBytes > 0 && (
           <Tooltip>
@@ -334,5 +342,113 @@ export function StatusBar({ focusedProject, gitBranch, claudeStatuses, codexStat
         </Tooltip>
       </div>
     </footer>
+  );
+}
+
+/** Agent 实况微条心跳:相对时间「N 秒前」与热度(60s 拍数)的衰减刷新。 */
+const MINIBEAT_TICK_MS = 10_000;
+
+/**
+ * Agent 实况微条(2026-11-19,状态栏左区):「现在在干什么」的一行答案——⚡ + 最新拍
+ * (工具名分色 + 摘要截断 + 相对时间)+ 热度小数字(60s 拍数)。最近 60s 无拍整条隐身
+ * (零噪声);新拍滑入一次(mx-beat-in)。hover 列最近 5 拍明细;点击开实况大屏
+ * (open_stage_window,窗口关闭=隐藏)。
+ *
+ * 数据链与实况窗同构但**只读**:冷启动 `conductor_tool_beats`(无 ack 副作用,主窗口
+ * 拉 conductor_snapshot 会误推进徽标已读水位)+ `conductor-tool-event` 增量按 seq
+ * 归并。游戏数据(XP/等级/转盘)不进微条——那些去大屏看。
+ */
+function StageMiniBar() {
+  const { t } = useTranslation();
+  const [beats, setBeats] = useState<ToolBeat[]>([]);
+  // 相对时间/热度衰减心跳(纯触发重渲染,值不用)。
+  const [, setTick] = useState(0);
+
+  // 冷启动基线(只读命令,含 XP 总账但微条不消费)+ 逐帧增量(seq 归并,与快照竞态不丢拍)。
+  useEffect(() => {
+    invoke<StageBeatsReadonly>("conductor_tool_beats")
+      .then((s) => setBeats((prev) => mergeToolBeats(s?.beats ?? [], prev)))
+      .catch(() => {}); // 非 Tauri / 失败:静默隐身
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    listen<ConductorToolEventPayload>("conductor-tool-event", (e) => {
+      setBeats((prev) => mergeToolBeats(prev, e.payload.beats));
+    })
+      .then((u) => {
+        if (cancelled) u();
+        else unlisten = u;
+      })
+      .catch(() => {}); // 非 Tauri 环境:静默
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
+
+  // 心跳:让相对时间走字、热度衰减(静默 60s 后整条消失)。
+  useEffect(() => {
+    const id = window.setInterval(() => setTick((x) => x + 1), MINIBEAT_TICK_MS);
+    return () => window.clearInterval(id);
+  }, []);
+
+  const latest = beats.find((b) => Date.now() - b.ms <= 60_000) ?? null;
+  if (!latest) return null;
+  const hot = beats.filter((b) => Date.now() - b.ms <= 60_000).length;
+
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button
+          type="button"
+          onClick={() =>
+            void invoke("open_stage_window").catch((e) => console.warn("[stage] open failed:", e))
+          }
+          className="mx-beat-in flex max-w-[320px] shrink-0 cursor-pointer items-center gap-1.5 rounded px-1.5 py-0.5 text-[11px] leading-none transition-colors hover:bg-[var(--mx-hover-bg)]"
+        >
+          {/* 闪电标(同顶栏实况入口图标;有活动时呼吸提亮)。 */}
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden className="shrink-0 animate-pulse text-[var(--mx-accent)]">
+            <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
+          </svg>
+          <span key={latest.seq} className="mx-beat-in flex min-w-0 items-center gap-1.5">
+            <span className="shrink-0 truncate font-[600]" style={{ color: toolColor(latest.tool) }}>
+              {latest.tool}
+            </span>
+            <span className="min-w-0 truncate text-[var(--mx-text)] opacity-80" title={latest.summary}>
+              {latest.summary}
+            </span>
+          </span>
+          <span className="shrink-0 tabular-nums text-[var(--mx-muted)] opacity-70">
+            {relativeTime(latest.ms, t)}
+          </span>
+          {hot > 1 && (
+            <span
+              title={t("conductor.stage.hotBadge", { n: hot })}
+              className="shrink-0 rounded-full bg-[var(--mx-accent-soft)] px-1 text-[9px] leading-[14px] tabular-nums text-[var(--mx-accent)]"
+            >
+              {hot}
+            </span>
+          )}
+        </button>
+      </TooltipTrigger>
+      <TooltipContent side="top" className="p-2">
+        <div className="flex flex-col gap-1">
+          {beats.slice(0, 5).map((b) => (
+            <div key={b.seq} className="flex items-center gap-1.5 text-[11px] leading-none">
+              <span
+                aria-hidden
+                className="h-1.5 w-1.5 shrink-0 rounded-full"
+                style={{ background: sessionColor(`${b.projectId}/${b.tabId}`) }}
+              />
+              <span className="w-[64px] shrink-0 truncate font-[600]" style={{ color: toolColor(b.tool) }}>
+                {b.tool}
+              </span>
+              <span className="max-w-[220px] truncate opacity-80">{b.summary}</span>
+              <span className="shrink-0 tabular-nums opacity-50">{relativeTime(b.ms, t)}</span>
+            </div>
+          ))}
+          <span className="mt-0.5 text-[10px] opacity-50">{t("statusbar.stageOpenHint")}</span>
+        </div>
+      </TooltipContent>
+    </Tooltip>
   );
 }

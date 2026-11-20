@@ -21,6 +21,7 @@ tauri-plugin-log = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 log = "0.4"
+anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 portable-pty = "0.8"
@@ -31,6 +32,7 @@ sysinfo = "0.32"
 dirs = "6"
 notify = "6"
 base64 = "0.22"
+hex = "0.4"
 toml_edit = "0.22"
 chrono = "0.4"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
@@ -40,6 +42,7 @@ chacha20poly1305 = "0.10"
 # vault 密码保险箱:PBKDF2-HMAC-SHA256 派生密钥(与 Dart cryptography/手机端同参数)
 pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
 sha2 = "0.10"
+hmac = "0.12"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 if-addrs = "0.15.0"
 

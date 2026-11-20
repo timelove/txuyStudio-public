@@ -74,6 +74,10 @@ pub struct AiCliSessionMessage {
     pub tool_use: Option<ToolUseSummary>,
     /// user 行承载 tool_result 时填(摘要,截断)。
     pub tool_result: Option<String>,
+    /// assistant 侧思考摘要(codex rollout `response_item.reasoning` 的 summary[].text 拼接,
+    /// 前向挂到下一条 assistant 消息;轮被中断等无后续 assistant 时 flush 成独立 assistant 条目)。
+    /// claude 侧恒 None——claude jsonl 的 thinking 块是完整正文,历史回读保持跳过。
+    pub thinking: Option<String>,
 }
 
 /// 工具调用摘要(assistant 的 tool_use 块 / codex function_call)。

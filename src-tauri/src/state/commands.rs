@@ -4,7 +4,7 @@
 //! 每个 command 在锁作用域内完成 HashMap/Vec 变更并克隆出要返回的快照,
 //! 释放锁后再 `persistence::save` 与返回。
 
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 
 use super::persistence;
@@ -19,6 +19,8 @@ use crate::pty::PtyRegistry;
 ///
 /// - `windowLabel == "main"` 或 `workspace-N`(工作台窗口)→ 返回本窗口拥有的项目
 ///   (ownerWindow 匹配;main 兼容旧数据全量)+ 全量最近项目历史;active 按窗口取。
+/// - `windowLabel == "conductor"`(指挥窗)→ 返回**全量项目**(全局视图,驿站投递
+///   下拉的数据源;无 owner 归属概念)。
 /// - `windowLabel` 以 `project-` 开头且 `route_hint` 给了 projectId → 返回**只含该单个项目**
 ///   的快照(projects 过滤为 1 项,activeProjectId = 该 projectId)。独立项目窗口据此
 ///   只拿到自己项目的数据,天然隔离。锁作用域内 clone/过滤后即释放,无 `.await` 跨锁。
@@ -54,6 +56,16 @@ pub async fn hydrate_window(
             empty.main_window_bounds = guard.main_window_bounds;
             return Ok(empty);
         }
+    }
+
+    // 指挥窗(conductor):**全局视图**——看得到全部项目(驿站投递下拉的数据源,
+    // 与 owner_window 无关)。不能走下面的工作台分支:没有项目的 owner 是 conductor,
+    // retain 会把列表过滤成空(指挥窗 hydrate 后项目下拉全空的根因)。
+    if window_label == crate::conductor::CONDUCTOR_WINDOW_LABEL {
+        let mut snap = guard.clone();
+        // 指挥窗无「活动项目」语义,取首项占位(前端只用 id/name 做下拉)。
+        snap.active_project_id = snap.projects.first().map(|p| p.id.clone());
+        return Ok(snap);
     }
 
     // 工作台窗口(main / workspace-N):只回本窗口拥有的项目;active 按窗口取并校验。
@@ -350,6 +362,10 @@ pub async fn set_locale(
         log::error!("set_locale: persist failed: {e}");
         return Err(e);
     }
+    // 广播跨窗口同步(2026-11-17 用户实测:涌现窗不随主窗口切语言):指挥窗/独立
+    // 项目窗是独立 WebView,hydrate 只在启动读一次;各窗口 I18nProvider 订阅本事件
+    // 本地应用(触发窗口也收到,同值 no-op,不回 invoke 防回环)。
+    let _ = app.emit("locale-changed", &locale);
     Ok(snapshot)
 }
 
@@ -400,6 +416,10 @@ pub async fn set_theme(
         log::error!("set_theme: persist failed: {e}");
         return Err(e);
     }
+    // 广播跨窗口同步(2026-11-17 用户实测:涌现窗不随主窗口切主题):指挥窗/独立
+    // 项目窗是独立 WebView,hydrate 只在启动读一次主题;各窗口 ThemeProvider 订阅
+    // 本事件本地应用(触发窗口也收到,同值 no-op,不回 invoke 防回环)。
+    let _ = app.emit("theme-changed", &theme_id);
     Ok(snapshot)
 }
 

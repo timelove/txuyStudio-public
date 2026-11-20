@@ -279,7 +279,12 @@ pub async fn merge_fleet_worker(
         Ok(())
     })
     .await
-    .map_err(|e| e.to_string())??;
+    .map_err(|e| e.to_string())?
+    // 失败原因落日志(前端只显示在面板小字,用户报障时日志可查)。
+    .map_err(|e| {
+        log::warn!("merge_fleet_worker: {worker_id} failed: {e}");
+        e
+    })?;
 
     // 删记录 + save。
     let snapshot = {
@@ -326,7 +331,11 @@ pub async fn remove_fleet_worker(
         Ok(())
     })
     .await
-    .map_err(|e| e.to_string())??;
+    .map_err(|e| e.to_string())?
+    .map_err(|e| {
+        log::warn!("remove_fleet_worker: {worker_id} failed: {e}");
+        e
+    })?;
 
     let snapshot = {
         let mut snap = state.inner.lock().map_err(|e| e.to_string())?;
@@ -343,6 +352,126 @@ pub async fn remove_fleet_worker(
         return Err(e);
     }
     log::info!("remove_fleet_worker: discarded {worker_id}");
+    Ok(())
+}
+
+/// `-fleet/` 目录下、**无 worker 记录**的外部 worktree:其他 AI 会话/工具按同目录
+/// 约定建的,或记录丢失的残留。FleetPanel 可列出并一键删除,不用手动敲 git 命令。
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalWorktree {
+    /// 目录名(显示用,如 "fix-codex")。
+    pub name: String,
+    pub worktree_path: String,
+    /// 分支名(detached HEAD → None;删除时不删分支)。
+    pub branch: Option<String>,
+    /// 分支相对主仓 HEAD 的 diff 统计(detached 为 0)。
+    pub changed_files: usize,
+    pub added_lines: u64,
+    pub removed_lines: u64,
+}
+
+/// 列出外部 worktree:`git worktree list` 里位于 `<根>-fleet/` 直接子级、且不在
+/// worker 记录里的条目(目录已被外部删掉的 worktree 不在 git 列表里,自然排除;
+/// 记录孤儿由 [`FleetWorkerView::worktree_exists`] 另行警示)。
+#[tauri::command]
+pub async fn list_external_worktrees(
+    state: State<'_, AppState>,
+    project_id: String,
+) -> Result<Vec<ExternalWorktree>, String> {
+    let project = find_project(&state, &project_id)?;
+    let root = PathBuf::from(&project.root_path);
+    let fleet_root = fleet_root_dir(&root).to_string_lossy().to_lowercase();
+    let known: Vec<String> = project
+        .fleet_workers
+        .iter()
+        .map(|w| w.worktree_path.to_lowercase())
+        .collect();
+
+    tauri::async_runtime::spawn_blocking(move || -> Result<Vec<ExternalWorktree>, String> {
+        let mut out = Vec::new();
+        for (path, branch) in git::worktree_list(&root)? {
+            // 只认 fleet 根直接子级(主仓根、别处 worktree 不掺和)。
+            let parent = Path::new(&path)
+                .parent()
+                .map(|p| p.to_string_lossy().to_lowercase());
+            if parent.as_deref() != Some(fleet_root.as_str()) {
+                continue;
+            }
+            if known.iter().any(|k| *k == path.to_lowercase()) {
+                continue;
+            }
+            let (changed_files, added_lines, removed_lines) = match &branch {
+                Some(b) => git::diff_stat(&root, "HEAD", b).unwrap_or((0, 0, 0)),
+                None => (0, 0, 0),
+            };
+            out.push(ExternalWorktree {
+                name: Path::new(&path)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(&path)
+                    .to_string(),
+                worktree_path: path,
+                branch,
+                changed_files,
+                added_lines,
+                removed_lines,
+            });
+        }
+        Ok(out)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 删除外部 worktree:`worktree remove`(--force)+ 删分支。无记录可动(不碰 AppState)。
+///
+/// 安全闸(删除是不可逆动作,双保险):目标必须位于 `<根>-fleet/` 直接子级;
+/// branch 若删必须 `fleet/` 前缀——非 fleet 分支一律拒绝,防误删主分支。
+/// 目标目录已不存在时幂等继续(只清分支)。
+#[tauri::command]
+pub async fn remove_external_worktree(
+    state: State<'_, AppState>,
+    project_id: String,
+    worktree_path: String,
+    branch: Option<String>,
+) -> Result<(), String> {
+    if let Some(b) = &branch {
+        if !b.starts_with("fleet/") {
+            return Err(format!("refuse to delete non-fleet branch: {b}"));
+        }
+    }
+    let root_path = project_root_of(&state, &project_id)?;
+    let root = PathBuf::from(&root_path);
+    let target = PathBuf::from(&worktree_path);
+    if target.exists() {
+        let fleet_root = fleet_root_dir(&root)
+            .canonicalize()
+            .map_err(|e| format!("canonicalize fleet root: {e}"))?;
+        let parent = target
+            .canonicalize()
+            .map_err(|e| format!("canonicalize worktree: {e}"))?
+            .parent()
+            .map(|p| p.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+        if parent != fleet_root.to_string_lossy().to_lowercase() {
+            return Err("path is not a direct child of the fleet root".into());
+        }
+    }
+
+    let root2 = root.clone();
+    let worktree = target.clone();
+    let branch2 = branch.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        git::worktree_remove(&root2, &worktree)?;
+        if let Some(b) = branch2 {
+            git::branch_delete(&root2, &b)?;
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    log::info!("remove_external_worktree: {worktree_path} cleaned up");
     Ok(())
 }
 

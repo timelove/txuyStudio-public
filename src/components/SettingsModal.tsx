@@ -3,9 +3,10 @@ import { PerfPanel } from "./PerfPanel";
 import { EnvCheckSection } from "./EnvCheck";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { check, type Update } from "@tauri-apps/plugin-updater";
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { relaunch } from "@tauri-apps/plugin-process";
-import { getUpdaterSnapshot, publishUpdater, type UpdaterSnapshot } from "../domain/appUpdater";
+import { checkUpdate, getUpdaterSnapshot, publishUpdater, type UpdateInfo, type UpdaterSnapshot } from "../domain/appUpdater";
 import { SHORTCUT_GROUPS } from "../domain/shortcuts";
 import { useI18n } from "../i18n/I18nProvider";
 import { SUPPORTED_LOCALES, type Locale } from "../i18n";
@@ -116,47 +117,48 @@ function AppUpdater({ t }: { t: (k: string, o?: Record<string, unknown>) => stri
     | { phase: "idle" }
     | { phase: "checking" }
     | { phase: "upToDate" }
-    | { phase: "available"; update: Update }
+    | { phase: "available"; info: UpdateInfo }
     | { phase: "downloading"; received: number; total: number | null }
     | { phase: "installing" }
     | { phase: "ready" }
     | { phase: "error"; message: string };
-  // 初始态联动全局 store:启动自动检查已发现新版本时,打开面板直接显示 available
-  //(Update 实例可复用——downloadAndInstall 是它的方法),免二次请求。
+  // 初始态联动全局 store:启动自动检查已发现新版本时,打开面板直接显示 available,
+  // 免二次请求(下载/安装每次由 Rust 命令重新 check,见 download_and_install_update)。
   const fromStore = (s: UpdaterSnapshot): UpdState =>
-    s.phase === "available" ? { phase: "available", update: s.update } : { phase: "idle" };
+    s.phase === "available" ? { phase: "available", info: s.info } : { phase: "idle" };
   const [state, setState] = useState<UpdState>(() => fromStore(getUpdaterSnapshot()));
 
   const runCheck = async () => {
     setState({ phase: "checking" });
     try {
-      const update = await check();
-      console.info("[updater] manual check:", update ? `available v${update.version}` : "up-to-date(null)");
+      const next = await checkUpdate();
+      console.info("[updater] manual check:", next.phase === "available" ? `available v${next.info.version}` : "up-to-date");
       // 结果同步全局 store(状态栏 chip 出现/消失)。
-      publishUpdater(update ? { phase: "available", update } : { phase: "upToDate" });
-      setState(update ? { phase: "available", update } : { phase: "upToDate" });
+      publishUpdater(next);
+      setState(fromStore(next));
     } catch (err) {
       setState({ phase: "error", message: err instanceof Error ? err.message : String(err) });
     }
   };
 
-  const runInstall = async (update: Update) => {
+  const runInstall = async () => {
     try {
       setState({ phase: "downloading", received: 0, total: null });
-      // downloaded/contentLength 单位字节(可能无 content-length → total null,显示不定进度)。
-      await update.downloadAndInstall((event) => {
-        if (event.event === "Started" && event.data.contentLength) {
-          setState({ phase: "downloading", received: 0, total: event.data.contentLength });
-        } else if (event.event === "Progress") {
-          setState((s) =>
-            s.phase === "downloading"
-              ? { phase: "downloading", received: s.received + event.data.chunkLength, total: s.total }
-              : s,
-          );
-        } else if (event.event === "Finished") {
-          setState({ phase: "installing" });
-        }
+      // 先注册进度监听再发起下载(注册完成前的事件会丢,顺序保证无竞态);字节单位,
+      // total 无 content-length 时 null → 仅文字计数不定进度。
+      const unlisten = await listen<{ received: number; total: number | null }>("updater-progress", (e) => {
+        setState((s) =>
+          s.phase === "downloading"
+            ? { phase: "downloading", received: e.payload.received, total: e.payload.total }
+            : s,
+        );
       });
+      try {
+        // Rust 侧一把梭:check + download(内含验签)+ install;完成即返回。
+        await invoke("download_and_install_update");
+      } finally {
+        unlisten();
+      }
       // 安装完成回写全局:状态栏「新版本可用」chip 消失,等用户重启。
       publishUpdater({ phase: "upToDate" });
       setState({ phase: "ready" });
@@ -165,6 +167,7 @@ function AppUpdater({ t }: { t: (k: string, o?: Record<string, unknown>) => stri
     }
   };
 
+  /** 保存更新源偏好(空串传 null = 清除回 GitHub),成功后立即按新源重查作第一反馈。 */
   const fmtBytes = (n: number) =>
     n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`;
 
@@ -188,7 +191,7 @@ function AppUpdater({ t }: { t: (k: string, o?: Record<string, unknown>) => stri
             </Button>
           )}
           {state.phase === "available" && (
-            <Button size="sm" onClick={() => void runInstall(state.update)}>
+            <Button size="sm" onClick={() => void runInstall()}>
               {t("settings.updater.install")}
             </Button>
           )}
@@ -209,11 +212,11 @@ function AppUpdater({ t }: { t: (k: string, o?: Record<string, unknown>) => stri
       {state.phase === "available" && (
         <div className="mt-2 border-t border-[var(--mx-border)] pt-2">
           <div className="text-[11px] font-[600] text-[var(--mx-accent)]">
-            {__APP_VERSION__} → {state.update.version}
+            {__APP_VERSION__} → {state.info.version}
           </div>
-          {state.update.body && (
+          {state.info.body && (
             <pre className="mx-scroll-pretty mt-1 max-h-[140px] overflow-y-auto whitespace-pre-wrap break-words text-[10px] leading-relaxed text-[var(--mx-muted)]">
-              {state.update.body}
+              {state.info.body}
             </pre>
           )}
         </div>

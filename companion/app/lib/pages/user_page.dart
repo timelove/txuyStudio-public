@@ -273,7 +273,7 @@ class _UserPageState extends State<UserPage> {
                       ? '检查更新'
                       : '下载新版本 v${_update!.version}',
               subtitle: _update == null
-                  ? '当前 v${_appVersion ?? '...'} · 检查 GitHub Releases'
+                  ? '当前 v${_appVersion ?? '...'} · 检查更新源'
                   : (_update!.notes.trim().split('\n').first.isEmpty
                       ? '查看更新内容并手动安装'
                       : _update!.notes.trim().split('\n').first),

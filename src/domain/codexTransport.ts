@@ -13,6 +13,7 @@ import type { CodexBlock, CodexMessage } from "./codexStream";
 import { codexStatusRegistry } from "./codexStatusRegistry";
 import { DEFAULT_CODEX_PERMISSION } from "./codexPermission";
 import { DEFAULT_CODEX_SANDBOX } from "./codexSandbox";
+import { loadCodexProviders } from "./codexProviders";
 import {
   fetchAiCliSessionMessages,
   fetchAiCliSessions,
@@ -25,7 +26,7 @@ import {
 const autoResumedSessionIds = new Set<string>();
 
 /** AiCliSessionMessage(rollout 裁剪形态)→ CodexMessage(粗粒度回显:user 文本 /
- *  assistant 文本 + 工具卡简形;thinking 历史侧本就不解析)。空行跳过。 */
+ *  assistant 文本 + 思考摘要 + 工具卡简形)。空行跳过。 */
 function codexHistoryRowsToMessages(rows: AiCliSessionMessage[]): CodexMessage[] {
   const out: CodexMessage[] = [];
   for (let i = 0; i < rows.length; i++) {
@@ -43,6 +44,8 @@ function codexHistoryRowsToMessages(rows: AiCliSessionMessage[]): CodexMessage[]
       continue;
     }
     const blocks: CodexBlock[] = [];
+    // 思考摘要块(rollout reasoning.summary 明文;密文正文不可读,历史无 ms 不展示耗时)。
+    if (r.thinking?.trim()) blocks.push({ type: "thinking", text: r.thinking });
     if (r.text.trim()) blocks.push({ type: "text", text: r.text });
     if (r.toolUse) {
       blocks.push({
@@ -111,6 +114,11 @@ export class CodexTransport {
   private model: string | null = null;
   /** 用户最后选的 model 项(供选择器高亮;meta.model 会被 config 回填覆盖)。 */
   private selectedModelAlias: string | null = null;
+  /** per-tab 供应商 override 的 provider id(null=跟随全局 config.toml)。切换**只影响本 tab**
+   *  (2026-11-12,与 claude 侧 --settings 同口径):send 时解析成 -c 覆盖集合随 invoke 传,
+   *  后端检测集合变化杀进程重拉(thread id 保留,上下文不丢);其余 tab 与全局零影响。
+   *  prefs 持久化跨重启。 */
+  private codexProviderId: string | null = null;
   /** 期望 reasoning effort(codex -c model_reasoning_effort)。undefined=不传(模型默认档)。 */
   private reasoningEffort: string | undefined = undefined;
   /** sandbox 策略(codex -s)。初始 = DEFAULT_CODEX_SANDBOX(每 tab 状态栏可切,全局默认档设置已移除)。 */
@@ -152,20 +160,59 @@ export class CodexTransport {
     return `mx.codexPrefs.v1.${this.projectId}.${this.tabId}`;
   }
 
+  /** 项目级「上次选择」键:新 tab 回退用(2026-11-13 用户报「新 tab 还是默认模型」——
+   *  tab 级 prefs 只对同 tabId 恢复,新建 tab 无记忆)。只记 model + codexProviderId
+   *  (两者强关联:切供应商必带模型);权限/沙箱保持新 tab 走默认档不越权记忆。 */
+  private projectPrefsKey(): string {
+    return `mx.codexPrefs.v1.${this.projectId}.__project`;
+  }
+
   private loadPrefs(): void {
     try {
       const raw = localStorage.getItem(this.prefsKey());
-      if (!raw) return;
-      const p = JSON.parse(raw) as {
-        model?: string | null;
-        reasoningEffort?: string;
-        permission?: string;
-        sandbox?: string;
-      };
-      if (p.model !== undefined) this.model = p.model;
-      if (p.reasoningEffort) this.reasoningEffort = p.reasoningEffort;
-      if (p.permission) this.permission = p.permission;
-      if (p.sandbox) this.sandbox = p.sandbox;
+      let model: string | null | undefined;
+      let provider: string | null | undefined;
+      if (raw) {
+        const p = JSON.parse(raw) as {
+          model?: string | null;
+          reasoningEffort?: string;
+          permission?: string;
+          sandbox?: string;
+          codexProviderId?: string | null;
+        };
+        if (p.model !== undefined) {
+          this.model = p.model;
+          // 同步菜单勾选与状态栏显示——只恢复 this.model 的话,刷新后菜单仍勾「默认」,
+          // meta.model 空着还会被 hydrateModel 用 config 默认档回填,看着像没记住
+          // (2026-11-13 用户报;model=null 是显式选了默认档,保持 alias 空=跟随 config)。
+          if (p.model) {
+            this.selectedModelAlias = p.model;
+            this.state = { ...this.state, meta: { ...this.state.meta, model: p.model } };
+          }
+        }
+        if (p.reasoningEffort) this.reasoningEffort = p.reasoningEffort;
+        if (p.permission) this.permission = p.permission;
+        if (p.sandbox) this.sandbox = p.sandbox;
+        if (p.codexProviderId !== undefined) this.codexProviderId = p.codexProviderId;
+        model = p.model;
+        provider = p.codexProviderId;
+      }
+      // tab 级没记过模型/供应商 → 回退项目级「上次选择」(仅这两项),并同步高亮与
+      // meta.model(新 tab 未发消息前菜单勾选即正确,不等后端回填)。
+      if (model === undefined || provider === undefined) {
+        const praw = localStorage.getItem(this.projectPrefsKey());
+        if (praw) {
+          const pp = JSON.parse(praw) as { model?: string | null; codexProviderId?: string | null };
+          if (model === undefined && pp.model !== undefined) {
+            this.model = pp.model;
+            this.selectedModelAlias = pp.model;
+            this.state = { ...this.state, meta: { ...this.state.meta, model: pp.model ?? undefined } };
+          }
+          if (provider === undefined && pp.codexProviderId !== undefined) {
+            this.codexProviderId = pp.codexProviderId;
+          }
+        }
+      }
     } catch {
       // 坏 JSON / 隐私模式写不进:忽略,走默认档。
     }
@@ -180,7 +227,14 @@ export class CodexTransport {
           reasoningEffort: this.reasoningEffort,
           permission: this.permission,
           sandbox: this.sandbox,
+          codexProviderId: this.codexProviderId,
         }),
+      );
+      // 项目级「上次选择」双写(新 tab 回退源;clearCodexProvider 回默认时写 null =
+      // 用户显式选默认,新 tab 也跟着回默认而不是复用更早的选择)。
+      localStorage.setItem(
+        this.projectPrefsKey(),
+        JSON.stringify({ model: this.model, codexProviderId: this.codexProviderId }),
       );
     } catch {
       // 写失败(配额/隐私模式)不致命:只影响下次打开的记忆。
@@ -287,6 +341,47 @@ export class CodexTransport {
     this.savePrefs();
     this.emit();
     void this.syncModelToBackend(slug);
+  }
+
+  /** per-tab 供应商 id(render 期同步读,供模型菜单分组高亮)。null=跟随全局。 */
+  getCodexProviderId(): string | null {
+    return this.codexProviderId;
+  }
+
+  /**
+   * 切到指定供应商+模型(**只切本 tab**;供应商经 -c 覆盖,模型走既有 per-turn 参数)。
+   * 下轮 send 生效:后端检测 override 集合变化杀进程重拉、thread id 保留,上下文不丢,
+   * 不打断当前轮(同 setModel 语义,故无需 interrupt)。乐观回填 meta.model + prefs 持久化。
+   */
+  setCodexProvider(providerId: string, model: string): void {
+    this.codexProviderId = providerId;
+    this.selectedModelAlias = model;
+    this.model = model;
+    this.state = { ...this.state, meta: { ...this.state.meta, model } };
+    this.savePrefs();
+    this.emit();
+    void this.syncModelToBackend(model);
+  }
+
+  /**
+   * 清 per-tab 供应商 override,回「跟随全局」(下轮 send 生效)。模型同步回 null
+   * (config.toml 默认档),异步回填 meta.model(override 期间 registry 里是旧模型)。
+   */
+  clearCodexProvider(): void {
+    this.codexProviderId = null;
+    this.selectedModelAlias = null;
+    this.model = null;
+    this.savePrefs();
+    this.state = { ...this.state, meta: { ...this.state.meta, model: undefined } };
+    this.emit();
+    void invoke<string | null>("get_codex_current_model")
+      .then((m) => {
+        if (m && !this.codexProviderId) {
+          this.state = { ...this.state, meta: { ...this.state.meta, model: m } };
+          this.emit();
+        }
+      })
+      .catch(() => {});
   }
 
   /**
@@ -471,6 +566,27 @@ export class CodexTransport {
     this.emit();
   }
 
+  /**
+   * 解析 per-tab 供应商为 -c 覆盖集合(null=无 override)。段名 `txuy-<tabId>` 独立于全局
+   * [model_providers.custom] 段,互不纠缠;键集与后端 apply_codex_provider 写全局的口径一致
+   * (name/base_url/wire_api/bearer token;requires_openai_auth 缺省即 bearer 形态,不传)。
+   * provider 已被删(id 找不到)时 override 失效,返回 null(静默回全局)。
+   */
+  private buildProviderOverrides(): Record<string, string> | null {
+    if (!this.codexProviderId) return null;
+    const p = loadCodexProviders().find((x) => x.id === this.codexProviderId);
+    if (!p) return null;
+    const section = `txuy-${this.tabId}`;
+    const ov: Record<string, string> = {
+      model_provider: section,
+      [`model_providers.${section}.name`]: p.name,
+      [`model_providers.${section}.base_url`]: p.baseUrl,
+      [`model_providers.${section}.wire_api`]: p.wireApi || "responses",
+    };
+    if (p.token) ov[`model_providers.${section}.experimental_bearer_token`] = p.token;
+    return ov;
+  }
+
   private async doSend(prompt: string, isNewSession: boolean) {
     await this.ensureListening();
     const resumeSessionId = isNewSession ? null : this.resumeSessionId;
@@ -486,6 +602,7 @@ export class CodexTransport {
         reasoningEffort: this.reasoningEffort ?? null,
         resumeSessionId,
         newSession: isNewSession,
+        providerOverrides: this.buildProviderOverrides(),
       });
       // 消费掉一次性 resume 注入(SessionBrowser 恢复);后续轮走后端 registry live id。
       if (!isNewSession) this.resumeSessionId = null;
@@ -566,6 +683,7 @@ export class CodexTransport {
    * 供 CodexPane 模型选择器打开时调(同时组件重拉 list_codex_models 刷新目录)。
    */
   async refreshIfConfigChanged(): Promise<void> {
+    if (this.codexProviderId) return; // per-tab override:全局配置变化与本 tab 无关,不联动刷新。
     let changed: boolean;
     try {
       changed = await invoke<boolean>("codex_config_changed", {

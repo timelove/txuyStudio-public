@@ -14,6 +14,7 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
 import { flushSync } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import {
   DEFAULT_THEME_ID,
   normalizeThemeId,
@@ -50,6 +51,24 @@ export function ThemeProvider({
   useEffect(() => {
     document.documentElement.dataset.theme = themeId;
   }, [themeId]);
+
+  // 跨窗口同步(2026-11-17 用户实测:涌现窗不随主窗口切主题):指挥窗/独立项目窗
+  // 是独立 WebView,hydrate 只在启动读一次后端主题;主窗口 changeTheme → set_theme
+  // 落盘后广播 theme-changed,各窗口在此订阅本地应用。不走 changeTheme(会再
+  // invoke set_theme → 广播回环);触发窗口也收到本事件,同值 no-op。纯浏览器
+  // 兜底无事件系统,catch 静默。
+  useEffect(() => {
+    let un: (() => void) | undefined;
+    listen<string>("theme-changed", (e) => {
+      const next = normalizeThemeId(e.payload) ?? DEFAULT_THEME_ID;
+      setThemeId((cur) => (cur === next ? cur : next));
+    })
+      .then((x) => {
+        un = x;
+      })
+      .catch(() => {});
+    return () => un?.();
+  }, []);
 
   const changeTheme = (id: ThemeId, origin?: { x: number; y: number }) => {
     const root = document.documentElement;

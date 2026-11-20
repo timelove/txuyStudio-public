@@ -236,10 +236,7 @@ pub async fn get_perf_stats(
     let self_pid = std::process::id();
     let mut sys = System::new();
     sys.refresh_processes(ProcessesToUpdate::Some(&[sysinfo::Pid::from_u32(self_pid)]), true);
-    let rust_memory_bytes = sys
-        .process(sysinfo::Pid::from_u32(self_pid))
-        .map(|p| p.memory() * 1024) // sysinfo memory() 单位 KB。
-        .unwrap_or(0);
+    let rust_memory_bytes = process_memory_bytes(&sys, sysinfo::Pid::from_u32(self_pid));
 
     // 直接子进程数:全表枚举 + 10s 静态缓存(过期才重算)。
     static CHILDREN_CACHE: std::sync::Mutex<Option<(std::time::Instant, u32)>> = std::sync::Mutex::new(None);
@@ -274,6 +271,11 @@ pub async fn get_perf_stats(
         shell_sessions,
         fs_watchers,
     })
+}
+
+/// `sysinfo >= 0.30` 的 `Process::memory()` 已返回字节，不得再按旧版语义乘 1024。
+fn process_memory_bytes(sys: &System, pid: sysinfo::Pid) -> u64 {
+    sys.process(pid).map(|process| process.memory()).unwrap_or(0)
 }
 
 /// 解析 `<root_path>/.git/HEAD` 取当前分支名。
@@ -383,6 +385,123 @@ pub async fn check_commands_installed(
         out.insert(cmd, installed);
     }
     Ok(out)
+}
+
+/// AI CLI 新版本提示(2026-11-17 用户:「针对 ai pane,加个自动更新提示的功能」):
+/// 本机版本(--version 实跑)对比 npm registry 最新版。只提示不自动升级——升级动作
+/// 始终是人在终端里敲命令;latest 查询失败(离线/网络被墙)返回 None,前端不提示。
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CliUpdateInfo {
+    /// "claude" | "codex"
+    pub provider: String,
+    /// 本机版本;None = 未安装或 --version 取不到。
+    pub current: Option<String>,
+    /// npm 最新版;None = 查询失败(npmjs 与 npmmirror 都没通)。
+    pub latest: Option<String>,
+    pub update_available: bool,
+}
+
+/// 从 `--version` 输出提取版本号:取第一个形如 `N(.N)+` 的 token
+/// (claude `2.0.14 (Claude Code)` / codex `codex-cli 0.147.0`;glm 代理版可能带
+/// 自定义尾巴,只认纯数字段最稳)。
+fn parse_version_line(out: &str) -> Option<String> {
+    for tok in out.split_whitespace() {
+        let core = tok.trim_start_matches('v');
+        let segs = core.split('.').collect::<Vec<_>>();
+        if segs.len() >= 2 && segs.iter().all(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit())) {
+            return Some(core.to_string());
+        }
+    }
+    None
+}
+
+/// 逐段数值比较(缺失段按 0):a > b 返回 true。
+fn version_gt(a: &str, b: &str) -> bool {
+    let pa: Vec<u64> = a.split('.').filter_map(|s| s.parse().ok()).collect();
+    let pb: Vec<u64> = b.split('.').filter_map(|s| s.parse().ok()).collect();
+    for i in 0..pa.len().max(pb.len()) {
+        let x = pa.get(i).copied().unwrap_or(0);
+        let y = pb.get(i).copied().unwrap_or(0);
+        if x != y {
+            return x > y;
+        }
+    }
+    false
+}
+
+/// 跑 `<program> --version` 取版本号(同步阻塞,与 check_commands_installed 同量级先例;
+/// Windows 带 CREATE_NO_WINDOW 防黑窗闪烁)。
+fn run_cli_version(program: &str) -> Option<String> {
+    #[cfg(windows)]
+    let mut cmd = command_no_window(program);
+    #[cfg(not(windows))]
+    let mut cmd = std::process::Command::new(program);
+    let out = cmd.arg("--version").output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    parse_version_line(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// claude/codex 有没有新版:本机 `--version` 实跑 + npm registry 最新版
+/// (npmjs 优先,失败回落国内 npmmirror;5s 超时,慢网下前端也不至于干等)。
+#[tauri::command]
+pub async fn check_cli_update(provider: String) -> Result<CliUpdateInfo, String> {
+    // 1) 本机版本:claude 走专属解析(原生安装不在 PATH 上,同 check_commands_installed 口径);
+    //    codex 走 where.exe 定位后实跑。
+    let current = match provider.as_str() {
+        "claude" => match crate::claude::commands::resolve_claude_program() {
+            Some(prog) => run_cli_version(&prog),
+            None => None,
+        },
+        "codex" => {
+            let path = command_no_window("where.exe")
+                .arg("codex")
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .and_then(|o| String::from_utf8(o.stdout).ok())
+                .and_then(|s| s.lines().next().map(str::trim).map(str::to_string));
+            path.and_then(|p| run_cli_version(&p))
+        }
+        _ => return Err(format!("未知 provider: {provider}")),
+    };
+
+    // 2) npm 最新版:两个 registry 逐个试,通一个就用。
+    let pkg = match provider.as_str() {
+        "claude" => "@anthropic-ai/claude-code",
+        "codex" => "@openai/codex",
+        _ => return Err(format!("未知 provider: {provider}")),
+    };
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let mut latest = None;
+    for url in [
+        format!("https://registry.npmjs.org/{pkg}/latest"),
+        format!("https://registry.npmmirror.com/{pkg}/latest"),
+    ] {
+        let Ok(resp) = client.get(&url).send().await else { continue };
+        if !resp.status().is_success() {
+            continue;
+        }
+        if let Ok(v) = resp.json::<serde_json::Value>().await {
+            if let Some(s) = v.get("version").and_then(|x| x.as_str()) {
+                latest = Some(s.to_string());
+                break;
+            }
+        }
+    }
+
+    let update_available = matches!((&current, &latest), (Some(c), Some(l)) if version_gt(l, c));
+    Ok(CliUpdateInfo {
+        provider,
+        current,
+        latest,
+        update_available,
+    })
 }
 
 /// 在资源管理器中定位文件/目录(消息流工具卡片的文件路径、/memory 等配置入口点击)。
@@ -1636,6 +1755,7 @@ fn parse_claude_messages(path: &Path) -> Result<Vec<AiCliSessionMessage>, String
                     text: text.to_string(),
                     tool_use: None,
                     tool_result: None,
+                    thinking: None,
                 });
             } else if let Some(arr) = message.get("content").and_then(|c| c.as_array()) {
                 for item in arr {
@@ -1650,6 +1770,7 @@ fn parse_claude_messages(path: &Path) -> Result<Vec<AiCliSessionMessage>, String
                             text: String::new(),
                             tool_use: None,
                             tool_result: Some(format!("{prefix}{brief}")),
+                            thinking: None,
                         });
                     }
                 }
@@ -1688,26 +1809,52 @@ fn parse_claude_messages(path: &Path) -> Result<Vec<AiCliSessionMessage>, String
                 text: text_parts.join("\n"),
                 tool_use,
                 tool_result: None,
+                thinking: None,
             });
         }
     }
     Ok(out)
 }
 
+/// 残留思考摘要 flush 成独立 assistant 条目(只带 thinking,无正文/工具)——轮被用户中断、
+/// 后续没有 assistant 消息承载时,已落盘的思考摘要不随轮丢弃。
+fn flush_pending_thinking(
+    out: &mut Vec<AiCliSessionMessage>,
+    pending: &mut Option<(String, Option<String>)>,
+) {
+    if let Some((text, ts)) = pending.take() {
+        out.push(AiCliSessionMessage {
+            role: "assistant".into(),
+            timestamp: ts,
+            text: String::new(),
+            tool_use: None,
+            tool_result: None,
+            thinking: Some(text),
+        });
+    }
+}
+
 /// 解析 Codex rollout 为消息流。**主干 = response_item**(两种 rollout 时代都稳定):
 /// message(role=user/assistant,文本在 content[].text)→ 对话文本;
 /// function_call / custom_tool_call → 工具卡;function_call_output / custom_tool_call_output
-/// → 按 call_id 回填上一张同名工具卡的结果。旧解析找 `event_msg/user_message`/
-/// `agent_message`,但 rollout 格式已迁移(0.166 时代 event_msg 只剩 item_completed,没有
-/// user_message/agent_message 事件)→ 文本全丢,只剩工具行(2026-11-04 用户报「恢复就一个
-/// 内容还是 wait」)。developer/system 角色跳过;event_msg 整类跳过(item_completed 与
-/// response_item 同内容)。
+/// → 按 call_id 回填上一张同名工具卡的结果;reasoning → summary[].text 拼接成思考摘要
+/// (正文是 encrypted_content 密文不可读,空 summary 的段落无可救),前向挂到下一条
+/// assistant 消息,轮被中断等无后续 assistant 时 flush 成独立 assistant 条目
+/// (2026-11-12 用户报「中断轮思考内容回显全无」——rollout 有落盘,回读丢弃)。
+/// 旧解析找 `event_msg/user_message`/`agent_message`,但 rollout 格式已迁移(0.166 时代
+/// event_msg 只剩 item_completed,没有 user_message/agent_message 事件)→ 文本全丢,只剩
+/// 工具行(2026-11-04 用户报「恢复就一个内容还是 wait」)。developer/system 角色跳过
+/// (`<turn_aborted>` 中断标记即 developer role,天然不误显);event_msg 整类跳过
+/// (item_completed 与 response_item 同内容)。
 fn parse_codex_messages(path: &Path) -> Result<Vec<AiCliSessionMessage>, String> {
     let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
     let reader = std::io::BufReader::new(file);
     let mut out: Vec<AiCliSessionMessage> = Vec::new();
     // call_id → out 下标(最近一张待配结果工具卡;同 id 重复调用覆盖,rollout 顺序即时间序)。
     let mut pending_tools: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    // 待挂载思考摘要 (text, 首段 reasoning 的 timestamp)。前向挂下一条 assistant;遇 user
+    // 消息或解析结束仍残留时 flush 成独立 assistant 条目(中断轮尾部典型)。
+    let mut pending_thinking: Option<(String, Option<String>)> = None;
 
     // message.content[] 的文本拼接(content[].text;空 content 容错)。
     let content_text = |payload: &serde_json::Value| -> String {
@@ -1750,12 +1897,15 @@ fn parse_codex_messages(path: &Path) -> Result<Vec<AiCliSessionMessage>, String>
                         {
                             continue;
                         }
+                        // 残留思考属上一轮 assistant 侧:排在下一条 user 消息之前。
+                        flush_pending_thinking(&mut out, &mut pending_thinking);
                         out.push(AiCliSessionMessage {
                             role: "user".into(),
                             timestamp,
                             text: t.to_string(),
                             tool_use: None,
                             tool_result: None,
+                            thinking: None,
                         });
                     }
                     "assistant" => {
@@ -1767,10 +1917,34 @@ fn parse_codex_messages(path: &Path) -> Result<Vec<AiCliSessionMessage>, String>
                                 text,
                                 tool_use: None,
                                 tool_result: None,
+                                thinking: pending_thinking.take().map(|(t, _)| t),
                             });
                         }
                     }
                     _ => {} // developer/system 跳过
+                }
+            }
+            "reasoning" => {
+                // summary[].text 明文摘要拼接(正文 encrypted_content 密文不可读);多段以
+                // 空行分隔,空 summary 的段落(模型未生成摘要)无可救、跳过。
+                let joined = payload
+                    .get("summary")
+                    .and_then(|s| s.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|seg| seg.get("text").and_then(|x| x.as_str()))
+                            .collect::<Vec<_>>()
+                            .join("\n\n")
+                    })
+                    .unwrap_or_default();
+                if !joined.trim().is_empty() {
+                    match &mut pending_thinking {
+                        Some((t, _)) => {
+                            t.push_str("\n\n");
+                            t.push_str(&joined);
+                        }
+                        None => pending_thinking = Some((joined, timestamp)),
+                    }
                 }
             }
             "function_call" | "custom_tool_call" => {
@@ -1790,6 +1964,7 @@ fn parse_codex_messages(path: &Path) -> Result<Vec<AiCliSessionMessage>, String>
                         input_brief: truncate_chars(args.trim(), 200),
                     }),
                     tool_result: None,
+                    thinking: pending_thinking.take().map(|(t, _)| t),
                 });
                 if !call_id.is_empty() {
                     pending_tools.insert(call_id, out.len() - 1);
@@ -1814,9 +1989,11 @@ fn parse_codex_messages(path: &Path) -> Result<Vec<AiCliSessionMessage>, String>
                     pending_tools.remove(call_id);
                 }
             }
-            _ => {} // reasoning/message 之外(event_msg/token_usage_record 等)跳过
+            _ => {} // message/reasoning/function_call 之外(event_msg/token_usage_record 等)跳过
         }
     }
+    // 会话尾部仍残留(最后一轮被中断、后续无 assistant 消息):flush 保思考摘要。
+    flush_pending_thinking(&mut out, &mut pending_thinking);
     Ok(out)
 }
 
@@ -2255,7 +2432,21 @@ fn parse_codex_rollout(path: &Path) -> Result<AiCliSessionListItem, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{encode_cwd_to_dir, extract_uuid, parse_head};
+    use super::{encode_cwd_to_dir, extract_uuid, parse_head, process_memory_bytes};
+    use sysinfo::{ProcessesToUpdate, System};
+
+    #[test]
+    fn process_memory_preserves_sysinfo_byte_unit() {
+        let pid = sysinfo::Pid::from_u32(std::process::id());
+        let mut sys = System::new();
+        sys.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
+        let expected = sys
+            .process(pid)
+            .map(|process| process.memory())
+            .unwrap_or(0);
+
+        assert_eq!(process_memory_bytes(&sys, pid), expected);
+    }
 
     #[test]
     fn parses_branch_ref() {

@@ -66,6 +66,32 @@ export async function removeFleetWorker(projectId: string, workerId: string): Pr
   return invoke<void>("remove_fleet_worker", { projectId, workerId });
 }
 
+/** `-fleet/` 目录下、无 worker 记录的外部 worktree(其他 AI 会话/工具按同目录约定建的)。 */
+export type ExternalWorktree = {
+  /** 目录名(显示用,如 "fix-codex")。 */
+  name: string;
+  worktreePath: string;
+  /** 分支名;detached HEAD → null(删除时不删分支)。 */
+  branch: string | null;
+  changedFiles: number;
+  addedLines: number;
+  removedLines: number;
+};
+
+/** 列出外部 worktree(FleetPanel「外部 worktree」节的数据源)。 */
+export async function listExternalWorktrees(projectId: string): Promise<ExternalWorktree[]> {
+  return invoke<ExternalWorktree[]>("list_external_worktrees", { projectId });
+}
+
+/** 删除外部 worktree(worktree remove --force + 删 fleet/ 分支;无记录可动)。 */
+export async function removeExternalWorktree(
+  projectId: string,
+  worktreePath: string,
+  branch: string | null,
+): Promise<void> {
+  return invoke<void>("remove_external_worktree", { projectId, worktreePath, branch });
+}
+
 /** 挂载/卸载 worker 的 tab 关联(建 tab 后绑定 tabId;关 tab 置 null 保留记录)。 */
 export async function setFleetWorkerTab(projectId: string, workerId: string, tabId: string | null): Promise<void> {
   return invoke<void>("set_fleet_worker_tab", { projectId, workerId, tabId });

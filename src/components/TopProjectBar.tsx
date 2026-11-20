@@ -1,4 +1,7 @@
 import type React from "react";
+import { useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import type { ProjectId, ProjectSnapshot } from "../domain/projects";
 import type { ProjectRecord } from "../domain/appState";
 import type { PinnedLayout } from "../domain/pinnedLayout";
@@ -236,10 +239,137 @@ export function TopProjectBar({
 
       {/* 窗口控制:交互按钮区,stopPropagation 避免被拖拽吞掉点击。 */}
       <div className="flex items-center" onMouseDown={(e) => e.stopPropagation()}>
+        <ConductorEntry />
+        <StageEntry />
         <div className="-mr-3 ml-1 flex h-[length:var(--mx-titlebar-h)] items-stretch">
           <WindowControls />
         </div>
       </div>
     </header>
+  );
+}
+
+/**
+ * 指挥入口(顶栏固定):徽标 = 需关注会话数,`conductor-event` 实时推送。
+ * 刻意不做初始快照拉取——应用启动时会话全空、徽标从 0 起走事件订阅即可,
+ * 拉快照反而会在主窗口误 ack(快照副作用是推进已读水位)。
+ * 点击开/聚焦指挥窗;窗口「关闭 = 隐藏」,本入口是常驻重开点(封层管理)。
+ */
+function ConductorEntry() {
+  const { t } = useTranslation();
+  const [attention, setAttention] = useState(0);
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    listen<{ attentionCount?: number }>("conductor-event", (e) => {
+      if (cancelled) return;
+      const n = e.payload?.attentionCount;
+      if (typeof n === "number") setAttention(n);
+    })
+      .then((u) => {
+        if (cancelled) u();
+        else unlisten = u;
+      })
+      .catch(() => {}); // 非 Tauri 环境:静默
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button
+          type="button"
+          onClick={() =>
+            void invoke("open_conductor_window").catch((e) =>
+              console.warn("[conductor] open failed:", e),
+            )
+          }
+          aria-label={t("topbar.conductor")}
+          className="mx-chip relative mr-1 flex h-[length:var(--mx-tab-h)] w-[length:var(--mx-tab-h)] cursor-pointer items-center justify-center bg-[var(--mx-surface-soft)] text-[var(--mx-muted)] hover:bg-[var(--mx-hover-bg)] hover:text-[var(--mx-text)]"
+        >
+          {/* 广播波纹图标(值班副官:多会话注意力聚合)。 */}
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden>
+            <circle cx="12" cy="12" r="2.2" />
+            <path d="M7.7 7.7a6 6 0 0 0 0 8.6" />
+            <path d="M16.3 7.7a6 6 0 0 1 0 8.6" />
+            <path d="M4.9 4.9a10 10 0 0 0 0 14.2" />
+            <path d="M19.1 4.9a10 10 0 0 1 0 14.2" />
+          </svg>
+          {attention > 0 && (
+            <span className="absolute -right-1 -top-1 min-w-[15px] rounded-full bg-[#ef4444] px-[3px] text-center text-[9px] font-bold leading-[15px] text-white">
+              {attention > 99 ? "99+" : attention}
+            </span>
+          )}
+        </button>
+      </TooltipTrigger>
+      <TooltipContent>{t("topbar.conductor")}</TooltipContent>
+    </Tooltip>
+  );
+}
+
+/**
+ * Agent 实况独立窗入口(2026-11-19,顶栏常驻):点击开/聚焦实况游戏台大屏
+ * (label `agent-stage`)。窗口「关闭 = 隐藏」与指挥窗同款,本入口是重开点。
+ * 徽标 = 最近 60s 拍数(conductor-tool-event 实时推送,不拉快照)。
+ */
+function StageEntry() {
+  const { t } = useTranslation();
+  const [hot, setHot] = useState(0);
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    // 拍事件里带的是增量帧,不是全量;热度徽标只在有新拍时闪一下(15s 后自清),
+    // 避免为计数再订阅全量快照(快照有 ack 副作用)。
+    let decay = 0;
+    listen<{ beats?: unknown[] }>("conductor-tool-event", (e) => {
+      if (cancelled) return;
+      const now = Date.now();
+      if (e.payload?.beats?.length) {
+        decay = now + 15_000;
+        setHot((n) => Math.min(n + e.payload!.beats!.length, 99));
+      }
+    })
+      .then((u) => {
+        if (cancelled) u();
+        else unlisten = u;
+      })
+      .catch(() => {}); // 非 Tauri 环境:静默
+    const id = window.setInterval(() => {
+      if (Date.now() > decay) setHot(0);
+    }, 5_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+      unlisten?.();
+    };
+  }, []);
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button
+          type="button"
+          onClick={() =>
+            void invoke("open_stage_window").catch((e) =>
+              console.warn("[stage] open failed:", e),
+            )
+          }
+          aria-label={t("topbar.stage")}
+          className="mx-chip relative mr-1 flex h-[length:var(--mx-tab-h)] w-[length:var(--mx-tab-h)] cursor-pointer items-center justify-center bg-[var(--mx-surface-soft)] text-[var(--mx-muted)] hover:bg-[var(--mx-hover-bg)] hover:text-[var(--mx-text)]"
+        >
+          {/* 像素闪电图标(实况游戏台:每次工具调用一拍)。 */}
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+            <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
+          </svg>
+          {hot > 0 && (
+            <span className="absolute -right-1 -top-1 min-w-[15px] rounded-full bg-[var(--mx-accent)] px-[3px] text-center text-[9px] font-bold leading-[15px] text-white">
+              {hot > 99 ? "99+" : hot}
+            </span>
+          )}
+        </button>
+      </TooltipTrigger>
+      <TooltipContent>{t("topbar.stage")}</TooltipContent>
+    </Tooltip>
   );
 }

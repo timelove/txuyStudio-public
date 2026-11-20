@@ -9,6 +9,7 @@
 //! 新能力清单见 `.work/design/20261026-companion-ai-chat/companion-ai-chat-design-v1.md`。
 
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::claude::ClaudeRegistry;
@@ -82,6 +83,9 @@ async fn run_method(app: &AppHandle, method: &str, params: &Value) -> Result<Val
         "chat.digest" => chat_digest(app).await,
         "chat.send" => chat_send(app, params).await,
         "chat.interrupt" => chat_interrupt(app, params).await,
+        // 停止单个后台任务(claude 专属;control_request stop_task 零延迟直停,手机与桌面
+        // 同一条代码路径)。codex 协议无单任务 stop(thread/turn 级只有 turn/interrupt)。
+        "chat.stopTask" => chat_stop_task(app, params).await,
         "chat.permission" => chat_permission(app, params).await,
         "chat.codexApproval" => chat_codex_approval(app, params).await,
 
@@ -113,6 +117,18 @@ async fn run_method(app: &AppHandle, method: &str, params: &Value) -> Result<Val
             serde_json::to_value(views).map_err(|e| e.to_string())
         }
 
+        // —— 涌现镜像(四期 P4c;2026-11-19 开写口) ——
+        // 快照只读:直接读 ConductorState,不走 conductor_snapshot 命令本体——那命令带
+        // ack 副作用(拉一次就把桌面徽标清零),手机只是第三只眼睛,不该动桌面端的水位。
+        // 写操作开三帧(发孵化/投递/涌现流卡片处置),走 guard_write(与 chat.* 同档
+        // 闸门 relay.json allowRemoteChat):投出去的活执行期审批仍在桌面(权限卡/宽限
+        // 代批),手机塞话与 chat.send 同级。**仍不暴露**:权限审批响应的代批配置变更、
+        // 编排终止/暂停、记忆管理——高危确认必须人在电脑前。
+        "conductor.snapshot" => conductor_snapshot_readonly(app),
+        "conductor.inbox.add" => conductor_inbox_add_remote(app, params).await,
+        "conductor.inbox.dispatch" => conductor_inbox_dispatch_remote(app, params).await,
+        "conductor.decision.respond" => conductor_decision_respond_remote(app, params).await,
+
         // AI pane 的快捷指令已由上方 `chat.command` 承担(会话动作语义)。协议文档里的
         // `commands.run{tabId,text}` 是「往 shell 敲命令」,v1 明确不做远程输入(见 pty.tail
         // 注释三条理由),`quickCommands.*` 的自定义指令库也留到后续 —— 继续显式回错。
@@ -121,6 +137,167 @@ async fn run_method(app: &AppHandle, method: &str, params: &Value) -> Result<Val
         }
         _ => Err(format!("unknown method: {method}")),
     }
+}
+
+// ---------- 涌现只读镜像(四期 P4c) ----------
+
+/// 涌现面板只读快照(手机端「涌现」页数据源)。与桌面 conductor_snapshot 的区别:
+/// 不 ack(不动徽标水位)、不 prune 落盘(懒 GC 只属于桌面自己的拉取路径)。
+/// 字段口径:sessions 含 title 富化(经 AppState tab 表);plans 全量(手机端自渲染
+/// 拆步进度);autoApprovals 最近 20 条;inbox 回条目摘要含 status(手机端自滤
+/// pending/queued,不需要投递 UI)。
+fn conductor_snapshot_readonly(app: &AppHandle) -> Result<Value, String> {
+    use crate::conductor::{attention_count, ConductorState};
+    let conductor = app.state::<ConductorState>();
+    let (attention, sessions, inbox, plans, auto_approvals, decisions, tool_beats, stage_xp) = {
+        let data = conductor
+            .0
+            .lock()
+            .map_err(|e| format!("conductor lock: {e}"))?;
+        let attention = attention_count(&data);
+        let sessions: Vec<_> = data.sessions.values().cloned().collect();
+        let inbox: Vec<_> = data
+            .inbox
+            .iter()
+            .map(|i| {
+                json!({
+                    "id": i.id,
+                    "text": i.text,
+                    "status": i.status,
+                    "targetCount": i.targets.len(),
+                })
+            })
+            .collect();
+        let plans = data.plans.clone();
+        let auto_approvals: Vec<_> = data.auto_approvals.iter().take(20).cloned().collect();
+        // 涌现流卡片(2026-11-19,新的在前):手机端处置(proposed 优先展示)数据源。
+        let decisions: Vec<_> = data.decisions.iter().take(30).cloned().collect();
+        // Agent 实况拍(2026-11-19,新的在前;记录化后与桌面快照同宽 80):手机端「实况」区数据源。
+        let tool_beats: Vec<_> = data.tool_beats.iter().rev().take(80).cloned().collect();
+        let stage_xp = data.stage_xp;
+        (attention, sessions, inbox, plans, auto_approvals, decisions, tool_beats, stage_xp)
+    };
+    // title 富化(锁外查 AppState,固定单向:conductor 锁 → state 锁不嵌套)。
+    let mut names: HashMap<String, String> = HashMap::new();
+    {
+        let state = app.state::<AppState>();
+        let guard = state.inner.lock();
+        if let Ok(snap) = guard {
+            for p in &snap.projects {
+                names.insert(p.id.clone(), p.name.clone());
+            }
+        }
+    }
+    let sessions: Vec<Value> = sessions
+        .into_iter()
+        .map(|s| {
+            json!({
+                "tabId": s.tab_id,
+                "provider": s.provider,
+                "projectId": s.project_id,
+                "projectName": names.get(&s.project_id).cloned().unwrap_or_default(),
+                "tabTitle": s.tab_title,
+                "kind": s.kind,
+                "detail": s.detail,
+                "lastEventMs": s.last_event_ms,
+            })
+        })
+        .collect();
+    Ok(json!({
+        "attentionCount": attention,
+        "sessions": sessions,
+        "inbox": inbox,
+        "plans": serde_json::to_value(&plans).unwrap_or_default(),
+        "autoApprovals": serde_json::to_value(&auto_approvals).unwrap_or_default(),
+        "decisions": serde_json::to_value(&decisions).unwrap_or_default(),
+        "toolBeats": serde_json::to_value(&tool_beats).unwrap_or_default(),
+        "stageXp": stage_xp,
+        "generatedMs": crate::conductor::now_ms(),
+    }))
+}
+
+// ---------- 涌现写操作(2026-11-19:发孵化 + 涌现流卡片处置) ----------
+
+/// 手机发孵化:直调 `conductor_inbox_add` 本体(与桌面同一条代码路径——占用锁/排队/
+/// 降级卡/验收登记全一致)。params: `{text, targets?: [{projectId, tabId}], acceptance?}`。
+/// 目标缺省 = 仅存入驿站(pending,回桌面再投);带目标 = 存入后顺手投递(手机一步到位,
+/// 被占自动转排队/降级卡)。permission_ceiling 不透传(桌面口径为准)。
+async fn conductor_inbox_add_remote(app: &AppHandle, params: &Value) -> Result<Value, String> {
+    guard_write(app)?;
+    let text = req_str(params, "text")?;
+    let targets: Vec<crate::conductor::inbox::InboxTarget> = params
+        .get("targets")
+        .map(|v| serde_json::from_value(v.clone()))
+        .transpose()
+        .map_err(|e| format!("targets: {e}"))?
+        .unwrap_or_default();
+    let acceptance = params
+        .get("acceptance")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let item = crate::conductor::commands::conductor_inbox_add(
+        app.clone(),
+        app.state::<crate::conductor::ConductorState>(),
+        text,
+        None,
+        if targets.is_empty() { None } else { Some(targets.clone()) },
+        None,
+        acceptance,
+    )?;
+    if !targets.is_empty() {
+        // 立即投递(带目标时):dispatch 内部的占用锁分拣照走,被占自动排队/降级卡。
+        crate::conductor::commands::conductor_inbox_dispatch(
+            app.clone(),
+            app.state::<crate::conductor::ConductorState>(),
+            item.id.clone(),
+            targets,
+        )
+        .await?;
+    }
+    Ok(json!({ "id": item.id, "dispatched": true }))
+}
+
+/// 手机投递已有驿站条目(重投/排队补发):直调 `conductor_inbox_dispatch` 本体。
+/// params: `{id, targets: [{projectId, tabId}]}`。
+async fn conductor_inbox_dispatch_remote(app: &AppHandle, params: &Value) -> Result<Value, String> {
+    guard_write(app)?;
+    let id = req_str(params, "id")?;
+    let targets: Vec<crate::conductor::inbox::InboxTarget> = serde_json::from_value(
+        params.get("targets").cloned().unwrap_or(Value::Null),
+    )
+    .map_err(|e| format!("targets: {e}"))?;
+    crate::conductor::commands::conductor_inbox_dispatch(
+        app.clone(),
+        app.state::<crate::conductor::ConductorState>(),
+        id,
+        targets,
+    )
+    .await
+}
+
+/// 手机处置涌现流卡片:直调 `conductor_decision_respond` 本体。params:
+/// `{id, action: "accept"|"reject", editedText?}`。仅开放 accept/reject——edit(改写后
+/// 采纳)小屏改长文体验差,回桌面做;ack/记忆候选确认同理由不开放。
+async fn conductor_decision_respond_remote(app: &AppHandle, params: &Value) -> Result<Value, String> {
+    guard_write(app)?;
+    let id = req_str(params, "id")?;
+    let action = req_str(params, "action")?;
+    if action != "accept" && action != "reject" {
+        return Err("action 仅支持 accept/reject(edit 请回桌面)".into());
+    }
+    let edited = params
+        .get("editedText")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    crate::conductor::commands::conductor_decision_respond(
+        app.clone(),
+        app.state::<crate::conductor::ConductorState>(),
+        id,
+        action,
+        edited,
+        None,
+    )
+    .await
 }
 
 // ---------- 项目结构 ----------
@@ -680,6 +857,7 @@ async fn chat_send(app: &AppHandle, params: &Value) -> Result<Value, String> {
                 None,   // effort
                 None,   // model
                 None,   // add_dirs
+                None,   // settings_env:手机端不感知 per-tab 供应商,走全局
             )
             .await?;
         }
@@ -691,6 +869,7 @@ async fn chat_send(app: &AppHandle, params: &Value) -> Result<Value, String> {
             text,
             None,                    // tool_result
             Some(message_id.clone()), // 回显给桌面端
+            None, // human_touch:手机发送 = 人触达照登
         )
         .await?;
         return Ok(json!({ "accepted": true, "messageId": message_id }));
@@ -733,6 +912,8 @@ async fn chat_send(app: &AppHandle, params: &Value) -> Result<Value, String> {
         None, // resume_session_id
         new_session,
         Some(message_id.clone()), // 回显给桌面端
+        None, // provider_overrides:per-tab 供应商是桌面端概念,手机端走全局
+        None, // human_touch:手机发送 = 人触达照登
     )
     .await?;
     Ok(json!({ "accepted": true, "messageId": message_id }))
@@ -799,7 +980,8 @@ async fn chat_command(app: &AppHandle, params: &Value) -> Result<Value, String> 
                 tab_id,
                 format!("/{command}"),
                 None,
-                None,
+                None, // 回显给桌面端(本地命令无消息体)
+                None, // human_touch:手机操作 = 人触达照登
             )
             .await?;
             Ok(json!({ "ok": true, "command": command }))
@@ -908,6 +1090,7 @@ async fn restart_claude_with(
         effort.clone(),
         model.clone(),
         None, // add_dirs
+        None, // settings_env:per-tab 供应商覆盖仅桌面 UI 设置,手机端走全局
     )
     .await?;
     Ok(json!({
@@ -1070,6 +1253,24 @@ async fn chat_interrupt(app: &AppHandle, params: &Value) -> Result<Value, String
         .await?;
         Ok(json!({ "interrupted": true }))
     }
+}
+
+/// `chat.stopTask`:停止单个 claude 后台任务(control_request `stop_task`)。
+///
+/// 直调 `stop_claude_task` 命令本体,与桌面端 ClaudePane 同一条代码路径。不受 busy 拦、
+/// 不产生对话消息;任务消失经 backgroundTasks 快照回流(手机端同理撤「停止中」标记)。
+async fn chat_stop_task(app: &AppHandle, params: &Value) -> Result<Value, String> {
+    guard_write(app)?;
+    let project_id = req_str(params, "projectId")?;
+    let tab_id = req_str(params, "tabId")?;
+    let provider = provider_of(app, &project_id, &tab_id)
+        .ok_or_else(|| format!("tab {tab_id} is not an AI tab"))?;
+    if provider != "claude" {
+        return Err("stopTask is claude-only (codex protocol has no per-task stop)".into());
+    }
+    let task_id = req_str(params, "taskId")?;
+    crate::claude::commands::stop_claude_task(app.clone(), project_id, tab_id, task_id).await?;
+    Ok(json!({ "stopped": true }))
 }
 
 /// `chat.permission`:回 claude 的 `can_use_tool` 决策(手机上的审批卡)。

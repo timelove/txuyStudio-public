@@ -14,6 +14,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { I18nextProvider, useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import i18n, { changeI18nLocale, type Locale } from "./index";
 
 type I18nContextValue = {
@@ -55,6 +56,25 @@ export function I18nProvider({
       setLocale(initialLocale);
     }
   }, [initialLocale]);
+
+  // 跨窗口同步(2026-11-17,与 ThemeProvider 同病同修:涌现窗不随主窗口切语言):
+  // 指挥窗/独立项目窗是独立 WebView,hydrate 只在启动读一次;set_locale 落盘后
+  // 广播 locale-changed,各窗口在此订阅本地应用(不回 invoke 防回环;触发窗口
+  // 同值 no-op)。纯浏览器兜底无事件系统,catch 静默。
+  useEffect(() => {
+    let un: (() => void) | undefined;
+    listen<string>("locale-changed", (e) => {
+      const next: Locale = e.payload === "en" ? "en" : "zh";
+      changeI18nLocale(next)
+        .then(() => setLocale(next))
+        .catch((err) => console.warn("[i18n] cross-window sync failed:", err));
+    })
+      .then((x) => {
+        un = x;
+      })
+      .catch(() => {});
+    return () => un?.();
+  }, []);
 
   const changeLanguage = (next: Locale) => {
     void changeI18nLocale(next)

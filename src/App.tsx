@@ -4,6 +4,8 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import { mockProjects } from "./mock/mockProjects";
 import { AppShell } from "./components/AppShell";
+import { ConductorShell } from "./conductor/ConductorShell";
+import { StageShell } from "./conductor/StageShell";
 import { CloseConfirmDialog } from "./components/CloseConfirmDialog";
 import { I18nProvider } from "./i18n/I18nProvider";
 import { SettingsProvider } from "./settings/SettingsProvider";
@@ -36,10 +38,31 @@ const HYDRATE_TIMEOUT_MS = 8000;
 /** 独立项目窗口 label 前缀，与后端 `windows.rs` 对齐。 */
 const PROJECT_WINDOW_PREFIX = "project-";
 
+/** 指挥窗 label，与后端 `conductor::CONDUCTOR_WINDOW_LABEL` 对齐。 */
+const CONDUCTOR_WINDOW_LABEL = "conductor";
+
+/** Agent 实况独立窗 label，与后端 `conductor::STAGE_WINDOW_LABEL` 对齐(2026-11-19)。 */
+const STAGE_WINDOW_LABEL = "agent-stage";
+
 /** 启动期解析窗口身份。非 Tauri 环境（纯浏览器 dev）回退 main 模式。 */
-function resolveWindowMode(): { isMain: boolean; label: string; routeProjectId: string | null } {
+function resolveWindowMode(): {
+  isMain: boolean;
+  isConductor: boolean;
+  isStage: boolean;
+  label: string;
+  routeProjectId: string | null;
+} {
   try {
     const label = getCurrentWindow().label;
+    // 指挥窗:独立根界面(ConductorShell),不渲染工作台。hydrate 照跑(取 locale/主题,
+    // 后端对非项目窗口回全量快照,只读无副作用)。
+    if (label === CONDUCTOR_WINDOW_LABEL) {
+      return { isMain: false, isConductor: true, isStage: false, label, routeProjectId: null };
+    }
+    // Agent 实况独立窗:StageShell(游戏台大屏),窗口语义与指挥窗同款(关闭=隐藏)。
+    if (label === STAGE_WINDOW_LABEL) {
+      return { isMain: false, isConductor: false, isStage: true, label, routeProjectId: null };
+    }
     // URL query 作为 hint（后端建窗时注入 ?mode=project&projectId=<id>）。
     const params = new URLSearchParams(globalThis.location.search);
     const mode = params.get("mode");
@@ -47,12 +70,12 @@ function resolveWindowMode(): { isMain: boolean; label: string; routeProjectId: 
     if (label.startsWith(PROJECT_WINDOW_PREFIX) || mode === "project") {
       // routeProjectId 优先取 query，回退 label 去前缀（label 形如 project-<id>）。
       const pid = qProjectId ?? (label.startsWith(PROJECT_WINDOW_PREFIX) ? label.slice(PROJECT_WINDOW_PREFIX.length) : null);
-      return { isMain: false, label, routeProjectId: pid };
+      return { isMain: false, isConductor: false, isStage: false, label, routeProjectId: pid };
     }
-    return { isMain: true, label: label || "main", routeProjectId: null };
+    return { isMain: true, isConductor: false, isStage: false, label: label || "main", routeProjectId: null };
   } catch {
     // 非 Tauri 环境：纯浏览器 dev，按主窗口走（走 mock 兜底）。
-    return { isMain: true, label: "main", routeProjectId: null };
+    return { isMain: true, isConductor: false, isStage: false, label: "main", routeProjectId: null };
   }
 }
 
@@ -413,29 +436,40 @@ export default function App() {
 
   // 单项目模式:hydrate 后端已只回该单个项目,projects 即 [该项目];主窗口为全量列表。
   // detachedProjectIds 仅主窗口有意义(标记哪些项目已弹出、应在主窗口隐藏)。
+  // 指挥窗:渲染 ConductorShell(独立根界面,无工作台/关闭确认;AppShell 的 handlers 不进入)。
   return (
     <I18nProvider initialLocale={locale}>
       <ThemeProvider initialThemeId={themeId}>
       <SettingsProvider initialFontSize={terminalFontSize} initialSkipCloseConfirm={skipCloseConfirm}>
-        <AppShell
-          projects={projects}
-          activeProjectId={activeProjectId}
-          onSelectProject={handleSelect}
-          onAddProject={mode.isMain ? handleAdd : undefined}
-          onCloseProject={mode.isMain ? handleCloseProject : undefined}
-          onDetachProject={mode.isMain ? handleDetach : undefined}
-          detachedProjectIds={mode.isMain ? detachedProjectIds : new Set()}
-          singleProjectMode={!mode.isMain}
-          windowLabel={mode.label}
-          onDockBack={mode.isMain ? undefined : handleDockBack}
-          recentProjects={mode.isMain ? recentProjects : []}
-          onOpenRecent={mode.isMain ? handleOpenRecent : undefined}
-          onRemoveRecent={mode.isMain ? handleRemoveRecent : undefined}
-          onOpenRecentToWindow={mode.isMain ? handleOpenRecentToWindow : undefined}
-          onNewWindow={mode.isMain ? handleNewWindow : undefined}
-        />
-        {/* 关闭确认弹窗:全局挂载,按窗口 label 过滤只在本窗口弹(main/项目/工作台共用)。 */}
-        <CloseConfirmDialog />
+        {mode.isConductor ? (
+          // 指挥窗数据全走 conductor_snapshot(含全量项目列表),不消费 projects state。
+          <ConductorShell />
+        ) : mode.isStage ? (
+          // Agent 实况独立窗(2026-11-19):数据同走 conductor_snapshot,不消费 projects state。
+          <StageShell />
+        ) : (
+          <>
+            <AppShell
+              projects={projects}
+              activeProjectId={activeProjectId}
+              onSelectProject={handleSelect}
+              onAddProject={mode.isMain ? handleAdd : undefined}
+              onCloseProject={mode.isMain ? handleCloseProject : undefined}
+              onDetachProject={mode.isMain ? handleDetach : undefined}
+              detachedProjectIds={mode.isMain ? detachedProjectIds : new Set()}
+              singleProjectMode={!mode.isMain}
+              windowLabel={mode.label}
+              onDockBack={mode.isMain ? undefined : handleDockBack}
+              recentProjects={mode.isMain ? recentProjects : []}
+              onOpenRecent={mode.isMain ? handleOpenRecent : undefined}
+              onRemoveRecent={mode.isMain ? handleRemoveRecent : undefined}
+              onOpenRecentToWindow={mode.isMain ? handleOpenRecentToWindow : undefined}
+              onNewWindow={mode.isMain ? handleNewWindow : undefined}
+            />
+            {/* 关闭确认弹窗:全局挂载,按窗口 label 过滤只在本窗口弹(main/项目/工作台共用)。 */}
+            <CloseConfirmDialog />
+          </>
+        )}
       </SettingsProvider>
       </ThemeProvider>
     </I18nProvider>

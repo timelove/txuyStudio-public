@@ -1,0 +1,20 @@
+[package]
+name = "release-publisher"
+version = "0.1.0"
+edition = "2021"
+description = "MinIO 更新发布器：构建产物与 latest.json 上传至对象存储(独立 crate,不进桌面端安装包)"
+
+[[bin]]
+name = "release_publisher"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+chrono = "0.4"
+hex = "0.4"
+hmac = "0.12"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs"] }

@@ -66,6 +66,49 @@ pub async fn list_dir(path: String) -> Result<Vec<DirEntry>, String> {
     .map_err(|e| format!("join list_dir: {e}"))?
 }
 
+/// 会话流「本机文件路径」候选的批量存在性探测(蓝色文件链接)。
+///
+/// 候选来自对 assistant/thinking 自由文本的正则抽取(绝对盘符路径 / 带 cwd 的相对
+/// 多段路径),不存在是常态而非攻击面,故不走 `validate_path` 的拒绝式校验——本命令
+/// 只读 `metadata`,真正的 FS 落点操作(reveal)在用户点击时走 `system::reveal_in_folder`。
+/// 一次 IPC 批量查(消息渲染常带一二十个候选),同步 command:纯 metadata 探测微秒级。
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolvedLocalPath {
+    /// 原始候选串(前端按它回填)。
+    pub input: String,
+    /// 存在(文件或目录)时 = 词法规范化的绝对路径;不存在 = None。
+    pub resolved: Option<String>,
+    pub is_dir: bool,
+}
+
+#[tauri::command]
+pub fn resolve_local_paths(base_dir: Option<String>, paths: Vec<String>) -> Vec<ResolvedLocalPath> {
+    paths
+        .into_iter()
+        .map(|p| {
+            let mut abs = std::path::PathBuf::from(&p);
+            if !abs.is_absolute() {
+                if let Some(base) = base_dir.as_deref() {
+                    abs = std::path::Path::new(base).join(&p);
+                }
+            }
+            // 词法规范化(消化 `.`/`..` 段)而非 canonicalize:canonicalize 在 Windows 产出
+            // `\\?\` verbatim 前缀,回填给 explorer /select 显示不友好。复用本文件
+            // validate_path 同款私有实现(与 system/pty 域同源)。
+            let abs = lexical_normalize(&abs);
+            let meta = std::fs::metadata(&abs).ok();
+            ResolvedLocalPath {
+                input: p,
+                resolved: meta
+                    .as_ref()
+                    .map(|_| abs.to_string_lossy().into_owned()),
+                is_dir: meta.map(|m| m.is_dir()).unwrap_or(false),
+            }
+        })
+        .collect()
+}
+
 /// 文本预览截断阈值:512KB(够预览又不卡 Monaco 渲染)。
 const READ_MAX: u64 = 512 * 1024;
 

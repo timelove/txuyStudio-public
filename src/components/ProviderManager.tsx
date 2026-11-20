@@ -324,6 +324,25 @@ export function ProviderManager({ kind }: { kind: ProviderKind }) {
     else saveCodexProviders(next as CodexProvider[]);
   };
 
+  /** 复制整条供应商为新条目(新 id + 名称加副本后缀;extraEnv/models 深拷贝防共享引用),
+   *  直接落盘出现在列表尾部。同端点不同账号 / 同家不同模型组用——复制完进编辑改差量。 */
+  const duplicateProvider = (row: Row) => {
+    const suffix = t("settings.providers.copySuffix");
+    const copy =
+      adapter.kind === "claude"
+        ? { ...(row.raw as ClaudeProvider), id: adapter.newId(), name: `${row.raw.name}${suffix}`, extraEnv: { ...(row.raw as ClaudeProvider).extraEnv } }
+        : {
+            ...(row.raw as CodexProvider),
+            id: adapter.newId(),
+            name: `${row.raw.name}${suffix}`,
+            models: (row.raw as CodexProvider).models?.map((m) => ({
+              ...m,
+              reasoningLevels: m.reasoningLevels ? [...m.reasoningLevels] : undefined,
+            })),
+          };
+    persist([...providers, copy]);
+  };
+
   // claude 侧同理落单:同端点同密钥的多条配置只有「配置最完整」的那条亮徽标
   // (与 ClaudePane 模型下拉同一条判定,避免两处口径打架)。
   const claudeActiveId = adapter.kind === "claude" ? pickActiveProviderId(providers as ClaudeProvider[], current as Record<string, string> | null) : null;
@@ -532,6 +551,17 @@ export function ProviderManager({ kind }: { kind: ProviderKind }) {
     if (!draft) return;
     setDraft({ ...draft, models: draft.models.filter((_, i) => i !== idx) });
   };
+  /** 复制一行模型(紧随其后插入;reasoningLevels 深拷贝防共享引用)。同系模型(slug 差
+   *  一点、ctx/思考档位全同)建行用——复制完只改 slug。 */
+  const duplicateModelEntry = (idx: number) => {
+    if (!draft) return;
+    const src = draft.models[idx];
+    if (!src) return;
+    const copy = { ...src, reasoningLevels: src.reasoningLevels ? [...src.reasoningLevels] : undefined };
+    const next = [...draft.models];
+    next.splice(idx + 1, 0, copy);
+    setDraft({ ...draft, models: next });
+  };
   /** 探测结果一键铺进列表(已有 id 跳过;显示名暂用 slug;ctx 给 codex 默认 272k)。 */
   const importProbedModels = () => {
     if (!draft) return;
@@ -685,6 +715,22 @@ export function ProviderManager({ kind }: { kind: ProviderKind }) {
                   </div>
                 </div>
                 {quotaLine(row.draft.id)}
+                {/* 复制供应商:同端点不同账号/同家不同模型组,复制完进编辑改差量。 */}
+                <button
+                  type="button"
+                  title={t("settings.providers.duplicate")}
+                  aria-label={t("settings.providers.duplicate")}
+                  className="shrink-0 rounded-[4px] p-0.5 text-[var(--mx-faint)] transition-colors hover:bg-[var(--mx-hover-bg)] hover:text-[var(--mx-text)]"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    duplicateProvider(row);
+                  }}
+                >
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                    <rect x="9" y="9" width="11" height="11" rx="2" />
+                    <path d="M5 15V5a2 2 0 0 1 2-2h10" />
+                  </svg>
+                </button>
                 {/* 删除(2026-11-04 用户:列表页此前无删除入口,只能进编辑页删):就地删
                     + 落盘;活跃条目也可删——删的只是配置记录,config.toml/settings.json
                     现值不动,下一轮进程照常读现配置。 */}
@@ -1068,7 +1114,7 @@ export function ProviderManager({ kind }: { kind: ProviderKind }) {
                   </p>
                 ) : (
                   <div className="space-y-1">
-                    <div className="grid grid-cols-[1.1fr_0.9fr_1.1fr_56px_18px] items-center gap-1 px-0.5 text-[9px] uppercase tracking-wide text-[var(--mx-faint)]">
+                    <div className="grid grid-cols-[1.1fr_0.9fr_1.1fr_56px_38px] items-center gap-1 px-0.5 text-[9px] uppercase tracking-wide text-[var(--mx-faint)]">
                       <span>{t("settings.providers.modelsHeadSlug")}</span>
                       <span>{t("settings.providers.modelsHeadDisplay")}</span>
                       <span>{t("settings.providers.modelsHeadLevels")}</span>
@@ -1081,7 +1127,7 @@ export function ProviderManager({ kind }: { kind: ProviderKind }) {
                       return (
                         <div
                           key={idx}
-                          className={`grid grid-cols-[1.1fr_0.9fr_1.1fr_56px_18px] items-center gap-1 rounded-l border-l-2 pr-0.5 ${
+                          className={`grid grid-cols-[1.1fr_0.9fr_1.1fr_56px_38px] items-center gap-1 rounded-l border-l-2 pr-0.5 ${
                             primary ? "border-[var(--mx-accent)]" : "border-transparent"
                           }`}
                         >
@@ -1122,16 +1168,30 @@ export function ProviderManager({ kind }: { kind: ProviderKind }) {
                             inputMode="numeric"
                             spellCheck={false}
                           />
-                          <button
-                            type="button"
-                            aria-label="remove model"
-                            className="flex h-5 w-5 items-center justify-center rounded text-[var(--mx-faint)] transition-colors hover:bg-[var(--mx-hover-bg)] hover:text-[var(--mx-danger)]"
-                            onClick={() => removeModelEntry(idx)}
-                          >
-                            <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" aria-hidden>
-                              <path d="M18 6L6 18M6 6l12 12" />
-                            </svg>
-                          </button>
+                          <div className="flex items-center justify-end gap-0.5">
+                            <button
+                              type="button"
+                              aria-label="duplicate model"
+                              title={t("settings.providers.modelsDuplicate")}
+                              className="flex h-5 w-5 items-center justify-center rounded text-[var(--mx-faint)] transition-colors hover:bg-[var(--mx-hover-bg)] hover:text-[var(--mx-text)]"
+                              onClick={() => duplicateModelEntry(idx)}
+                            >
+                              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" aria-hidden>
+                                <rect x="9" y="9" width="11" height="11" rx="2" />
+                                <path d="M5 15V5a2 2 0 012-2h10" />
+                              </svg>
+                            </button>
+                            <button
+                              type="button"
+                              aria-label="remove model"
+                              className="flex h-5 w-5 items-center justify-center rounded text-[var(--mx-faint)] transition-colors hover:bg-[var(--mx-hover-bg)] hover:text-[var(--mx-danger)]"
+                              onClick={() => removeModelEntry(idx)}
+                            >
+                              <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" aria-hidden>
+                                <path d="M18 6L6 18M6 6l12 12" />
+                              </svg>
+                            </button>
+                          </div>
                         </div>
                       );
                     })}

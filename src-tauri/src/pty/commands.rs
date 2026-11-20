@@ -82,11 +82,14 @@ pub async fn spawn_pty(
 /// 向指定会话写入用户输入（键盘按键）。
 #[tauri::command]
 pub async fn write_pty(
+    app: AppHandle,
     state: State<'_, PtyRegistry>,
     project_id: String,
     session_id: String,
     data: String,
 ) -> Result<(), String> {
+    // 人触达登记(conductor 口径:shell 键入 = 人在场;AppHandle 由 Tauri 注入,前端无感)。
+    crate::conductor::note_human_touch(&app, &project_id, &session_id);
     let mut by_project = state.by_project.lock().map_err(|e| e.to_string())?;
     let sessions = by_project
         .get_mut(&project_id)

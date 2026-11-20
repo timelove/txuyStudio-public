@@ -439,7 +439,7 @@ export function SessionBrowserPane({ paneId, focused, sessions, activeTabId, onF
               </Button>
             </div>
           </div>
-          <div className="mx-scroll min-h-0 flex-1 overflow-y-auto">
+          <div className="mx-scroll-pretty min-h-0 flex-1 overflow-y-auto">
             {loading && items.length === 0 ? (
               <div className="grid h-full place-items-center text-[11px] text-[var(--mx-faint)]">{t("session.loading")}</div>
             ) : filtered.length === 0 ? (
@@ -523,7 +523,7 @@ export function SessionBrowserPane({ paneId, focused, sessions, activeTabId, onF
         {/* 右栏:选中会话详情(元数据 + resume 命令 + 消息流)。 */}
         <div className="min-h-0 min-w-0 overflow-hidden">
           {selected ? (
-            <div className="mx-scroll flex h-full flex-col overflow-y-auto">
+            <div className="mx-scroll-pretty flex h-full flex-col overflow-y-auto">
               {/* 元数据 + resume 命令 + 删除。 */}
               <div className="shrink-0 border-b border-[var(--mx-border)] px-4 py-3">
                 <div className="flex items-start justify-between gap-2">
@@ -771,6 +771,11 @@ function MessageRow({ msg }: { msg: AiCliSessionMessage }) {
   return (
     <div className={`flex flex-col gap-1 ${isUser ? "items-end" : "items-start"}`}>
       <span className={`text-[10px] font-semibold uppercase tracking-wide ${isUser ? "text-[var(--mx-accent)]" : "text-[var(--mx-violet)]"}`}>{t(`session.role.${msg.role}`)}</span>
+      {!isUser && msg.thinking?.trim() && (
+        <div className="max-w-[88%] whitespace-pre-wrap break-words border-l-2 border-[var(--mx-border)] pl-2 text-[11px] italic leading-relaxed text-[var(--mx-faint)]">
+          {msg.thinking}
+        </div>
+      )}
       {msg.text && (
         <Tooltip>
         <TooltipTrigger asChild>

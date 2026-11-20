@@ -60,6 +60,8 @@ export type AiCliSessionMessage = {
   text: string;
   toolUse?: { name: string; inputBrief: string } | null;
   toolResult?: string | null;
+  /** assistant 侧思考摘要(codex rollout reasoning.summary 拼接;claude 恒 null)。 */
+  thinking?: string | null;
 };
 
 /** 按 cwd 末段分组后的会话组(参考 cc-switch SessionDirectoryGroup 简化版)。 */

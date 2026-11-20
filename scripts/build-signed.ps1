@@ -27,13 +27,15 @@ Write-Host "[build-signed] 私钥已注入,开始 tauri build(内置签名已关
 bun run tauri build --config $cfgOverride
 if ($LASTEXITCODE -ne 0) { Write-Error "tauri build 失败(exit $LASTEXITCODE)" }
 
-# 补签:从 conf 读版本定位 NSIS 产物,signer -p '' 秒签。
-# 注意必须 bun 直跑 cli 的 js 入口:bunx 会把 -p 当自己的 --package 短参数吞掉,参数错乱
+# 补签:从 conf 读版本定位 NSIS 产物,signer --password='' 秒签。
+# 注意必须 bun 直跑 cli 的 js 入口:bunx 会把 -p 当自己的 --package 短参数吞掉,参数错乱。
+# 空密码传参形式用 `--password=''`(2026-11-12 实测):PowerShell 对独立空串参数 `-p ''`
+# 会整参丢弃,-p 落到吞文件路径当密码 → FILE missing;内嵌等号形式空值原样到达 CLI。
 $conf = Get-Content "src-tauri/tauri.conf.json" -Raw | ConvertFrom-Json
 $setup = "src-tauri/target/release/bundle/nsis/txuyStudio_$($conf.version)_x64-setup.exe"
 if (-not (Test-Path $setup)) { Write-Error "未找到 NSIS 产物 $setup" }
 
-bun node_modules/@tauri-apps/cli/tauri.js signer sign -p '' $setup
+bun node_modules/@tauri-apps/cli/tauri.js signer sign --password='' $setup
 if ($LASTEXITCODE -ne 0) { Write-Error "签名失败(exit $LASTEXITCODE)" }
 
 Write-Host "[build-signed] 完成: $setup (+ .sig)"

@@ -48,6 +48,7 @@ pub async fn run_shell_command(
     command: String,
     cwd: Option<String>,
 ) -> Result<(), String> {
+    crate::conductor::note_human_touch(&app, &project_id, &tab_id);
     let id = next_shell_id();
 
     // 1) 短锁:insert/取 session + 存 id + busy 检查 + 复位 killed。

@@ -12,6 +12,11 @@ import 'app_update_install_stub.dart'
     if (dart.library.io) 'app_update_install_io.dart' as install;
 import 'theme.dart';
 
+/// 打包注入的更新源 base URL(2026-11-18 定调:不发版后靠设置切换,APK 自带):
+/// `flutter build apk --dart-define=TXUY_UPDATE_SOURCE=https://updates.example.com/txuy`
+/// 会编译进 AOT 常量;不传 = GitHub Releases 默认。运行期无任何切换入口。
+const String kPackagedUpdateSource = String.fromEnvironment('TXUY_UPDATE_SOURCE');
+
 /// GitHub Release 摘要。`downloadUrl` 优先匹配 Android APK;其他平台回退 Release 页。
 @immutable
 class AppRelease {
@@ -55,7 +60,11 @@ class AppUpdateService {
     return compareVersions(release.version, info.version) > 0 ? release : null;
   }
 
+  /// 拉最新版本:打包注入了更新源(--dart-define)走 `{base}/android/latest.json`
+  /// (release_publisher 的 AndroidManifest),否则 GitHub Releases API。
   Future<AppRelease?> fetchLatest() async {
+    final base = kPackagedUpdateSource.trim();
+    if (base.isNotEmpty) return _fetchManifest(base);
     final uri = Uri.parse("https://api.github.com/repos/$owner/$repo/releases/latest");
     final resp = await _client.get(
       uri,
@@ -68,6 +77,15 @@ class AppUpdateService {
       throw "GitHub Releases 返回 ${resp.statusCode}";
     }
     return compute(_parseRelease, resp.body);
+  }
+
+  Future<AppRelease?> _fetchManifest(String base) async {
+    final uri = Uri.parse("${base.replaceFirst(RegExp(r"/+$"), "")}/android/latest.json");
+    final resp = await _client.get(uri).timeout(const Duration(seconds: 15));
+    if (resp.statusCode != 200) {
+      throw "更新源返回 ${resp.statusCode}";
+    }
+    return compute(_parseManifest, resp.body);
   }
 
   /// 浏览器下载页(更新回退路径;web 平台的主路径)。
@@ -330,6 +348,23 @@ AppRelease? _parseRelease(String body) {
     releaseUrl: releaseUrl,
     downloadUrl: (apk["browser_download_url"] as String?) ?? releaseUrl,
     publishedAt: DateTime.tryParse(map["published_at"] as String? ?? ""),
+  );
+}
+
+/// 解析自有源 manifest(release_publisher 生成的 android/latest.json):
+/// {version, name, notes, publishedAt, downloadUrl}。downloadUrl 缺失视为无效。
+AppRelease? _parseManifest(String body) {
+  final map = jsonDecode(body) as Map<String, dynamic>;
+  final version = (map["version"] as String?)?.replaceFirst(RegExp("^[vV]"), "") ?? "";
+  final download = map["downloadUrl"] as String? ?? "";
+  if (version.isEmpty || download.isEmpty) return null;
+  return AppRelease(
+    version: version,
+    name: map["name"] as String? ?? version,
+    notes: map["notes"] as String? ?? "",
+    releaseUrl: download, // 自有源没有 Release 页概念,回退下载地址(web 端 openDownload 用)
+    downloadUrl: download,
+    publishedAt: DateTime.tryParse(map["publishedAt"] as String? ?? ""),
   );
 }
 

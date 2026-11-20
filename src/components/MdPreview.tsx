@@ -1,5 +1,7 @@
 import { memo, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { lookupResolved, revealLocalPath, resolveLocalPaths, splitPathSegments } from "../domain/localPaths";
+import { useSessionCwd } from "../domain/sessionCwd";
 import { useSettings } from "../settings/SettingsProvider";
 // highlight.js github-dark 主题(随 md-render 分包加载,首屏不拉)。
 import "highlight.js/styles/github-dark.css";
@@ -141,6 +143,61 @@ function enrichCodeBlocks(root: HTMLElement): void {
   });
 }
 
+/**
+ * 本机文件路径富化(会话流文件链接的 markdown 面):遍历文本节点(跳过 code/pre/a),
+ * 候选查缓存命中且存在的包 `.mx-filepath` span(data-mx-resolved = 绝对路径,点击走
+ * 根元素 onClick 委托 reveal)。`awaitMissing` = true 时同步等待未验证候选批量解析
+ * 完成(终态渲染:缓存串里链接完整);false 只用已就绪缓存并发起补验不等待(流式
+ * live:下一 delta / 轮末终态自然补上,不阻塞增量渲染节奏)。
+ */
+async function enrichFilePaths(root: HTMLElement, cwd: string, titleText: string, awaitMissing: boolean): Promise<void> {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode: (node) => {
+      const el = node.parentElement;
+      if (!el || el.closest("pre, code, a, .mx-codeblock")) return NodeFilter.FILTER_REJECT;
+      return node.nodeValue && /[:\\/]/.test(node.nodeValue)
+        ? NodeFilter.FILTER_ACCEPT
+        : NodeFilter.FILTER_REJECT;
+    },
+  });
+  const nodes: Text[] = [];
+  for (let n = walker.nextNode(); n; n = walker.nextNode()) nodes.push(n as Text);
+  if (nodes.length === 0) return;
+  const missing = new Set<string>();
+  for (const n of nodes) {
+    for (const seg of splitPathSegments(n.nodeValue ?? "")) {
+      if (seg.isCand && lookupResolved(cwd, seg.text) === undefined) missing.add(seg.text);
+    }
+  }
+  if (missing.size > 0) {
+    const p = resolveLocalPaths(cwd, [...missing]);
+    if (!awaitMissing) void p.catch(() => {});
+    else await p.catch(() => {});
+  }
+  for (const n of nodes) {
+    const segs = splitPathSegments(n.nodeValue ?? "");
+    if (!segs.some((s) => s.isCand)) continue;
+    const frag = document.createDocumentFragment();
+    let linked = false;
+    for (const seg of segs) {
+      const hit = seg.isCand ? lookupResolved(cwd, seg.text) : undefined;
+      if (seg.isCand && hit?.resolved) {
+        const span = document.createElement("span");
+        span.className = "mx-filepath";
+        span.title = titleText;
+        span.setAttribute("data-mx-resolved", hit.resolved);
+        span.textContent = seg.text;
+        frag.appendChild(span);
+        linked = true;
+      } else {
+        frag.appendChild(document.createTextNode(seg.text));
+      }
+    }
+    // 有任一命中才替换节点,避免纯文本节点被无意义重建。
+    if (linked) n.parentNode?.replaceChild(frag, n);
+  }
+}
+
 export const MdPreview = memo(function MdPreview({
   content,
   inline = false,
@@ -159,14 +216,18 @@ export const MdPreview = memo(function MdPreview({
 }) {
   const { t } = useTranslation();
   const { fontSize } = useSettings();
+  // 会话 cwd(对话 pane Provider 注入;文件树/笔记等语境默认空串 → 仅绝对路径可标)。
+  // 缓存 key 掺 cwd:同 content 不同项目下相对路径解析基不同,链接串不可共享。
+  const cwd = useSessionCwd();
+  const cacheKey = `${cwd}\u0000${content}`;
   // 命中缓存同步直出(切 tab/重渲染零解析、无 loading 闪烁);live 模式不查缓存。
-  const [html, setHtml] = useState<string | null>(() => (live ? null : getCached(content)) ?? null);
+  const [html, setHtml] = useState<string | null>(() => (live ? null : getCached(cacheKey)) ?? null);
   const [error, setError] = useState<string | null>(null);
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     // 先查缓存(同 content 在 effect 时可能已被别的实例解析完;live 模式跳过)。
-    const cached = live ? undefined : getCached(content);
+    const cached = live ? undefined : getCached(cacheKey);
     if (cached !== undefined) {
       setHtml(cached);
       setError(null);
@@ -178,15 +239,18 @@ export const MdPreview = memo(function MdPreview({
     if (!live) setHtml((prev) => (prev === null ? prev : null));
     let alive = true;
     void getRenderPipeline()
-      .then(({ render, highlightAll }) => {
-        if (!alive) return;
+      .then(async ({ render, highlightAll }) => {
         // 在离屏容器上完成 hljs 后处理,取 innerHTML 入缓存(缓存串已含高亮 span)。
         const off = document.createElement("div");
         off.innerHTML = render(content);
         highlightAll(off);
         enrichCodeBlocks(off);
+        // 路径富化:终态等待批量验证(缓存串里链接完整);live 只用已就绪缓存并发起
+        // 补验不等待(见 enrichFilePaths 注释),轮末终态渲染兜底补全。
+        await enrichFilePaths(off, cwd, t("claudepane.revealInFolder"), !live);
+        if (!alive) return;
         const finalHtml = off.innerHTML;
-        if (!live) setCached(content, finalHtml);
+        if (!live) setCached(cacheKey, finalHtml);
         setHtml(finalHtml);
         setError(null);
       })
@@ -197,7 +261,7 @@ export const MdPreview = memo(function MdPreview({
     return () => {
       alive = false;
     };
-  }, [content, live]);
+  }, [cacheKey, live, cwd, t]);
 
   if (error) {
     return inline ? null : <div className="grid h-full place-items-center px-4 text-center text-[11px] text-[var(--mx-danger)]">{error}</div>;
@@ -212,6 +276,12 @@ export const MdPreview = memo(function MdPreview({
   // 点击无反馈会让用户怀疑没复制上;折叠→toggle .expanded 并换 ▾/▴)。
   const handleBlockClick = (e: React.MouseEvent<HTMLDivElement>) => {
     const target = e.target as HTMLElement;
+    // 本机文件路径链接(富化注入的静态 span):reveal 所在目录。
+    const fp = target.closest<HTMLElement>(".mx-filepath");
+    if (fp?.dataset.mxResolved) {
+      revealLocalPath(fp.dataset.mxResolved);
+      return;
+    }
     const wrap = target.closest<HTMLElement>(".mx-codeblock");
     if (!wrap) return;
     if (target.dataset?.mxCopy !== undefined) {

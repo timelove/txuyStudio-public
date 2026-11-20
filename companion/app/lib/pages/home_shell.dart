@@ -11,6 +11,7 @@ import '../relay/switch_desktop.dart';
 import '../theme.dart';
 import '../user/profile.dart';
 import 'admin_page.dart';
+import 'emergence_page.dart';
 import 'messages_page.dart';
 import 'projects_page.dart';
 import 'usage_page.dart';
@@ -275,6 +276,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       ProjectsPage(client: _client),
       UsagePage(client: _client, active: _index == 2),
       SessionsPage(client: _client),
+      EmergencePage(client: _client, active: _index == 4),
     ];
     return Scaffold(
       appBar: AppBar(
@@ -330,6 +332,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
           NavigationDestination(icon: Icon(Icons.folder_outlined), selectedIcon: Icon(Icons.folder), label: "项目"),
           NavigationDestination(icon: Icon(Icons.bar_chart_outlined), selectedIcon: Icon(Icons.bar_chart), label: "用量"),
           NavigationDestination(icon: Icon(Icons.forum_outlined), selectedIcon: Icon(Icons.forum), label: "会话"),
+          NavigationDestination(icon: Icon(Icons.hub_outlined), selectedIcon: Icon(Icons.hub), label: "涌现"),
         ],
       ),
     );

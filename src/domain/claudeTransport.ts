@@ -87,6 +87,14 @@ export class ClaudeTransport {
   private addDirs: string[] = [];
   /** 长进程实际启动时带的 addDirs 快照。与 this.addDirs 不一致时 ensureStarted 检测到 -> 重启。 */
   private activeAddDirs: string[] = [];
+  /** per-tab 供应商 env 覆盖(null=跟随全局 settings.json,2026-11-12):供应商分组点模型时
+   *  置,spawn 经 `--settings '{"env":..}'` 注入(优先级高于 user settings.json 的 env 段,
+   *  spike 实证 .work/spikes/provider-settings-flag-spike.mjs;进程 env 会被 settings 段覆盖,
+   *  provider-env-priority-spike)。跨 tab 互不影响;随 prefs 落 localStorage 跨重启恢复;
+   *  置后 refreshIfSettingsChanged 跳过(本 tab 不随全局切换联动)。 */
+  private providerEnvOverride: Record<string, string> | null = null;
+  /** 长进程实际启动时的 override 快照(与期望不一致时 ensureStarted 检测到 -> 重启)。 */
+  private activeProviderEnv: Record<string, string> | null = null;
   /** 长进程是否在跑(start_claude_session 成功 + 未 terminated)。 */
   private started = false;
   /** 进程已死(terminated eof/interrupted),下次 send 需 ensureStarted 重启。 */
@@ -171,10 +179,16 @@ export class ClaudeTransport {
     try {
       const raw = localStorage.getItem(this.prefsKey());
       if (!raw) return;
-      const p = JSON.parse(raw) as { mode?: string; effort?: string; model?: string | null };
+      const p = JSON.parse(raw) as {
+        mode?: string;
+        effort?: string;
+        model?: string | null;
+        providerEnv?: Record<string, string> | null;
+      };
       if (p.mode) this.mode = p.mode;
       if (p.effort) this.effort = p.effort;
       if (p.model !== undefined) this.model = p.model;
+      if (p.providerEnv !== undefined) this.providerEnvOverride = p.providerEnv;
     } catch {
       // 坏 JSON / 写不进:忽略,走默认档。
     }
@@ -184,7 +198,12 @@ export class ClaudeTransport {
     try {
       localStorage.setItem(
         this.prefsKey(),
-        JSON.stringify({ mode: this.mode, effort: this.effort, model: this.model }),
+        JSON.stringify({
+          mode: this.mode,
+          effort: this.effort,
+          model: this.model,
+          providerEnv: this.providerEnvOverride,
+        }),
       );
     } catch {
       // 写失败不致命:只影响下次打开的记忆。
@@ -417,6 +436,7 @@ export class ClaudeTransport {
       (this.mode !== this.activeMode ||
         this.effort !== this.activeEffort ||
         this.model !== this.activeModel ||
+        this.providerEnvChanged() ||
         this.addDirsChanged())
     ) {
       await this.restart(allowedTools);
@@ -482,6 +502,7 @@ export class ClaudeTransport {
       effort: this.effort ?? null,
       model: this.model ?? null,
       addDirs: this.addDirs.length ? this.addDirs : null,
+      settingsEnv: this.providerEnvOverride,
     });
     this.started = true;
     this.dead = false;
@@ -489,6 +510,7 @@ export class ClaudeTransport {
     this.activeEffort = this.effort;
     this.activeModel = this.model;
     this.activeAddDirs = [...this.addDirs];
+    this.activeProviderEnv = this.providerEnvOverride ? { ...this.providerEnvOverride } : null;
   }
 
   /** addDirs 与长进程实际启动快照是否不一致(顺序敏感;变更是重启信号)。 */
@@ -496,6 +518,19 @@ export class ClaudeTransport {
     return (
       this.addDirs.length !== this.activeAddDirs.length ||
       this.addDirs.some((d, i) => d !== this.activeAddDirs[i])
+    );
+  }
+
+  /** providerEnvOverride 与长进程实际启动快照是否不一致(键值逐一比对;变更是重启信号)。 */
+  private providerEnvChanged(): boolean {
+    const a = this.providerEnvOverride;
+    const b = this.activeProviderEnv;
+    if (!a && !b) return false;
+    if (!!a !== !!b) return true;
+    const ka = Object.keys(a!);
+    const kb = Object.keys(b!);
+    return (
+      ka.length !== kb.length || ka.some((k) => a![k] !== b![k])
     );
   }
 
@@ -775,6 +810,38 @@ export class ClaudeTransport {
     }
   }
 
+  /** 涌现代批落定的本地撤卡(2026-11-18 用户:「涌现批准后,消息流中的批准框就该消失」):
+   *  机器代批在后端直接回包(approve_request),不经 respondPermission 的乐观移除——
+   *  pending 卡会一直挂到轮末 result 才清,直投大任务一跑几分钟,已批的卡全程挡视线。
+   *  前端收到 conductor-auto-approved 广播时调这里**纯本地**移除,不回包(后端已回)。
+   *  无该 id 时无有害副作用(CLI 可能已作废请求/已被轮末清空)。 */
+  dismissPermission(requestId: string): void {
+    if (!this.state.pendingPermissions.some((p) => p.requestId === requestId)) return;
+    this.state = {
+      ...this.state,
+      pendingPermissions: this.state.pendingPermissions.filter((p) => p.requestId !== requestId),
+    };
+    this.scheduleEmit();
+  }
+
+  /** 停止单个后台任务:stdin 写 control_request `stop_task`,CLI 内核直接停该任务——
+   * 零延迟、不产生对话消息、不占轮、模型无感知。取代旧「借道模型层发 TaskStop 指令
+   * 消息」(busy 时还得排队等 idle,秒级延迟且脏对话流)。不受 busy 拦——要停的就是
+   * 跑着的任务;任务消失经 backgroundTasks 快照回流(UI 撤「停止中」角标)。
+   * spike 实测 2026-11-12(.work/spikes/stop-task-spike.mjs,CLI 2.1.304):不存在的
+   * task_id 也回 success{}(幂等,重复点/竞态不报错);task_id 兼容 agent ID/名字。 */
+  async stopTask(taskId: string): Promise<void> {
+    try {
+      await invoke("stop_claude_task", {
+        projectId: this.projectId,
+        tabId: this.tabId,
+        taskId,
+      });
+    } catch (err) {
+      console.warn("[ClaudeTransport] stop_claude_task failed:", err);
+    }
+  }
+
   /** 中断当前轮:**软中断优先**(stdin 写 control_request interrupt,CLI abort 当前轮回
    * result,进程不死 → 下一条消息直接 stdin 续跑,免掉下轮 --resume 重启进程的秒级等待,
    * 双 ESC/停止按钮卡顿的主治);~1.2s 未落定(旧 CLI 不认/卡死/compacting 子进程场景)或
@@ -783,6 +850,14 @@ export class ClaudeTransport {
   async interrupt(): Promise<void> {
     // 手动中断:先取消挂起的 API 重试(清定时器),再中断。
     this.cancelRetry();
+    // ESC/停止 = **全停**:先停全部后台任务(stop_task 控制帧,零延迟不占轮),再中断
+    // 主轮(2026-11-12 用户定调,与 initialize{perTaskStopAffordance} 之前的旧行为一致
+    // ——单任务停止按钮不连坐,interrupt 仍全停)。并发发帧;进程未启/已死时逐个吞错,
+    // 后续 interrupt/kill 路径自会兜底。
+    const bgTasks = this.state.backgroundTasks;
+    if (bgTasks.length > 0 && this.started && !this.dead) {
+      await Promise.all(bgTasks.map((t) => this.stopTask(t.taskId)));
+    }
     // 软路径:仅长进程活着且正在跑一轮时(compacting 是 spawn 的短命子进程,软中断写长
     // 进程 stdin 无效,直接走硬 kill;重试等待期的 status="running" 残留覆写同理由超时兜底)。
     if (this.started && !this.dead && this.state.status === "running") {
@@ -936,6 +1011,9 @@ export class ClaudeTransport {
    * 即刷新 cc-switch 后的状态」。文件未变/未 spawn 过/busy/重启失败均静默。
    */
   async refreshIfSettingsChanged(): Promise<void> {
+    // per-tab 供应商覆盖的 tab 不随全局切换联动:本 tab 用自己的 env(--settings 注入),
+    // 全局 settings.json 变化与它无关,重启反而会把供应商弹回全局档。
+    if (this.providerEnvOverride) return;
     if (!this.started || this.dead || this.sendingPromise) return;
     let changed: boolean;
     try {
@@ -997,6 +1075,70 @@ export class ClaudeTransport {
         this.sendingPromise = null;
       }
     }
+  }
+
+  /**
+   * per-tab 切换供应商+模型(2026-11-12):置 providerEnvOverride(该供应商 env 段,点选的
+   * 模型覆盖 ANTHROPIC_MODEL)+ this.model 同步为该模型(防 --model flag 与 env 两来源打架),
+   * 重启进程经 `--settings '{"env":..}'` 注入——只切本 tab,其余 tab 与全局 settings.json
+   * 不动。busy 时组件层已先 interrupt(同 setModel)。取代旧 switchProviderModel 的
+   * applyProvider(整体替换全局 env)+ 全 tab 广播重启路径。
+   */
+  async setProvider(env: Record<string, string>, model: string): Promise<void> {
+    this.cancelRetry();
+    this.lastPrompt = null;
+    this.clearing = false;
+    this.selectedModelAlias = model;
+    this.providerEnvOverride = { ...env, ANTHROPIC_MODEL: model };
+    this.model = model;
+    this.state = { ...this.state, meta: { ...this.state.meta, model } };
+    this.savePrefs();
+    this.emit();
+    void this.syncModelToBackend(model);
+    if (this.started && !this.dead) {
+      this.starting = true;
+      if (this.sendingPromise) {
+        await this.sendingPromise.catch(() => {});
+      }
+      this.sendingPromise = this.restart();
+      try {
+        await this.sendingPromise;
+      } finally {
+        this.sendingPromise = null;
+      }
+    }
+  }
+
+  /** 清除 per-tab 供应商覆盖,回「跟随全局 settings.json」(模型同时回 default:全局 env 的
+   *  ANTHROPIC_MODEL 才是本 tab 的默认)。重启语义同 setProvider。 */
+  async clearProvider(): Promise<void> {
+    this.cancelRetry();
+    this.lastPrompt = null;
+    this.clearing = false;
+    this.providerEnvOverride = null;
+    this.model = null;
+    this.state = { ...this.state, meta: { ...this.state.meta, model: "default" } };
+    this.savePrefs();
+    this.emit();
+    void this.syncModelToBackend("default");
+    if (this.started && !this.dead) {
+      this.starting = true;
+      if (this.sendingPromise) {
+        await this.sendingPromise.catch(() => {});
+      }
+      this.sendingPromise = this.restart();
+      try {
+        await this.sendingPromise;
+      } finally {
+        this.sendingPromise = null;
+      }
+    }
+  }
+
+  /** 当前 per-tab 供应商 env 覆盖(null=跟随全局)。UI(模型下拉的勾选/组头标记)render 期
+   *  同步读:切供应商必伴随 meta.model 乐观更新 → 订阅重渲染 → 读到新值。 */
+  getProviderEnv(): Record<string, string> | null {
+    return this.providerEnvOverride;
   }
 
   /**

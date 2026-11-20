@@ -1,7 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "txuyStudio",
-  "version": "0.2.21",
+  "mainBinaryName": "txuy-studio",
+  "version": "0.2.24",
   "identifier": "com.txuystudio.terminal",
   "build": {
     "beforeDevCommand": "bun run dev",

@@ -78,6 +78,31 @@ pub fn worktree_remove(root: &Path, path: &Path) -> Result<(), String> {
     }
 }
 
+/// `git worktree list --porcelain`:返回每条 (worktree 路径, 分支名)。detached
+/// HEAD 无分支 → None;主仓本身也是第一条(路径 = 仓根),调用方自行过滤。
+pub fn worktree_list(root: &Path) -> Result<Vec<(String, Option<String>)>, String> {
+    let out = git(root, &["worktree", "list", "--porcelain"])?;
+    let mut list: Vec<(String, Option<String>)> = Vec::new();
+    let mut path: Option<String> = None;
+    let mut branch: Option<String> = None;
+    for line in out.lines() {
+        if let Some(p) = line.strip_prefix("worktree ") {
+            if let Some(prev) = path.take() {
+                list.push((prev, branch.take()));
+            }
+            path = Some(p.trim().to_string());
+        } else if let Some(b) = line.strip_prefix("branch ") {
+            // 形如 refs/heads/fleet/foo → 去 refs/heads/ 前缀留短名。
+            branch = b.trim().strip_prefix("refs/heads/").map(str::to_string);
+        }
+        // HEAD / detached / bare 行不关心。
+    }
+    if let Some(prev) = path.take() {
+        list.push((prev, branch.take()));
+    }
+    Ok(list)
+}
+
 /// `git branch -D <branch>`(丢弃分支)。分支不存在时幂等成功。
 pub fn branch_delete(root: &Path, branch: &str) -> Result<(), String> {
     match git(root, &["branch", "-D", branch]) {
@@ -108,16 +133,21 @@ pub fn diff_stat(root: &Path, base: &str, branch: &str) -> Result<(usize, u64, u
 
 /// `git merge-tree`(干跑)预判合并冲突。返回冲突文件列表(空 = 可干净合并)。
 ///
-/// 用 `--write-tree` 形态(git 2.38+):干净时输出 tree oid、退出码 0;有冲突时
-/// 退出码 1 且输出含冲突文件列表(`--name-only` 只列文件)。老 git 不支持时返回
-/// Err,由调用方决定降级(提示用户直接试合并)。
+/// 用 `--write-tree` 两分支形态(git 2.38+):`merge-tree <branch1> <branch2>`
+/// 自动取 merge-base 干跑合并。干净时输出 tree oid、退出码 0;有冲突时退出码 1
+/// 且输出含冲突文件列表(`--name-only` 只列文件)。老 git 不支持时返回 Err,
+/// 由调用方决定降级(提示用户直接试合并)。
+/// (2026-11-18 修:曾写成 `base...theirs` 三点 range 语法——那是 diff/log 的
+/// 语法,merge-tree 不认,usage 报错被下面的老版本探测误抓成「requires git
+/// 2.38+」,用户 git 2.45 也被拦。)
 pub fn merge_tree_conflicts(root: &Path, base: &str, theirs: &str) -> Result<Vec<String>, String> {
     let out = txuy_core::proc::command_no_window("git")
         .args([
             "merge-tree",
             "--write-tree",
             "--name-only",
-            &format!("{base}...{branch_arg}", branch_arg = theirs),
+            base,
+            theirs,
         ])
         .current_dir(root)
         .output()
@@ -132,12 +162,14 @@ pub fn merge_tree_conflicts(root: &Path, base: &str, theirs: &str) -> Result<Vec
         return Err("merge-tree --write-tree requires git 2.38+".into());
     }
     if out.status.code() == Some(1) {
-        // --name-only:首行是冲突 tree oid,其后每行一个冲突文件。
+        // --name-only:首行冲突 tree oid,其后每行一个冲突文件;文件列表后以空行
+        // 结束,再往后是 Auto-merging/CONFLICT 信息段(2026-11-18 实测:无脑收非空
+        // 行会把信息行混进冲突列表)——取到首个空行为止。
         let files: Vec<String> = String::from_utf8_lossy(&out.stdout)
             .lines()
             .skip(1)
             .map(|l| l.trim().to_string())
-            .filter(|l| !l.is_empty())
+            .take_while(|l| !l.is_empty())
             .collect();
         return Ok(files);
     }

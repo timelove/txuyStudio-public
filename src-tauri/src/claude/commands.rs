@@ -114,6 +114,12 @@ pub async fn start_claude_session(
     effort: Option<String>,
     model: Option<String>,
     add_dirs: Option<Vec<String>>,
+    // per-tab 供应商 env 覆盖(2026-11-12):Some 时 spawn 加 `--settings '{"env":{..}}'`,
+    // 使该 tab 用自己的端点/token/模型,不随全局 settings.json 走。spike 实证
+    // (.work/spikes/provider-settings-flag-spike.mjs,CLI 2.1.304):--settings 的 env
+    // 段**压过** user settings.json 的 env(8/8 命中);而 spawn 进程 env 会被 settings
+    // 段覆盖(provider-env-priority-spike),进程注入路线不通。None = 跟随全局(现状)。
+    settings_env: Option<std::collections::BTreeMap<String, String>>,
 ) -> Result<(), String> {
     // 1) 短锁:取/建 session;若旧 child 存活 → killed=true + take child+stdin(放锁后 kill 旧进程)。
     // 0) 读持久化的 claude_session_id(跨重启 --resume 用)。首启播种到新 session;session 已存在
@@ -291,6 +297,17 @@ pub async fn start_claude_session(
     // 本地代执行 → 注入 tool_result」的启发式路径(那条路在批准后常断链:CLI 又吃拒绝,
     // 卡片复现且轮次不继续)。spike 实测 2026-10-19(.work/spikes/can-use-tool-spike.mjs)。
     cmd.arg("--permission-prompt-tool").arg("stdio");
+    // per-tab 供应商:--settings 传 env 段 JSON 串(优先级高于 user settings.json,
+    // spike 实证见函数头注释)。JSON 串直传不落临时文件——无文件生命周期要管;token
+    // 短暂出现在进程命令行(本机单用户,与 cc-switch 明文落盘同级敏感,可接受)。
+    if let Some(env) = &settings_env {
+        let json = serde_json::json!({ "env": env }).to_string();
+        cmd.arg("--settings").arg(&json);
+        log::info!(
+            "start_claude_session: tab {tab_id} uses per-tab provider env ({} keys)",
+            env.len()
+        );
+    }
     // 工具白名单(--allowedTools):合并「项目持久化 allowlist」∪「本次前端透传」,去重。
     // 短锁读 app_state(同步,不跨 .await)。
     {
@@ -396,6 +413,23 @@ pub async fn start_claude_session(
         }
     }
 
+    // 4.5) 控制通道握手:initialize 帧声明 `perTaskStopAffordance`——interrupt 只停当前
+    // 轮、不连坐杀后台任务;不声明则 fail-closed(interrupt 杀全部后台任务)。字段全
+    // optional,最小化发送。spike 实测(2026-11-12,.work/spikes/stop-task-spike.mjs,
+    // CLI 2.1.304):回 control_response success(带 slash 命令表,读循环按 request_id
+    // 静默吞),之后会话照常服务。旧 CLI 不认 initialize 只回 error 帧,同样被吞,
+    // 主流程无感(退化行为 = 现状:interrupt 连坐)。写失败仅 warn,不阻断启动。
+    let init_line = serde_json::json!({
+        "type": "control_request",
+        "request_id": "host-init",
+        "request": { "subtype": "initialize", "perTaskStopAffordance": true },
+    })
+    .to_string()
+        + "\n";
+    if let Err(e) = write_stdin_line(&app, &project_id, &tab_id, &init_line) {
+        log::warn!("start_claude_session: initialize frame write failed, tab {tab_id}: {e}");
+    }
+
     // 5) fire-and-forget 读循环。
     let app_handle = app.clone();
     let pid = project_id.clone();
@@ -438,9 +472,21 @@ pub async fn send_claude_message(
     tool_result: Option<ToolResultPayload>,
     // 手机经中继发来的消息:`Some(id)` = 写完 stdin 后补发一条 user 事件(带该 id),
     // 桌面端才看得见「手机问的那句话」。桌面 transport 传 None——它已在前端
-    // `appendUserMessage` 做过乐观插入,后端再回显会重复一条。
+    // `appendUserMessage` 做过乐观插入,后端再回显会重复一条。conductor 投递也传
+    // Some(uuid):前端没有乐观插入点,不补发消息流里就看不见这条(2026-11-17 用户
+    // 实测「排队补投的消息流没显示」)。
     client_message_id: Option<String>,
+    // 人触达登记开关(2026-11-17):None/Some(true) = 照旧登记(人手发/手机发);
+    // Some(false) = conductor 机器投递(排队补投/流水线/返工/建议代发)——不登记,
+    // 否则占用锁与建议抑制被人不存在的「触达」污染(机器投完 touch 新鲜,后续
+    // 终态被误判「人正在用」,排队/建议链路全乱)。
+    human_touch: Option<bool>,
 ) -> Result<(), String> {
+    // 人触达登记(conductor 占用锁口径:刚被人操作的会话不算「无人值守」,完成的徽标
+    // 提醒按触达时效抑制)。失败静默——触达只是启发式信号,不阻断发送。
+    if human_touch.unwrap_or(true) {
+        crate::conductor::note_human_touch(&app, &project_id, &tab_id);
+    }
     // 1) 短锁:检查 busy + take stdin + 置 Running(即时 local command 如 /clear 除外,见下方
     //    `is_instant_local_command`:不置 Running,避免 /clear 不发 result 时 busy 死锁)。
     let stdin = {
@@ -692,6 +738,42 @@ pub async fn interrupt_claude_turn(
     Ok(())
 }
 
+/// 停止单个后台任务(stream-json 控制通道):经 stdin 写 control_request `stop_task`,
+/// CLI 内核直接停该任务——零延迟、不产生对话消息、不占轮、模型无感知。取代旧「借道
+/// 模型层发 TaskStop 指令消息」路径(busy 时还得排队等 idle 再 flush,秒级延迟且往对话
+/// 流里塞指令文案)。spike 实测(2026-11-12,.work/spikes/stop-task-spike.mjs,CLI
+/// 2.1.304):不存在的 task_id 也回 success{}(幂等,重复点/竞态不报错);task_id 兼容
+/// agent ID/名字。同 interrupt 语义:**不受 busy 拦**(要停的就是跑着的任务)、不动
+/// status(任务消失经 backgroundTasks 快照回流,前端按快照清「停止中」角标)。
+#[tauri::command]
+pub async fn stop_claude_task(
+    app: AppHandle,
+    project_id: String,
+    tab_id: String,
+    task_id: String,
+) -> Result<(), String> {
+    let line = serde_json::json!({
+        "type": "control_request",
+        "request_id": format!(
+            "stop-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0)
+        ),
+        "request": { "subtype": "stop_task", "task_id": task_id },
+    })
+    .to_string()
+        + "\n";
+    let app2 = app.clone();
+    let pid = project_id.clone();
+    let tid = tab_id.clone();
+    tokio::task::spawn_blocking(move || write_stdin_line(&app2, &pid, &tid, &line))
+        .await
+        .map_err(|e| format!("stop_claude_task join: {e}"))??;
+    Ok(())
+}
+
 /// 回应用户对 `can_use_tool` 的决策(--permission-prompt-tool stdio):经 stdin 写
 /// control_response,CLI 收到后**自己执行工具**(allow)或把拒绝文案作为 tool_result 交给模型
 /// (deny)并续跑该轮。取代原「本地代执行 + 注入 tool_result」启发式路径(批准后常断链)。
@@ -700,6 +782,35 @@ pub async fn interrupt_claude_turn(
 /// spike 实测 CLI 认这个形态);deny 可带 `message`(模型据此换方式)。
 #[tauri::command]
 pub async fn respond_claude_permission(
+    app: AppHandle,
+    state: State<'_, ClaudeRegistry>,
+    project_id: String,
+    tab_id: String,
+    request_id: String,
+    behavior: String,
+    updated_input: Option<serde_json::Value>,
+    message: Option<String>,
+) -> Result<(), String> {
+    crate::conductor::note_human_touch(&app, &project_id, &tab_id);
+    respond_claude_permission_raw(
+        app,
+        state,
+        project_id,
+        tab_id,
+        request_id,
+        behavior,
+        updated_input,
+        message,
+    )
+    .await
+}
+
+/// [`respond_claude_permission`] 的底层写入,**不登记人触达**。
+///
+/// 拆出来给 conductor 代批(autopilot)用:机器代为批准若也走命令入口,`note_human_touch`
+/// 会把占用锁无限续期(每次代批都算「人刚碰过」)→ 后续自动投递永不降级为建议卡,
+/// 「人正在用这个会话」的语义被污染。人点批准/拒绝仍走命令(带登记)。
+pub async fn respond_claude_permission_raw(
     app: AppHandle,
     state: State<'_, ClaudeRegistry>,
     project_id: String,
@@ -1373,12 +1484,26 @@ fn run_read_loop(app: AppHandle, project_id: String, tab_id: String, stdout: std
                 );
             }
             "control_response" => {
+                // 按 request_id 路由:`ctx-usage`(request_claude_context_usage 的固定 id)
+                // → ContextUsage 事件透传;其余(host-init/stop-*/interrupt-* 的回包)→ debug
+                // 静默。spike 实测(2026-11-12)initialize 的回包是 slash 命令表、stop_task 的
+                // 回包是空 {},均无业务价值——不区分会把它们误当 ContextUsage 广播给前端。
+                let resp = v.get("response");
+                let request_id = resp
+                    .and_then(|r| r.get("request_id"))
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("");
+                if request_id != "ctx-usage" {
+                    log::debug!(
+                        "claude control_response (non-ctx), tab {tab_id}: id={request_id}"
+                    );
+                    continue;
+                }
                 // P2(#137):`get_context_usage` 的 CLI 权威账本回包(请求由
                 // request_claude_context_usage 经 stdin 发出)。success 时透传 response.response
                 // 全量(categories(kind: used/buffer/free)/totalTokens/maxTokens/
                 // autoCompactThreshold/messageBreakdown/…);error 仅记日志(旧 CLI 不认该 subtype,
                 // baocode 同款容错:context 是锦上添花,拿不到就继续用前端估算)。
-                let resp = v.get("response");
                 let subtype = resp
                     .and_then(|r| r.get("subtype"))
                     .and_then(|s| s.as_str())
@@ -1691,7 +1816,8 @@ fn truncate_chars(s: &str, max: usize) -> String {
 
 /// 手机端 tool_use.input 摘要:与 companion `stream.dart _briefInput` 同款取法
 /// (取首个路径/命令类字段),产 String 让手机端 `_briefInput` 直通截断展示。
-fn brief_input_for_mobile(input: Option<&serde_json::Value>) -> String {
+/// conductor 感知链(Agent 实况拍)同款复用。
+pub(crate) fn brief_input_for_mobile(input: Option<&serde_json::Value>) -> String {
     let Some(v) = input else {
         return String::new();
     };

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { useTranslation } from "react-i18next";
 import { useSettings } from "../settings/SettingsProvider";
 import { DEFAULT_FONT_SIZE } from "../settings";
@@ -60,6 +61,7 @@ import {
   setFleetWorkerTab,
   type FleetWorkerView,
 } from "../domain/fleet";
+import type { FleetDispatchPayload } from "../domain/conductor";
 import { ShellMenuExtrasContext, type ShellMenuExtraItem } from "../domain/shellMenuExtras";
 import { ProjectColumn } from "./ProjectColumn";
 import { ShellSidebar } from "./ShellSidebar";
@@ -1534,6 +1536,55 @@ export function AppShell({
     },
     [fleetCreateTarget, treesByProject, handleFocusClaudeTab, spawnFleetTab],
   );
+
+  // conductor dispatch 卡确认(P2):后端建完 worktree 广播 `fleet-dispatch` → 主窗口
+  // 自动挂 worker tab(目标 = 项目第一个 pane,指挥窗触发没有 focus 上下文)+ 注入首条
+  // 指令。发送走后端 conductor_dispatch_send(send_to_session 未启动会自动拉起),重试
+  // 3 次等 worker tab 的 transport 起进程;树里没该项目(极端时序)只告警——worker 记录
+  // 已落盘,人可从 FleetPanel 手动挂载,不丢数据。
+  const fleetDispatchRef = useRef({ treesByProject, spawnFleetTab });
+  useEffect(() => {
+    fleetDispatchRef.current = { treesByProject, spawnFleetTab };
+  }, [treesByProject, spawnFleetTab]);
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    listen<FleetDispatchPayload>("fleet-dispatch", (e) => {
+      const { projectId, worker, firstMessage } = e.payload;
+      const { treesByProject: trees, spawnFleetTab: spawn } = fleetDispatchRef.current;
+      const tree = trees[projectId];
+      const anchor = tree ? listPanes(tree)[0] : null;
+      if (!anchor) {
+        console.warn("[AppShell] fleet-dispatch: project pane tree missing", projectId);
+        return;
+      }
+      void (async () => {
+        const tabId = await spawn({ projectId, paneId: anchor.id }, worker, true);
+        if (!tabId || !firstMessage.trim()) return;
+        // 首条指令:重试等 transport(start_claude_session/ensure_app_server)就位;
+        // 后端 send 未启动会自动拉起,失败多为时序(pane 未挂载完成)。
+        for (let i = 0; i < 3; i++) {
+          if (cancelled) return;
+          await new Promise((r) => setTimeout(r, 2000));
+          try {
+            await invoke("conductor_dispatch_send", { projectId, tabId, text: firstMessage });
+            return;
+          } catch (err) {
+            if (i === 2) console.warn("[AppShell] fleet-dispatch first message failed:", err);
+          }
+        }
+      })();
+    })
+      .then((u) => {
+        if (cancelled) u();
+        else unlisten = u;
+      })
+      .catch(() => {}); // 非 Tauri 环境:listen 抛错,静默
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
 
   // FleetPanel 列表回报:更新该项目的 Fleet 徽标计数(打开面板/刷新/合并/丢弃后都会触发)。
   const handleFleetWorkerCount = useCallback((projectId: string, count: number) => {

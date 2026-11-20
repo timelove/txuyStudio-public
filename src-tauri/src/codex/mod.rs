@@ -58,6 +58,10 @@ pub struct SessionConfig {
 /// - `model`:当前会话 model(-m 传的值或 config.toml 默认),供 detach 窗口回填 meta.model。
 /// - `config_hash`:spawn 时 ~/.codex/config.toml + cc-switch-model-catalog.json 的内容哈希,
 ///   `codex_config_changed` 比对检测 cc-switch 切供应商(cc 切换改写这两个文件)。
+/// - `provider_overrides`:per-tab 供应商 override 的 `-c` 覆盖集合快照(spawn 时传的值;
+///   None=跟随全局 config.toml)。与 config_hash 变化检测合流(send_codex_message):
+///   集合变化 → 杀进程重拉;Some 时**跳过**全局哈希检测——该 tab 用自己的供应商段,
+///   cc-switch 切全局不连坐本 tab(2026-11-12,与 claude 侧 per-tab --settings 对齐)。
 /// - `killed`:主动 kill 标志,**按进程代际隔离**——spawn 时给 session 换新 Arc(不复位
 ///   旧 Arc),旧读循环持旧 Arc 到 EOF 仍读到 kill 时置的 true(静默收尾),新进程用全新
 ///   标志;若复位同一 Arc,旧循环迟到 EOF 会误判「非主动杀」发假 Terminated{exit}。
@@ -74,6 +78,7 @@ pub struct CodexSession {
     pub status: Arc<Mutex<CodexStatus>>,
     pub model: Mutex<Option<String>>,
     pub config_hash: Mutex<Option<u64>>,
+    pub provider_overrides: Mutex<Option<std::collections::BTreeMap<String, String>>>,
     pub killed: Arc<AtomicBool>,
 }
 

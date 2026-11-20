@@ -24,7 +24,13 @@ import {
 } from "../domain/codexToolConfigs";
 import { SANDBOX_MODES } from "../domain/codexSandbox";
 import { CODEX_PERMISSION_PROFILES, codexPermissionProfile } from "../domain/codexPermission";
-import { readActiveCodexProviderModels } from "../domain/codexProviders";
+import {
+  isCodexProviderActive,
+  loadCodexProviders,
+  readActiveCodexProviderModels,
+  readCurrentCodexInfo,
+  type CodexProvider,
+} from "../domain/codexProviders";
 import { fetchAiCliSessions, mostRecentSessionInCwd, type AiCliSessionListItem } from "../domain/aiCliSessions";
 import { useSettings } from "../settings/SettingsProvider";
 import { statusFontSize } from "../settings";
@@ -54,6 +60,10 @@ import { Tabs, TabsList, TabsTrigger } from "./ui/Tabs";
 import { TabCloseIcon } from "./icons";
 import { filterSlashCommands, parseSlashInput, type SlashCommandDef } from "../domain/slashCommands";
 import { splitStableTail, useThrottledValue } from "../domain/streamingMarkdown";
+import { useConductorAutoGhosts, useConductorRepeatBadge, useConductorVerdicts } from "../domain/conductor";
+import { useCliUpdateHint } from "../domain/cliUpdate";
+import { SessionCwdContext } from "../domain/sessionCwd";
+import { PathAwareText } from "./PathAwareText";
 
 /** MdPreview 懒加载(避免 codexpane 首屏就拉 marked/dompurify,与探针共用 md-render 分包)。 */
 const MdPreviewLazy = lazy(() =>
@@ -305,6 +315,14 @@ export function CodexPane(props: CodexPaneProps) {
   const { fontSize, showPromptBanner } = useSettings();
   /** 输入框底部状态栏字号:随全局 fontSize 缩放(14→10,与原 text-[10px] 一致)。 */
   const statusFontPx = statusFontSize(fontSize);
+  // 驿站循环 chip(按活动 tab 匹配)。
+  const repeatBadge = useConductorRepeatBadge(activeTabId);
+  // 指挥台代批判定(按 requestId=key 匹配)+ 宽限落定幽灵(2026-11-18 补 codex:
+  // 此前倒计时/留痕只挂 ClaudePane,codex 审批卡没有宽限代批可视化)。
+  const conductorVerdicts = useConductorVerdicts(activeTabId);
+  const conductorAutoGhosts = useConductorAutoGhosts(activeTabId);
+  // CLI 新版本提示(6h 节流,check_cli_update 本机 --version 对比 npm 最新版)。
+  const cliUpdate = useCliUpdateHint("codex");
   const [state, setState] = useState<CodexStreamState | null>(null);
   const stateRef = useRef(state);
   stateRef.current = state;
@@ -421,6 +439,10 @@ export function CodexPane(props: CodexPaneProps) {
   const [unsupportedMsg, setUnsupportedMsg] = useState<string | null>(null);
   /** 模型目录(list_codex_models 实时拉取 cc-switch catalog;打开选择器时刷新)。 */
   const [availableModels, setAvailableModels] = useState<CodexModelInfo[]>([]);
+  /** 本地供应商配置(设置中心管理;模型菜单分组数据源)。per-tab 切换只影响本 tab。 */
+  const [providers, setProviders] = useState<CodexProvider[]>([]);
+  /** 全局生效供应商 id(config.toml 实值比对;分组菜单里非 override tab 的组头高亮)。 */
+  const [activeGlobalProviderId, setActiveGlobalProviderId] = useState<string | null>(null);
   /** 上下文窗口上限(当前选中 model 的 catalog contextWindow;codex 事件流不带该值)。 */
   const [contextWindow, setContextWindow] = useState<number | undefined>(undefined);
   const [permissionAsk, setPermissionAsk] = useState<PermissionAsk | null>(null);
@@ -459,6 +481,22 @@ export function CodexPane(props: CodexPaneProps) {
       alive = false;
     };
   }, [activeTabId, state?.meta?.model]);
+
+  // 供应商列表 + 全局生效家(config.toml 实值比对):挂载与打开模型菜单时刷新(分组菜单
+  // 数据源;设置中心增删供应商/切全局后,菜单重开即见)。
+  const refreshProviders = useCallback(() => {
+    const list = loadCodexProviders();
+    setProviders(list);
+    void readCurrentCodexInfo()
+      .then((info) => {
+        const hit = info ? list.find((p) => isCodexProviderActive(p, info)) : undefined;
+        setActiveGlobalProviderId(hit?.id ?? null);
+      })
+      .catch(() => setActiveGlobalProviderId(null));
+  }, []);
+  useEffect(() => {
+    refreshProviders();
+  }, [refreshProviders]);
 
   // 切 tab 后同一工具 id 不应再次弹权限提升确认。
   useEffect(() => {
@@ -665,10 +703,8 @@ export function CodexPane(props: CodexPaneProps) {
   const cmdMatches = useMemo(() => cmdOpen ? filterSlashCommands(slashCommands, input.slice(1)) : [], [cmdOpen, input, slashCommands]);
   useEffect(() => setCmdIndex(0), [cmdMatches.length]);
 
-  // 宽 pane 首次达标 → 自动开侧栏(codex 默认 mcp);缩小态是用户意图,不自动展开。
-  useEffect(() => {
-    if (paneWide && toolPanel === null) setToolPanel("mcp");
-  }, [paneWide, toolPanel]);
+  // 工具侧栏默认隐藏,需要时经 ⋯ 菜单/slash 显式展开(showToolPanel);不再按 pane 宽度
+  // 自动打开(2026-11-12 用户定调)。缩小态(collapsed)仍是用户意图,不自动展开。
   // 侧栏面板切换/出现时拉数据(与弹窗打开同源,每次重读)。
   useEffect(() => {
     if (!toolPanel || !paneWide) return;
@@ -939,6 +975,39 @@ export function CodexPane(props: CodexPaneProps) {
     },
     [activeTabId, availableModels],
   );
+
+  // 点供应商分组下的模型:**只切本 tab**(2026-11-12,与 claude 侧同口径):transport
+  // .setCodexProvider 置 per-tab override(供应商经 -c 覆盖,模型走既有 per-turn 参数),
+  // 下轮 send 生效、不打断当前轮、其余 tab 与全局零影响——故无需 interrupt/确认弹窗。
+  const applyProviderModel = useCallback(
+    (p: CodexProvider, slug: string) => {
+      const transport = getCodexTransportRef.current(activeTabId);
+      setMenuMode(null);
+      transport.setCodexProvider(p.id, slug);
+      const entry = p.models?.find((m) => m.id === slug);
+      setContextWindow(entry?.contextWindow);
+      transport.setContextWindow(entry?.contextWindow);
+    },
+    [activeTabId],
+  );
+
+  // 清 per-tab 供应商 override,回「跟随全局」:清 override + 模型回 config.toml 默认,
+  // 下轮 send 生效(后端检测 Some→None 杀进程重拉)。
+  const clearProviderOverride = useCallback(() => {
+    const transport = getCodexTransportRef.current(activeTabId);
+    setMenuMode(null);
+    transport.clearCodexProvider();
+    setContextWindow(undefined);
+    transport.setContextWindow(undefined);
+  }, [activeTabId]);
+
+  /** 本 tab 的 per-tab 供应商 id(render 期同步读;切换后 transport emit 触发重渲染)。 */
+  const tabCodexProviderId = getCodexTransport(activeTabId)?.getCodexProviderId() ?? null;
+  /** 分组菜单勾选单一真源:override tab 用点选值(selectedModelAlias),否则 meta.model——
+   *  双来源会让两个模型同时打勾(切完供应商 meta.model 尚未回填时)。 */
+  const activeModelName = tabCodexProviderId
+    ? (getCodexTransport(activeTabId)?.getSelectedModelAlias() ?? "")
+    : (state?.meta?.model ?? "");
 
   // 应用选中的 reasoning effort(下轮 spawn 生效)。
   const applyReasoning = useCallback(
@@ -1463,6 +1532,8 @@ export function CodexPane(props: CodexPaneProps) {
       <div className="relative grid min-h-0 min-w-0 flex-1 grid-rows-[1fr_auto]">
         <div ref={scrollRef} onScroll={handleScroll} className="mx-scroll-pretty relative min-h-0 overflow-x-hidden overflow-y-auto px-4 py-4" style={{ fontSize }}>
           {state && (state.messages.length > 0 || (shellState?.messages.length ?? 0) > 0) ? (
+            /* 会话 cwd 注入:消息流深处 MdPreview/thinking 的本机路径候选按 cwd 解析(文件链接)。 */
+            <SessionCwdContext.Provider value={historyKey ?? ""}>
             <div ref={contentRef} className="mx-auto w-full max-w-[54.25rem] space-y-1">
               {/* C5 会话头:会话开端信息(品牌块 + 模型 + session 尾部 + 窗口),让会话有"开端感"。
                   本分支已在 hasMessages 守卫内(mergedMessages 必非空),只需 meta 有模型/会话 id 其一。
@@ -1547,6 +1618,7 @@ export function CodexPane(props: CodexPaneProps) {
                 );
               })}
             </div>
+            </SessionCwdContext.Provider>
           ) : (
             // 品牌化空状态(会话未开始):大品牌块 + 名称 + (已知时)模型 + 引导文案,
             // 替代原先一行灰字——AI 主体叙事从空状态开始;probe/加载中保持轻量占位。
@@ -1598,6 +1670,42 @@ export function CodexPane(props: CodexPaneProps) {
                 busy 全程可见 -- 与 ClaudePane 对等,长命令运行中用户也能察觉会话仍在进行。
                 文字一律 muted(高饱和品牌色整行显示:深主题刺眼/亮主题对比不足看不清),
                 色彩语义由 ThinkingDots 呼吸点承载。 */}
+            {/* 驿站循环 chip:该 tab 被驿站定时投递(2026-11-13),pane 内一键关循环;
+                TTL 熄灭见 domain/conductor.ts useConductorRepeatBadge。 */}
+            {cliUpdate.info && (
+              /* CLI 新版本提示:只提示不代跑(升级命令人在终端敲);按版本忽略,升级后新版本号自然重现。 */
+              <div className="mb-1.5 flex items-center gap-2 px-1 text-[#3b82f6]" style={{ fontSize: statusFontPx }}>
+                <span>
+                  {t("codexpane.cliUpdate", {
+                    latest: cliUpdate.info.latest,
+                    current: cliUpdate.info.current,
+                    cmd: "npm i -g @openai/codex",
+                  })}
+                </span>
+                <button
+                  type="button"
+                  onMouseDown={(e) => e.stopPropagation()}
+                  onClick={cliUpdate.dismiss}
+                  className="rounded bg-[var(--mx-border)] px-1.5 py-0.5 text-[10px] transition-colors hover:bg-[var(--mx-hover-bg)]"
+                >
+                  {t("codexpane.cliUpdateDismiss")}
+                </button>
+              </div>
+            )}
+            {repeatBadge.active && (
+              <div className="mb-1.5 flex items-center gap-2 px-1 text-[#fbbf24]" style={{ fontSize: statusFontPx }}>
+                <span aria-hidden className="h-1.5 w-1.5 animate-pulse rounded-full bg-[#fbbf24]" />
+                <span>{t("codexpane.repeatLoopActive")}</span>
+                <button
+                  type="button"
+                  onMouseDown={(e) => e.stopPropagation()}
+                  onClick={repeatBadge.stop}
+                  className="rounded bg-[var(--mx-border)] px-1.5 py-0.5 text-[10px] transition-colors hover:bg-[var(--mx-hover-bg)]"
+                >
+                  {t("codexpane.repeatLoopStop")}
+                </button>
+              </div>
+            )}
             {busy && (
               <div
                 className="mb-1.5 flex items-center gap-2 px-1 text-[var(--mx-muted)]"
@@ -1630,6 +1738,11 @@ export function CodexPane(props: CodexPaneProps) {
               const title = cmd
                 ? cmd.split("\n")[0].slice(0, 120)
                 : reason || pa.method || t("codexpane.approvalTitle");
+              // 指挥台代批判定级(与 ClaudePane 同款;codex 侧 requestId = 审批 key):
+              // deny 红边+高危条,confirm 琥珀条,auto 蓝条活秒倒计时(宽限代批)。
+              // i18n 复用 claudepane.* key(文案本身不含 claude 字样,双端同口径)。
+              const verdict = conductorVerdicts.get(pa.key);
+              const danger = verdict?.level === "deny";
               const approvalRequest: InteractiveRequest = {
                 kind: "approval",
                 id: pa.key,
@@ -1654,13 +1767,49 @@ export function CodexPane(props: CodexPaneProps) {
                 }],
               };
               return (
-                <div className="mx-dock-in mb-1.5">
+                <div
+                  className={`mx-dock-in mb-1.5 rounded-[var(--mx-radius)] ${
+                    danger ? "border border-[#ef444466]" : ""
+                  }`}
+                >
+                  {verdict && verdict.level !== "auto" && (
+                    <div
+                      className={`mx-chip mb-1 px-2 py-1 text-[11px] ${
+                        danger
+                          ? "bg-[#ef44441a] text-[#ef4444]"
+                          : "bg-[#f59e0b1a] text-[#f59e0b]"
+                      }`}
+                    >
+                      {danger ? t("claudepane.conductorDanger") : t("claudepane.conductorConfirm")}
+                      {verdict.reason ? ` · ${verdict.reason}` : ""}
+                    </div>
+                  )}
+                  {verdict?.level === "auto" && (
+                    /* 宽限倒计时(活秒递减,与 ClaudePane 同款):receivedAt + delayMs 算
+                        剩余,hook 500ms 心跳驱动重渲染实时走;到点后端已放行(app-server
+                        回 accept),短暂显示「已自动批准」等卡被流冲走。 */
+                    (() => {
+                      const remainMs = verdict.receivedAt + (verdict.delayMs ?? 5_000) - Date.now();
+                      return (
+                        <div className="mx-chip mb-1 px-2 py-1 text-[11px] bg-[#3b82f61a] text-[#3b82f6] tabular-nums">
+                          {remainMs > 0
+                            ? t("claudepane.conductorAuto", { s: Math.ceil(remainMs / 1000) })
+                            : t("claudepane.conductorAutoDone")}
+                        </div>
+                      );
+                    })()
+                  )}
                   <InteractivePanel
                     request={approvalRequest}
                     t={t}
                     noAutoFocus
                     onAnswer={(ans) => {
                       if (ans.kind !== "approval") return;
+                      // 人手动接管:撤销指挥台 auto 宽限代批(fire-and-forget,
+                      // confirm/deny 不在 auto_pending,调用无害返回 false)。
+                      if (verdict) {
+                        void invoke("conductor_auto_approve_cancel", { requestId: pa.key }).catch(() => {});
+                      }
                       const transport = getCodexTransportRef.current(activeTabId);
                       void transport.respondApproval(pa.key, ans.decision !== "deny");
                     }}
@@ -1678,6 +1827,27 @@ export function CodexPane(props: CodexPaneProps) {
                 </div>
               );
             })()}
+            {/* 宽限代批落定留痕(与 ClaudePane 同款):到点自动放行的审批挂淡绿幽灵行
+                (后端 conductor-auto-approved 驱动,tabId 过滤与 provider 无关),卡消失
+                后仍能看到批了什么,60s 淡出、上限 5 条。 */}
+            {conductorAutoGhosts.length > 0 && (
+              <div className="mb-1.5 flex flex-col gap-1">
+                {conductorAutoGhosts.map((g) => (
+                  <div
+                    key={g.requestId}
+                    className="mx-chip mx-dock-in flex items-center gap-1.5 border border-[#22c55e2e] bg-[#22c55e0d] px-2 py-1 text-[11px] text-[var(--mx-muted)]"
+                    title={g.summary}
+                  >
+                    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#22c55e" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden className="shrink-0">
+                      <path d="M20 6 9 17l-5-5" />
+                    </svg>
+                    <span className="shrink-0">{t("claudepane.conductorAutoDone")}</span>
+                    <span className="shrink-0 font-medium text-[var(--mx-text)]">{g.toolName}</span>
+                    {g.summary && <span className="min-w-0 flex-1 truncate">{g.summary}</span>}
+                  </div>
+                ))}
+              </div>
+            )}
             {codexMissing ? (
               /* 未安装提示卡片。 */
               <div className="mx-chip flex flex-col gap-2 border border-[var(--mx-danger-border)] bg-[var(--mx-danger-bg)] px-3 py-3 text-[11px] text-[var(--mx-text)]">
@@ -1853,7 +2023,15 @@ export function CodexPane(props: CodexPaneProps) {
                       style={{ fontSize: statusFontPx }}
                     >
                       {state?.terminatedReason ? (
-                        <span className="shrink-0 text-[var(--mx-danger)]">{t("codexpane.terminated")}</span>
+                        <span
+                          className="max-w-[420px] shrink-0 truncate text-[var(--mx-danger)]"
+                          title={state.terminatedReason}
+                        >
+                          {t("codexpane.terminated")}
+                          {state.terminatedReason === "exit"
+                            ? `: ${t("codexpane.terminatedExit")}`
+                            : `: ${state.terminatedReason}`}
+                        </span>
                       ) : null}
                       {/* sandbox 策略:点击切换,Shift+Tab 循环。 */}
                       <Popover open={menuMode === "sandbox"} onOpenChange={(o) => setMenuMode(o ? "sandbox" : null)}>
@@ -1955,11 +2133,13 @@ export function CodexPane(props: CodexPaneProps) {
                           </PopoverContent>
                         )}
                       </Popover>
-                      {/* model:点击上拉选择器(生效供应商 models[] 优先,退全局 catalog;选中下轮生效)。 */}
+                      {/* model:点击上拉选择器(有本地供应商配置走分组形态,per-tab 切换;否则
+                          生效供应商 models[] 优先,退全局 catalog;选中下轮生效)。 */}
                       <Popover open={menuMode === "model"} onOpenChange={(o) => {
                         setMenuMode(o ? "model" : null);
                         if (!o) return;
-                        // 每次打开:实时拉模型目录 + 检测 codex 配置变化(切供应商)。
+                        // 每次打开:刷新供应商列表/全局生效家 + 实时拉模型目录 + 检测配置变化。
+                        refreshProviders();
                         void loadModelCatalog().then((list) => {
                           setAvailableModels(list);
                           // 顺带回填当前 model 的 contextWindow(ctx 显示)。
@@ -1994,9 +2174,80 @@ export function CodexPane(props: CodexPaneProps) {
                             {/* 当前模型行(仿 claude /model)。 */}
                             <div className="flex items-center gap-2 rounded px-2 py-1.5 text-[var(--mx-text)]">
                               <span className="w-14 shrink-0 font-mono text-[10px] font-semibold text-[var(--mx-accent)]">{t("codexpane.modelCurrent")}</span>
-                              <span className="flex-1 truncate font-mono text-[11px]" title={model ?? ""}>{model ?? "-"}</span>
+                              <span className="flex-1 truncate font-mono text-[11px]" title={activeModelName || model || ""}>{activeModelName || model || "-"}</span>
                             </div>
                             <div className="mx-1 mb-1 border-t border-[var(--mx-border)]" />
+                            {providers.length > 0 ? (
+                              /* 供应商分组形态:一级目录=设置里配置的供应商(生效家组头 accent 标记),
+                                 组内只列已配置的模型;点模型=本 tab override 到该供应商+模型(只切
+                                 本 tab,下轮生效)。override 中顶部提供「跟随全局」出口(清 override
+                                 + 模型回 config.toml 默认)。 */
+                              <div className="mx-scroll-pretty max-h-[min(50vh,360px)] overflow-y-auto">
+                                {tabCodexProviderId && (
+                                  <button
+                                    type="button"
+                                    onMouseDown={(e) => e.stopPropagation()}
+                                    onClick={clearProviderOverride}
+                                    className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[var(--mx-muted)] transition-colors hover:bg-[var(--mx-hover-bg)] hover:text-[var(--mx-text)]"
+                                  >
+                                    <span className="flex-1 truncate text-[11px]">{t("codexpane.providerFollowGlobal")}</span>
+                                    <svg className="h-3 w-3 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" aria-hidden>
+                                      <path d="M3 12a9 9 0 1015.5-6.4L21 8" />
+                                      <path d="M21 3v5h-5" />
+                                    </svg>
+                                  </button>
+                                )}
+                                {providers.map((p) => {
+                                  const groupActive =
+                                    tabCodexProviderId === p.id ||
+                                    (!tabCodexProviderId && activeGlobalProviderId === p.id);
+                                  const models = p.models ?? [];
+                                  return (
+                                    <div key={p.id}>
+                                      <div
+                                        className={`flex items-center gap-1.5 px-2 pb-0.5 pt-2 text-[10px] font-semibold uppercase tracking-wide ${
+                                          groupActive ? "text-[var(--mx-accent)]" : "text-[var(--mx-faint)]"
+                                        }`}
+                                        title={p.baseUrl}
+                                      >
+                                        <span className="min-w-0 flex-1 truncate">{p.name}</span>
+                                        {groupActive && <span aria-hidden>●</span>}
+                                      </div>
+                                      {models.length === 0 ? (
+                                        <div className="px-2 py-1 text-[10px] text-[var(--mx-faint)]">
+                                          {t("codexpane.providerNoModels")}
+                                        </div>
+                                      ) : (
+                                        models.map((m) => {
+                                          const active = groupActive && m.id === activeModelName;
+                                          return (
+                                            <button
+                                              key={m.id}
+                                              type="button"
+                                              onMouseDown={(e) => e.stopPropagation()}
+                                              onClick={() => applyProviderModel(p, m.id)}
+                                              className={`flex w-full items-center gap-2 rounded px-2 py-1.5 text-left transition-colors ${
+                                                active
+                                                  ? "bg-[var(--mx-selected-bg)] text-[var(--mx-text)]"
+                                                  : "text-[var(--mx-muted)] hover:bg-[var(--mx-hover-bg)] hover:text-[var(--mx-text)]"
+                                              }`}
+                                            >
+                                              <span className="flex-1 truncate font-mono text-[11px] font-semibold" title={m.displayName || m.id}>{m.displayName || m.id}</span>
+                                              {active && (
+                                                <svg className="h-3 w-3 shrink-0 text-[var(--mx-accent)]" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" aria-hidden>
+                                                  <path d="M5 13l4 4L19 7" />
+                                                </svg>
+                                              )}
+                                            </button>
+                                          );
+                                        })
+                                      )}
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            ) : (
+                            <>
                             {/* 恢复默认(不传 -m,用 config.toml 默认)。 */}
                             <button
                               type="button"
@@ -2039,6 +2290,8 @@ export function CodexPane(props: CodexPaneProps) {
                                   </button>
                                 );
                               })
+                            )}
+                            </>
                             )}
                           </PopoverContent>
                         )}
@@ -2666,7 +2919,7 @@ function BlockView({
         </summary>
         <div className="mt-1.5 pl-[18px]">
           <div className="whitespace-pre-wrap break-words text-xs italic leading-relaxed text-[var(--mx-muted)]">
-            {block.text}
+            <PathAwareText text={block.text} />
           </div>
         </div>
       </details>

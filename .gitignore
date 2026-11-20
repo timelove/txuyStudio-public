@@ -44,3 +44,7 @@ relay/relay.exe~
 
 # flutter build kotlin 编译临时文件
 companion/app/android/.kotlin/
+.work/spikes/.claude-env-test/
+
+# OPC 大赛报名材料（不入仓）
+.work/.opc/

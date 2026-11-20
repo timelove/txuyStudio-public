@@ -1,5 +1,6 @@
 mod claude;
 mod codex;
+mod conductor;
 mod filetree;
 mod fleet;
 mod providers;
@@ -8,13 +9,14 @@ mod relay;
 mod shell_run;
 mod state;
 mod system;
+mod updater;
 mod windows;
 
 use claude::providers_mirror::save_providers_snapshot;
 use claude::commands::{
     claude_settings_changed, exec_claude_tool_local, fork_claude_session, get_claude_config_path,
     get_claude_session_model, interrupt_claude_turn, kill_claude, list_claude_catalog_models,
-    list_claude_models,
+    list_claude_models, stop_claude_task,
     read_claude_history_events, read_claude_settings_env, request_claude_context_usage,
     respond_claude_permission, send_claude_message, set_claude_model, start_claude_session,
     write_claude_settings_env,
@@ -26,11 +28,11 @@ use codex::commands::{
     send_codex_message, set_codex_session_model,
 };
 use codex::CodexRegistry;
-use filetree::commands::{ensure_dir, list_dir, list_files, read_file, start_fs_watch, stop_fs_watch, write_file};
+use filetree::commands::{ensure_dir, list_dir, list_files, read_file, resolve_local_paths, start_fs_watch, stop_fs_watch, write_file};
 use filetree::FsWatcherRegistry;
 use fleet::commands::{
-    create_fleet_worker, list_fleet_workers, merge_fleet_worker, preview_fleet_merge,
-    remove_fleet_worker, set_fleet_worker_tab,
+    create_fleet_worker, list_external_worktrees, list_fleet_workers, merge_fleet_worker,
+    preview_fleet_merge, remove_external_worktree, remove_fleet_worker, set_fleet_worker_tab,
 };
 use log::LevelFilter;
 use providers::balance::query_provider_balance;
@@ -46,7 +48,7 @@ use state::commands::{
     set_terminal_font_size, set_theme,
 };
 use system::commands::{
-    check_commands_installed, check_dev_environment, delete_ai_cli_session,
+    check_cli_update, check_commands_installed, check_dev_environment, delete_ai_cli_session,
     fix_defender_exclusions, get_ai_cli_session_messages, get_git_branch, get_perf_stats,
     get_system_memory, list_ai_cli_providers, list_ai_cli_sessions, list_usage_rollups, list_ai_activity,
     reveal_in_folder,
@@ -277,6 +279,9 @@ fn shutdown_all(app: &tauri::AppHandle) {
     app.state::<CodexRegistry>().kill_all_blocking();
     app.state::<ShellRunRegistry>().kill_all_blocking();
     app.state::<FsWatcherRegistry>().stop_all();
+    // 实况记录兜底 flush:30s 防抖窗口内的拍/XP 在此同步落盘(同步执行,
+    // ExitRequested 后没有异步机会)。
+    conductor::flush_stage_on_exit(app);
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -297,6 +302,23 @@ pub fn run() {
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 let label = window.label();
+                // 指挥窗关闭 = 隐藏(封层管理):常驻监控不随窗口开关中断,顶栏入口随时重开。
+                // 不触发确认/归档/子进程回收(conductor 无自有子进程)。
+                if label == conductor::CONDUCTOR_WINDOW_LABEL {
+                    api.prevent_close();
+                    conductor::persist_bounds_on_close(window.app_handle(), window);
+                    let _ = window.hide();
+                    log::info!("conductor window close requested: hidden (monitoring continues)");
+                    return;
+                }
+                // Agent 实况独立窗同口径:关闭 = 隐藏(2026-11-19),无自有子进程。
+                if label == conductor::STAGE_WINDOW_LABEL {
+                    api.prevent_close();
+                    conductor::persist_stage_bounds_on_close(window.app_handle(), window);
+                    let _ = window.hide();
+                    log::info!("agent-stage window close requested: hidden");
+                    return;
+                }
                 // 关闭确认(手抖保护):有关联项目的窗口且未被偏好/票据豁免 → 阻止本次
                 // 关闭,emit 让前端弹确认;用户确认后走 confirm_close_window(票据放行,
                 // 归档/回收逻辑在放行路径照常执行)。空白工作台/勾过「不再提示」直接放行。
@@ -322,6 +344,10 @@ pub fn run() {
                 if label == "main" {
                     windows::persist_main_bounds_on_close(window.app_handle(), window);
                 }
+                // 放行关闭后:若剩下的只有隐藏指挥窗 → 销毁它放行应用退出。ExitRequested
+                // {code:None} 只在「全部窗口关闭」时触发,隐藏窗一直占着窗口数会导致
+                // 关掉所有工作窗口后应用不退( conductor 无未保存态,直接销毁无损)。
+                conductor::destroy_if_last(window.app_handle(), label);
             }
         })
         .setup(|app| {
@@ -383,6 +409,10 @@ pub fn run() {
             // AI 事件总线:把本地 claude-event/codex-event 转投 broadcast,供中继转发给手机。
             // 必须早于 relay 任务启动(任务一上线就订阅)。
             relay::bus::install(app.handle());
+
+            // Conductor(全局指挥)规则层:manage ConductorState + AiBus 订阅 watcher。
+            // 必须晚于 bus::install(watcher 订阅 AiBus)。
+            conductor::install(app.handle());
 
             // 注册「已 show 窗口」记录集(供 show_window 命令 + 兜底定时器去重)。
             app.manage(WindowsShown(Mutex::new(HashSet::new())));
@@ -467,6 +497,8 @@ pub fn run() {
             exec_claude_tool_local,
             send_claude_message,
             interrupt_claude_turn,
+            // 停止单个后台任务(control_request stop_task,零延迟直停;取代借道消息的排队方案)
+            stop_claude_task,
             request_claude_context_usage,
             respond_claude_permission,
             get_claude_config_path,
@@ -528,15 +560,58 @@ pub fn run() {
             merge_fleet_worker,
             remove_fleet_worker,
             set_fleet_worker_tab,
+            // 外部 worktree(`-fleet/` 目录下无记录的,如其他 AI 会话建的):列出/删除
+            list_external_worktrees,
+            remove_external_worktree,
             // 独立项目窗口(阶段 4:右击项目「在新窗口打开」)
             open_project_window,
             close_project_window,
             // 空白工作台窗口(多主窗口:+ 菜单「新窗口」,项目按窗口归属隔离)
             open_new_workspace_window,
+            // Conductor(全局指挥)规则层:状态卡快照(含 ack)/指挥窗开关/bounds 持久化
+            conductor::commands::conductor_snapshot,
+            conductor::commands::conductor_tool_beats,
+            conductor::commands::open_conductor_window,
+            conductor::commands::save_conductor_window_bounds,
+            // Agent 实况独立窗(2026-11-19):开关 + bounds 持久化(落 conductor.json stage_bounds)
+            conductor::commands::open_stage_window,
+            conductor::commands::save_stage_window_bounds,
+            // Conductor P1:驿站(增/路由/投递/移除)+ 决策卡三动作 + 大脑手动触发 + 配置读写
+            conductor::commands::conductor_inbox_add,
+            conductor::commands::conductor_inbox_route,
+            conductor::commands::conductor_inbox_dispatch,
+            conductor::commands::conductor_inbox_requeue,
+            conductor::commands::conductor_inbox_set_repeat,
+            conductor::commands::conductor_inbox_remove,
+            conductor::commands::conductor_decision_respond,
+            conductor::commands::conductor_decision_remove,
+            conductor::commands::conductor_task_cancel,
+            // 项目级指挥台开关(2026-11-16):静音项目的会话事件不进感知链
+            conductor::commands::conductor_project_mute,
+            conductor::commands::conductor_dispatch_accept,
+            conductor::commands::conductor_dispatch_send,
+            conductor::commands::conductor_auto_approve_cancel,
+            conductor::commands::conductor_plan_create,
+            conductor::commands::conductor_plan_control,
+            conductor::commands::conductor_plan_remove,
+            conductor::commands::conductor_plan_retry,
+            conductor::commands::conductor_memory_add,
+            conductor::commands::conductor_memory_confirm,
+            conductor::commands::conductor_memory_delete,
+            conductor::commands::conductor_memory_import_seed,
+            conductor::commands::conductor_suggest_now,
+            conductor::commands::conductor_config_get,
+            conductor::commands::conductor_config_set,
+            // 大脑端点独立配置(2026-11-13):拉模型目录(url/token 未保存也能试)
+            conductor::commands::conductor_brain_probe,
+            // prompt 技艺文件(2026-11-18):拆步/验收 system prompt 外置可编辑
+            conductor::commands::conductor_prompt_open,
+            conductor::commands::conductor_prompt_reset,
             // 系统环境查询（内存占用 + git 分支 + 命令安装检测 + AI CLI 会话列表/删除/消息流/provider 注册表）
             get_system_memory,
             get_perf_stats,
             get_git_branch,
+            check_cli_update,
             check_commands_installed,
             list_ai_cli_providers,
             list_ai_cli_sessions,
@@ -553,11 +628,16 @@ pub fn run() {
             list_dir,
             list_files,
             read_file,
+            // 会话流文件链接:路径候选批量存在性探测(标蓝判定;reveal 走 system::reveal_in_folder)
+            resolve_local_paths,
             start_fs_watch,
             stop_fs_watch,
             write_file,
             // 笔记 pane:首次建笔记时创建 notes/ 目录(write_file 不建父目录)。
-            ensure_dir
+            ensure_dir,
+            // 应用更新(自定义更新源:设置填 MinIO base URL 即切自有源,空 = GitHub 默认)
+            updater::check_for_updates,
+            updater::download_and_install_update,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

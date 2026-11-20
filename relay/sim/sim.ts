@@ -172,7 +172,7 @@ async function main() {
 
   // ---------- v2 账密登录场景 ----------
   // 前置:先建测试用户 —— relay -adduser simtest -password simpass123
-  const HTTP = "http://127.0.0.1:8787";
+  // (HTTP 用文件顶部全局常量;此前此处重复声明过局部 const,与 main 开头的引用构成 TDZ)
   console.log("场景9: 账密登录 → session token hello");
   let sessionOk = false;
   {

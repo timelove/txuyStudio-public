@@ -1,7 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import type { FleetWorkerView } from "../domain/fleet";
-import { listFleetWorkers, previewFleetMerge, mergeFleetWorker, removeFleetWorker } from "../domain/fleet";
+import type { FleetWorkerView, ExternalWorktree } from "../domain/fleet";
+import {
+  listFleetWorkers,
+  listExternalWorktrees,
+  previewFleetMerge,
+  mergeFleetWorker,
+  removeFleetWorker,
+  removeExternalWorktree,
+} from "../domain/fleet";
 import type { ClaudeStatusEntry } from "../domain/claudeStatusRegistry";
 import type { CodexStatusEntry } from "../domain/codexStatusRegistry";
 import type { ClaudeSessionKind } from "../domain/claudeStream";
@@ -44,7 +51,10 @@ export function FleetPanel({
 }) {
   const { t } = useTranslation();
   const [workers, setWorkers] = useState<FleetWorkerView[] | null>(null);
+  /** 外部 worktree(`-fleet/` 目录下无记录的)独立一节,失败静默空(不影响主列表)。 */
+  const [external, setExternal] = useState<ExternalWorktree[] | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null); // 正在执行合并/丢弃的 worker id
+  const [removingExt, setRemovingExt] = useState<string | null>(null); // 正在删除的外部 worktree 路径
   const [actionError, setActionError] = useState<string | null>(null);
   /** 合并预览中(点「合并」→ 拉 preview → 弹确认 Dialog)。worker = 待合并对象。 */
   const [mergeTarget, setMergeTarget] = useState<FleetWorkerView | null>(null);
@@ -69,6 +79,15 @@ export function FleetPanel({
           if (!aliveRef.current) return;
           setWorkers(null);
           onWorkersChange?.(0);
+        });
+      listExternalWorktrees(projectId)
+        .then((xs) => {
+          if (!aliveRef.current) return;
+          setExternal(xs);
+        })
+        .catch(() => {
+          if (!aliveRef.current) return;
+          setExternal(null);
         });
     };
     refresh();
@@ -205,6 +224,32 @@ export function FleetPanel({
     }
   };
 
+  // 删除外部 worktree(无 worker 记录的 `-fleet/` 目录残留):confirm 后删目录 + fleet/ 分支。
+  const handleRemoveExt = async (w: ExternalWorktree) => {
+    if (!window.confirm(t("fleet.panel.removeExternalConfirm"))) return;
+    setRemovingExt(w.worktreePath);
+    setActionError(null);
+    try {
+      await removeExternalWorktree(projectId, w.worktreePath, w.branch);
+      listFleetWorkers(projectId)
+        .then((ws) => {
+          if (!aliveRef.current) return;
+          setWorkers(ws);
+          onWorkersChange?.(ws.length);
+        })
+        .catch(() => {});
+      listExternalWorktrees(projectId)
+        .then((xs) => {
+          if (!aliveRef.current) return;
+          setExternal(xs);
+        })
+        .catch(() => {});
+    } catch (e) {
+      setActionError(String(e));
+    } finally {
+      setRemovingExt(null);
+    }
+  };
   return (
     <div className="w-[380px] max-w-[92vw] px-3 py-2">
       {/* 标题行 */}
@@ -275,7 +320,7 @@ export function FleetPanel({
                 </div>
                 {/* 行 2:分支 + ±行数 + 操作 */}
                 <div className="mt-1 flex items-center gap-2 text-[10px] text-[var(--mx-faint)]">
-                  <span className="min-w-0 truncate font-mono">⎇ {w.branch}</span>
+                  <span className="min-w-0 truncate font-mono" title={w.branch}>⎇ {w.branch}</span>
                   {w.changedFiles > 0 && (
                     <span className="shrink-0 tabular-nums">
                       <span className="text-[var(--mx-success-bright)]">+{w.addedLines}</span>
@@ -292,7 +337,7 @@ export function FleetPanel({
                     <Button
                       size="xs"
                       variant="outline"
-                      disabled={busy || busyId === w.id}
+                      disabled={busyId === w.id}
                       onClick={() => startMerge(w)}
                     >
                       {t("fleet.panel.merge")}
@@ -319,6 +364,56 @@ export function FleetPanel({
         </div>
       )}
 
+      {/* 外部 worktree(`-fleet/` 目录下无记录的残留):只提供删除,不参与合并 */}
+      {external && external.length > 0 && (
+        <div className="mt-2">
+          <div className="text-[11px] font-semibold uppercase tracking-wide text-[var(--mx-faint)]">
+            {t("fleet.panel.externalTitle")}
+          </div>
+          <div className="mt-1 flex flex-col gap-1.5">
+            {external.map((w) => (
+              <div
+                key={w.worktreePath}
+                className="rounded-[var(--mx-radius-md)] border border-[var(--mx-border)] bg-[var(--mx-surface-2)] px-2.5 py-1.5"
+              >
+                <div className="flex items-center gap-2">
+                  <span className="min-w-0 truncate font-mono text-[12px] text-[var(--mx-text)]">
+                    {w.name}
+                  </span>
+                  <span className="shrink-0 rounded border border-[var(--mx-border)] px-1 text-[9px] text-[var(--mx-faint)]">
+                    {t("fleet.panel.externalBadge")}
+                  </span>
+                  <span className="ml-auto shrink-0 tabular-nums text-[10px] text-[var(--mx-faint)]">
+                    {t("fleet.panel.changed", { n: w.changedFiles })}
+                  </span>
+                </div>
+                <div className="mt-1 flex items-center gap-2 text-[10px] text-[var(--mx-faint)]">
+                  <span className="min-w-0 truncate font-mono" title={w.branch ?? undefined}>
+                    ⎇ {w.branch ?? t("fleet.panel.detached")}
+                  </span>
+                  {w.changedFiles > 0 && (
+                    <span className="shrink-0 tabular-nums">
+                      <span className="text-[var(--mx-success-bright)]">+{w.addedLines}</span>
+                      {" / "}
+                      <span className="text-[var(--mx-danger)]">−{w.removedLines}</span>
+                    </span>
+                  )}
+                  <span className="ml-auto shrink-0">
+                    <Button
+                      size="xs"
+                      variant="danger"
+                      disabled={removingExt === w.worktreePath}
+                      onClick={() => void handleRemoveExt(w)}
+                    >
+                      {t("fleet.panel.remove")}
+                    </Button>
+                  </span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
       {/* 操作错误内联(合并/丢弃的 Err,含旧 git 不支持 merge-tree 的降级提示) */}
       {actionError && (
         <div className="mt-2 whitespace-pre-wrap break-words text-[11px] text-[var(--mx-danger)]">

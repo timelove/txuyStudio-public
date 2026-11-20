@@ -72,8 +72,15 @@ fn server_request_key(id: &Value) -> String {
 }
 
 /// registry 里 ensure 一个空白 session(不存在则建;长进程字段全默认)。返回是否新建。
-/// 只做 map 结构操作,不 spawn(调用方随后走 ensure_app_server)。
-fn ensure_session_entry(state: &tauri::State<'_, CodexRegistry>, project_id: &str, tab_id: &str) -> Result<bool, String> {
+/// 只做 map 结构操作,不 spawn(调用方随后走 ensure_app_server)。新建时把 per-tab 供应商
+/// override 快照一并初始化——首条消息即带 override 的 tab 不会在 send 的 3.5 变化检测里
+/// 误判「快照不同」白白重拉一次。
+fn ensure_session_entry(
+    state: &tauri::State<'_, CodexRegistry>,
+    project_id: &str,
+    tab_id: &str,
+    overrides: Option<&std::collections::BTreeMap<String, String>>,
+) -> Result<bool, String> {
     let mut by_project = state.by_project.lock().map_err(|e| e.to_string())?;
     let sessions = by_project.entry(project_id.to_string()).or_default();
     if sessions.contains_key(tab_id) {
@@ -94,6 +101,7 @@ fn ensure_session_entry(state: &tauri::State<'_, CodexRegistry>, project_id: &st
             status: Arc::new(Mutex::new(CodexStatus::Idle)),
             model: Mutex::new(None),
             config_hash: Mutex::new(None),
+            provider_overrides: Mutex::new(overrides.cloned()),
             killed: Arc::new(AtomicBool::new(false)),
         },
     );
@@ -103,14 +111,20 @@ fn ensure_session_entry(state: &tauri::State<'_, CodexRegistry>, project_id: &st
 /// 确保 (project, tab) 的 app-server 长进程就绪:已就绪直接返回 Ok(false);未启动/已死则
 /// spawn → 起读循环 → initialize → 置 initialized,返回 Ok(true)(= 本次新拉起,调用方
 /// 据此决定是否要 `thread/resume` 既有 live id——新进程不认识旧 thread id,必须 resume)。
+///
+/// `overrides`:per-tab 供应商 override 的 `-c` 覆盖集合(None=跟随全局 config.toml)。
+/// spawn 时逐键拼 `-c key="value"`(值按 TOML 解析,字符串需引号;反斜杠/双引号转义),
+/// 点路径覆盖压过 config.toml——app-server 启动时读一次配置,override 集合变化由调用方
+/// (send_codex_message)检测后杀进程重拉生效。
 pub async fn ensure_app_server(
     app: &AppHandle,
     state: &tauri::State<'_, CodexRegistry>,
     project_id: &str,
     tab_id: &str,
     cwd: Option<&std::path::Path>,
+    overrides: Option<&std::collections::BTreeMap<String, String>>,
 ) -> Result<bool, String> {
-    ensure_session_entry(state, project_id, tab_id)?;
+    ensure_session_entry(state, project_id, tab_id, overrides)?;
 
     // 快路径:进程活着(initialized 且 killed=false)直接返回。
     {
@@ -158,6 +172,14 @@ pub async fn ensure_app_server(
         }
     };
     cmd.arg("app-server");
+    // per-tab 供应商 override:-c 点路径覆盖(如 model_provider="txuy-x" +
+    // model_providers.txuy-x.base_url=…),与全局 config.toml 正交。
+    if let Some(ov) = overrides {
+        for (k, v) in ov {
+            let escaped = v.replace('\\', "\\\\").replace('"', "\\\"");
+            cmd.arg("-c").arg(format!("{k}=\"{escaped}\""));
+        }
+    }
     if let Some(p) = cwd {
         cmd.current_dir(p);
     }

@@ -64,13 +64,9 @@ class _ChatPageState extends State<ChatPage> {
   /// 「同步中」pill 告知正在拉新(2026-11-10 用户要求:静默刷新要有可见状态)。
   bool _syncing = false;
 
-  /// 待中断的后台任务(busy 时在任务列表点中断先入队,回 idle 后合并一条系统指令
-  /// 发出)。与桌面 ClaudePane 的 pendingKillTasks 同机制:CLI 控制协议没有单任务
-  /// kill(interrupt 连坐全停),借道模型层 TaskStop 工具,见 `_sendKillTasks`。
-  final List<Map<String, String>> _pendingKillTasks = [];
-  /// 已发出停止指令、等快照确认的任务 id(idle 直发 + 排队合并发送都记)。
-  /// TaskStop 借道模型层 ~数秒生效,期间任务仍在列表——弹层里标「停止中」+ 顶部
-  /// pill 提示,否则「点了取消但还显示」以为没点上。任务从快照消失即撤销。
+  /// 已发出 stop_task 控制帧、等快照确认的任务 id。控制帧零延迟直停(不产生对话
+  /// 消息、不受 busy 拦),但任务从 backgroundTasks 快照消失仍需一次回流——弹层里
+  /// 标「停止中」,否则「点了取消但还显示」以为没点上。任务消失即撤销。
   final Set<String> _killIssued = {};
 
   /// 断线横幅防抖(2026-11-10):offline 不立刻亮横幅,持续断线超过阈值才提示——
@@ -332,8 +328,6 @@ class _ChatPageState extends State<ChatPage> {
           _claudeMode = status.permissionMode;
         }
       });
-      // 状态校准完冲一次杀任务队列:busy 期间点的中断,回 idle 后在这里落地。
-      _maybeFlushPendingKills();
     } catch (e) {
       if (mounted && !quiet) setState(() => _error = "$e");
     }
@@ -445,8 +439,7 @@ class _ChatPageState extends State<ChatPage> {
     await _sendText(text);
   }
 
-  /// 发送一条已 trim 非空的文本。消息与「后台任务中断」(借道 TaskStop 系统指令,
-  /// 见 `_sendKillTasks`)共用这条路径,行为与用户手打消息完全一致。
+  /// 发送一条已 trim 非空的文本,行为与用户手打消息完全一致。
   Future<void> _sendText(String text) async {
     if (_sending) return;
     // id 随请求发给桌面端:后端回显 user 事件时带上同一个 id,本机 `_applyUser` 的
@@ -493,6 +486,19 @@ class _ChatPageState extends State<ChatPage> {
 
   Future<void> _stop() async {
     try {
+      // 停止 = **全停**:先停全部后台任务(stop_task 控制帧),再中断主轮(2026-11-12
+      // 用户定调,与桌面 ESC 同语义;单任务停止按钮不连坐,interrupt 仍全停)。
+      // 并发发请求(公网串行 round-trip 太慢);单个失败吞掉,主轮中断才是硬保证。
+      final bgTasks = List.of(_stream.backgroundTasks);
+      if (bgTasks.isNotEmpty) {
+        await Future.wait(bgTasks.map((t) => widget.client
+            .request("chat.stopTask", {
+              "projectId": widget.projectId,
+              "tabId": widget.tabId,
+              "taskId": t["taskId"] ?? "",
+            })
+            .catchError((Object e) => <String, dynamic>{})));
+      }
       await widget.client.request("chat.interrupt", {
         "projectId": widget.projectId,
         "tabId": widget.tabId,
@@ -504,54 +510,28 @@ class _ChatPageState extends State<ChatPage> {
     // 否则中断失败(例如后端正在启动)时会误显「空闲」而实际还在跑。
   }
 
-  /// 任务列表逐条中断(弹层行按钮):关弹层 → busy 入队 / idle 直发。
+  /// 任务列表逐条停止(弹层行按钮):关弹层 → 直发 `chat.stopTask`(relay 直调桌面端
+  /// stop_claude_task,control_request stop_task 控制帧,CLI 内核零延迟直停——不产生
+  /// 对话消息、不占轮、不受 busy 拦)。取代旧「借道模型层发 TaskStop 系统指令」
+  /// (busy 排队 + 回 idle flush 的整套机制随之退役,2026-11-12)。
   void _killBgTask(Map<String, String> task) {
     Navigator.pop(context);
-    if (_busy || _sending) {
-      // 已有同任务在队列就不重复塞(连点两下 = 一条指令里出现两次,模型会困惑)。
-      setState(() {
-        if (!_pendingKillTasks.any((t) => t["taskId"] == task["taskId"])) {
-          _pendingKillTasks.add(task);
-        }
-      });
-      _toast("本轮运行中,中断指令已排队(本轮结束后自动执行)");
-      return;
-    }
-    setState(() => _killIssued.add(task["taskId"] ?? ""));
-    _sendKillTasks([task]);
-    _toast("停止指令已发送,任务约数秒后消失");
+    final taskId = task["taskId"] ?? "";
+    setState(() => _killIssued.add(taskId));
+    () async {
+      try {
+        await widget.client.request("chat.stopTask", {
+          "projectId": widget.projectId,
+          "tabId": widget.tabId,
+          "taskId": taskId,
+        });
+      } catch (e) {
+        if (mounted) _toast("停止失败: $e");
+      }
+    }();
   }
 
-  /// 合并发送 TaskStop 系统指令,借道模型层工具停后台任务(桌面 ClaudePane 同款:
-  /// CLI 控制协议无单任务 kill,interrupt 会连坐全停)。文案与桌面 i18n
-  /// killTaskMsg/killTaskQueuedMsg **逐字一致**,模型端才认得这个系统操作前缀。
-  Future<void> _sendKillTasks(List<Map<String, String>> tasks) async {
-    final id = tasks.first["taskId"] ?? "";
-    final desc = tasks.first["description"] ?? "";
-    final text = tasks.length == 1
-        ? "[txuyStudio 系统操作] 请立即调用 TaskStop 工具停止后台任务 $id($desc),完成后仅回复 ok,不要做任何其他事。"
-        : "[txuyStudio 系统操作] 请依次调用 TaskStop 工具停止以下后台任务:"
-            "${tasks.map((t) => "${t["description"]?.isNotEmpty == true ? t["description"] : t["taskId"]}(${t["taskId"]})").join("、")}"
-            ",完成后仅回复 ok,不要做任何其他事。";
-    await _sendText(text);
-  }
-
-  /// 回 idle 后冲队列(8s 轮询的 _refreshStatus 末尾调用)。发前按快照过滤已
-  /// 自然结束的任务(等一轮的时间足够任务自己跑完);全没了就不发。
-  void _maybeFlushPendingKills() {
-    if (_pendingKillTasks.isEmpty || _busy || _sending) return;
-    final alive = _pendingKillTasks
-        .where((t) => _stream.backgroundTasks.any((b) => b["taskId"] == t["taskId"]))
-        .toList();
-    _pendingKillTasks.clear();
-    if (alive.isEmpty) return;
-    for (final t in alive) {
-      _killIssued.add(t["taskId"] ?? "");
-    }
-    _sendKillTasks(alive);
-  }
-
-  /// 快照确认清理:任务从列表消失(TaskStop 已生效/自然结束)即撤「停止中」标记。
+  /// 快照确认清理:任务从列表消失(stop_task 已生效/自然结束)即撤「停止中」标记。
   /// 在 _refreshStatus(覆盖断线期)与 _onEvent(实时)的 setState 块内调用。
   void _pruneKillIssued() {
     final alive = _stream.backgroundTasks.map((b) => b["taskId"]).toSet();
@@ -1410,19 +1390,12 @@ class _ChatPageState extends State<ChatPage> {
                         ],
                       ),
                     ),
-                    // 逐条中断(2026-11-10):每个任务独立停,与桌面任务面板一致;
-                    // composer 的统一停止按钮已移除。busy 时由 _killBgTask 入队。
-                    // 已排队/已发指令的行按钮换文字状态(弹层是打开时快照,kill 会
-                    // 关弹层;重开即见最新标记),防止重复发指令让模型困惑。
+                    // 逐条停止(2026-11-10):每个任务独立停,与桌面任务面板一致;
+                    // composer 的统一停止按钮已移除。stop_task 控制帧零延迟直停、
+                    // 不受 busy 拦(2026-11-12 起不再排队)。已发指令的行按钮换文字
+                    // 状态(弹层是打开时快照,kill 会关弹层;重开即见最新标记)。
                     Builder(builder: (_) {
                       final id = t["taskId"] ?? "";
-                      final queued = _pendingKillTasks.any((p) => p["taskId"] == id);
-                      if (queued) {
-                        return const Padding(
-                          padding: EdgeInsets.only(left: 10),
-                          child: Text("待停止", style: TextStyle(fontSize: 10, color: Mx.muted)),
-                        );
-                      }
                       if (_killIssued.contains(id)) {
                         return const Padding(
                           padding: EdgeInsets.only(left: 10),

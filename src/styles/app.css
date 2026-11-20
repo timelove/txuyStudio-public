@@ -863,6 +863,32 @@ body {
 }
 /* 代码块增强(会话流 B3):语言 label + 复制 ⧉ + 长代码折叠 ▾/▴。pre 收进 .mx-codeblock 容器,
    头部贴顶、正文圆角下收;长块默认限高内部滚动,点 ▾ 展开。样式同 .mx-md-preview 前缀限定。 */
+/* 会话流本机文件路径链接(2026-11-19):assistant/thinking 文本里提到的本机文件标蓝,
+   hover 冒文件夹图标,点击 reveal 所在目录(explorer /select,复用 reveal_in_folder)。
+   MdPreview 渲染管线的 DOM 富化与 PathAwareText(thinking 纯文本)共用;图标走
+   mask + currentColor(SVG 形状随文字色,明暗主题免维护)。 */
+.mx-filepath {
+  color: var(--mx-info);
+  cursor: pointer;
+  border-radius: 3px;
+  padding: 0 1px;
+  transition: background-color 120ms ease;
+}
+.mx-filepath:hover {
+  background: var(--mx-info-soft);
+}
+.mx-filepath:hover::after {
+  content: "";
+  display: inline-block;
+  width: 0.95em;
+  height: 0.95em;
+  margin-left: 3px;
+  vertical-align: -0.15em;
+  background-color: currentColor;
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z'/%3E%3C/svg%3E") center/contain no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z'/%3E%3C/svg%3E") center/contain no-repeat;
+}
+
 .mx-md-preview .mx-codeblock {
   margin: 0.8em 0;
   border: 1px solid var(--mx-border);
@@ -1011,4 +1037,212 @@ body.mx-dragging-split.dragging-vertical * {
 @keyframes mx-theme-reveal {
   from { clip-path: circle(0% at var(--mx-vt-x, 50%) var(--mx-vt-y, 38%)); }
   to { clip-path: circle(142% at var(--mx-vt-x, 50%) var(--mx-vt-y, 38%)); }
+}
+
+/* ============================================================
+ * 指挥台·项目动态面板(v2.5):Remotion 式状态光效——扩散环/双闪/流光扫。
+ * 延续微动效层哲学(零依赖,纯 keyframes);「演出型克制」:状态在动才有光,
+ * 稳态收敛为低频呼吸,不与内容抢注意力。
+ * ============================================================ */
+
+/* running 节点:accent 扩散环(雷达波一圈,1.6s)。 */
+@keyframes mx-pulse-live {
+  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--mx-accent) 45%, transparent); }
+  70%, 100% { box-shadow: 0 0 0 5px transparent; }
+}
+.mx-pulse-live { animation: mx-pulse-live 1.6s cubic-bezier(0.22, 1, 0.36, 1) infinite; }
+
+/* waiting_approval 节点:琥珀双闪(急促,注意级最高)。 */
+@keyframes mx-pulse-wait {
+  0%, 100% { opacity: 1; }
+  10%, 30% { opacity: 0.2; }
+  20% { opacity: 1; }
+}
+.mx-pulse-wait { animation: mx-pulse-wait 1.1s ease-in-out infinite; }
+
+/* error 节点:红慢闪(1.8s,告警但不刺眼)。 */
+@keyframes mx-pulse-error {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+.mx-pulse-error { animation: mx-pulse-error 1.8s ease-in-out infinite; }
+
+/* 项目名前光点:低频呼吸(有活动会话的项目头,2s 稳态收敛)。 */
+@keyframes mx-pulse-breath {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.55; transform: scale(0.82); }
+}
+.mx-pulse-breath { animation: mx-pulse-breath 2s ease-in-out infinite; }
+
+/* 活动项目卡左侧竖向流光条:accent 亮带沿卡片高度下扫(能量流动隐喻,2.6s)。 */
+@keyframes mx-pulse-flow {
+  from { background-position: 0% -120%; }
+  to { background-position: 0% 120%; }
+}
+.mx-pulse-flow {
+  background: linear-gradient(180deg,
+    transparent 0%,
+    color-mix(in srgb, var(--mx-accent) 70%, transparent) 45%,
+    var(--mx-accent) 50%,
+    color-mix(in srgb, var(--mx-accent) 70%, transparent) 55%,
+    transparent 100%);
+  background-size: 100% 200%;
+  animation: mx-pulse-flow 2.6s linear infinite;
+}
+
+/* Agent 实况拍入场(2026-11-19):新拍从顶滑落淡入,一次性 240ms——「每一拍恰好
+ * 上台一次」,落定即静(CrommaCode Game View 的克制版)。 */
+@keyframes mx-beat-in {
+  from { opacity: 0; transform: translateY(-6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.mx-beat-in { animation: mx-beat-in 240ms cubic-bezier(0.22, 1, 0.36, 1); }
+
+/* ── 像素游戏面板(StagePanel v3,2026-11-19 参考cromma.ai Game View:
+ *    像素字 + 四向阶梯描边 + 过冲回弹 pop,游戏进度即面板主角)── */
+@font-face {
+  font-family: "Pixelify Sans";
+  src: url("./assets/fonts/PixelifySans-latin.woff2") format("woff2");
+  font-weight: 400 700;
+  font-display: swap;
+}
+.mx-px-font {
+  font-family: "Pixelify Sans", ui-monospace, monospace;
+  letter-spacing: -0.01em;
+}
+/* 像素粗边:四向 2px 实线 + 底部硬投影(按下感);无圆角。 */
+.mx-px-frame {
+  box-shadow:
+    0 -2px 0 0 var(--mx-border),
+    0 2px 0 0 var(--mx-border),
+    -2px 0 0 0 var(--mx-border),
+    2px 0 0 0 var(--mx-border),
+    0 4px 0 0 color-mix(in srgb, var(--mx-border) 55%, #000);
+}
+/* 像素盒:仅四向描边(cromma card-art 同构,画布用)。 */
+.mx-px-box {
+  box-shadow:
+    0 -2px 0 0 var(--mx-border),
+    0 2px 0 0 var(--mx-border),
+    -2px 0 0 0 var(--mx-border),
+    2px 0 0 0 var(--mx-border);
+}
+/* 方格纸底(cromma grid-paper 同款:radial 点阵 8px 栅格)。 */
+.mx-grid-paper {
+  background-color: var(--mx-card-bg);
+  /* 2026-11-20 用户:「背景再虚化或者淡化色值」——点阵 70%→32% 淡化,退成
+     隐约质感不与内容争注意力。 */
+  background-image: radial-gradient(
+    color-mix(in srgb, var(--mx-border) 32%, transparent) 1px,
+    transparent 1px
+  );
+  background-size: 8px 8px;
+}
+/* 像素芯片(cromma prompt-chip 同款:四向描边 + 右下偏移硬投影)。 */
+.mx-px-chip {
+  background: var(--mx-card-bg);
+  box-shadow:
+    0 -2px 0 0 var(--mx-border),
+    0 2px 0 0 var(--mx-border),
+    -2px 0 0 0 var(--mx-border),
+    2px 0 0 0 var(--mx-border),
+    3px 4px 0 0 color-mix(in srgb, var(--mx-border) 55%, #000);
+}
+/* accent 变体(2026-11-19 大屏排行榜第一名「主力」位):描边换 accent,
+ * 投影同色系加深。 */
+.mx-px-chip-accent {
+  background: var(--mx-card-bg);
+  box-shadow:
+    0 -2px 0 0 var(--mx-accent),
+    0 2px 0 0 var(--mx-accent),
+    -2px 0 0 0 var(--mx-accent),
+    2px 0 0 0 var(--mx-accent),
+    3px 4px 0 0 color-mix(in srgb, var(--mx-accent) 55%, #000);
+}
+/* 引擎火箭(2026-11-19,用户:「飞入引擎搞个火箭样式」;前身=像素方点):外层容器
+ * 负责 translate 飞行轨迹(--sx/--sy → 引擎中心),内层 .mx-spark-rocket 按 --rot
+ * 转动机头朝向飞行方向,尾焰 steps 闪烁。播完 onAnimationEnd 自清 + 命中脉冲。 */
+.mx-spark {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 14px;
+  height: 20px;
+  margin: -10px 0 0 -7px;
+  pointer-events: none;
+  animation: mx-spark-fly 740ms cubic-bezier(0.25, 0.6, 0.35, 1) forwards;
+}
+.mx-spark-rocket {
+  width: 100%;
+  height: 100%;
+  transform: rotate(var(--rot, 0deg));
+}
+.mx-spark-flame {
+  animation: mx-spark-flame 180ms steps(2, jump-none) infinite;
+}
+@keyframes mx-spark-flame {
+  0% { opacity: 1; }
+  50% { opacity: 0.35; }
+  100% { opacity: 1; }
+}
+@keyframes mx-spark-fly {
+  0% { transform: translate(var(--sx), var(--sy)) scale(1.15); opacity: 0; }
+  12% { opacity: 1; }
+  80% { opacity: 1; }
+  100% { transform: translate(0, 0) scale(0.55); opacity: 0; }
+}
+/* 引擎中环旋转(活动期吞拍感)、命中脉冲(光点进核闪一下)与子 agent 轨道
+ * 公转(2026-11-19:会话圆点 24s 反向绕核,「一群 agent 绕核运转」)。 */
+.mx-engine-spin { animation: mx-engine-spin 10s linear infinite; }
+@keyframes mx-engine-spin { to { transform: rotate(360deg); } }
+.mx-engine-orbit { animation: mx-engine-orbit 24s linear infinite reverse; }
+@keyframes mx-engine-orbit { to { transform: rotate(360deg); } }
+.mx-engine-hit { animation: mx-engine-hit 320ms ease-out; }
+@keyframes mx-engine-hit {
+  0% { filter: brightness(1); }
+  25% { filter: brightness(2); }
+  100% { filter: brightness(1); }
+}
+/* 数值变化 pop(cromma cb-pop 同款过冲;配合 key={value} 重挂载重触发)。 */
+@keyframes mx-px-pop {
+  0% { transform: scale(1); }
+  40% { transform: scale(1.22); }
+  100% { transform: scale(1); }
+}
+.mx-px-pop { animation: mx-px-pop 360ms cubic-bezier(0.34, 1.56, 0.64, 1) both; }
+/* 升级横幅爆发:弹出停住再淡出,一次性。 */
+@keyframes mx-level-burst {
+  0% { opacity: 0; transform: scale(0.5); }
+  30% { opacity: 1; transform: scale(1.1); }
+  70% { opacity: 1; transform: scale(1); }
+  100% { opacity: 0; transform: scale(1.06); }
+}
+.mx-level-burst { animation: mx-level-burst 900ms ease-out both; }
+
+/* 实况面板升级闪光(2026-11-19 演进游戏面板):跨档瞬间进度条亮一次,700ms 自熄。 */
+@keyframes mx-level-up {
+  0% { filter: brightness(1); }
+  30% { filter: brightness(1.9); }
+  100% { filter: brightness(1); }
+}
+.mx-level-up { animation: mx-level-up 700ms ease-out; }
+
+/* 系统级减动效偏好:状态光全部退化为静态色点(信息不丢,动效归零)。 */
+@media (prefers-reduced-motion: reduce) {
+  .mx-pulse-live,
+  .mx-pulse-wait,
+  .mx-pulse-error,
+  .mx-pulse-breath,
+  .mx-pulse-flow,
+  .mx-beat-in,
+  .mx-level-up,
+  .mx-px-pop,
+  .mx-level-burst,
+  .mx-spark,
+  .mx-spark-flame,
+  .mx-engine-spin,
+  .mx-engine-orbit,
+  .mx-engine-hit {
+    animation: none;
+  }
 }

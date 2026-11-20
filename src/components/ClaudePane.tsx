@@ -1,5 +1,6 @@
 import { Fragment, lazy, memo, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { homeDir } from "@tauri-apps/api/path";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { selectEnclosingPre } from "../lib/selectEnclosingPre";
@@ -30,11 +31,11 @@ import type { BackgroundTaskInfo, ClaudeBlock, ClaudeMessage, ClaudeSessionKind,
 import { claudeInputTokens, computeContextInfo, hasPendingApproval as hasPendingApprovalFn, hasPendingPlan as hasPendingPlanFn, hasUsage, inferContextWindow, summarize } from "../domain/claudeStream";
 import {
   PROVIDER_CHANGED_EVENT,
-  applyProvider,
   configuredModelsOf,
   loadClaudeProviders,
   notifyProviderChanged,
   pickActiveProviderId,
+  providerEnv,
   readCurrentEnv,
   type ClaudeProvider,
 } from "../domain/claudeProviders";
@@ -64,6 +65,10 @@ import { ChatUserBubble } from "./chat/ChatUserBubble";
 import { MESSAGE_GAP_MS, TimeGapDivider, messageTimeMs } from "./chat/TimeGapDivider";
 import { Tabs, TabsList, TabsTrigger } from "./ui/Tabs";
 import { splitStableTail, useThrottledValue } from "../domain/streamingMarkdown";
+import { useConductorAutoGhosts, useConductorRepeatBadge, useConductorVerdicts } from "../domain/conductor";
+import { useCliUpdateHint } from "../domain/cliUpdate";
+import { SessionCwdContext } from "../domain/sessionCwd";
+import { PathAwareText } from "./PathAwareText";
 
 
 /** MdPreview 懒加载(避免 claudepane 首屏就拉 marked/dompurify,与探针共用 md-render 分包)。 */
@@ -207,18 +212,15 @@ function TaskListContent({
   bgTasks,
   doneNotices,
   onKillTask,
-  pendingKillIds,
   killIssuedIds,
 }: {
   t: (k: string, opts?: Record<string, unknown>) => string;
   main: { label: string; color: string; pulse: boolean };
   bgTasks: BackgroundTaskInfo[];
   doneNotices: { kind: "bg_done" | "bg_failed" | "bg_stopped"; summary: string }[];
-  /** 停止单个后台任务(借道模型层 TaskStop,见 ClaudePane handleKillBgTask)。 */
-  onKillTask: (taskId: string, description: string) => void;
-  /** 已排队待停止的任务 id(busy 期间点停止,回 idle 后合并发送)。这些项按钮替换为「待停止」。 */
-  pendingKillIds: Set<string>;
-  /** 指令已发出、等快照回流确认的任务 id(idle 直发 + 合并发送共用)。按钮替换为「停止中」。 */
+  /** 停止单个后台任务(control_request stop_task,见 ClaudePane handleKillBgTask)。 */
+  onKillTask: (taskId: string) => void;
+  /** 指令已发出、等快照回流确认的任务 id。按钮替换为「停止中」。 */
   killIssuedIds: Set<string>;
 }) {
   return (
@@ -253,23 +255,20 @@ function TaskListContent({
               <TooltipContent>{task.description || task.taskType}</TooltipContent>
             </Tooltip>
             <span className="shrink-0 rounded bg-[var(--mx-border)] px-1 py-px font-mono text-[9px] text-[var(--mx-muted)]">{task.taskType}</span>
-            {pendingKillIds.has(task.taskId) ? (
-              /* busy 期间点停止已入队:等主轮回 idle 自动合并发送(不能 interrupt——会杀进程树连坐全部后台任务)。 */
-              <span className="shrink-0 text-[9px] text-[var(--mx-faint)]">{t("claudepane.killTaskQueuedShort")}</span>
-            ) : killIssuedIds.has(task.taskId) ? (
-              /* 指令已发出:TaskStop 借道模型层 ~数秒生效,任务行等 background_tasks_changed
-                 快照回流后自动消失。这期间标「停止中」,否则用户以为点了没反应。 */
+            {killIssuedIds.has(task.taskId) ? (
+              /* stop_task 控制帧已发出:任务行等 background_tasks_changed 快照回流后自动
+                 消失。这期间标「停止中」,否则用户以为点了没反应。 */
               <span className="shrink-0 text-[9px] text-[var(--mx-faint)]">{t("claudepane.killTaskIssuedShort")}</span>
             ) : (
-              /* 停止单个后台任务:借道模型层 TaskStop(官方工具;stdin 控制协议无单任务 kill)。
-                 走一轮对话(~数秒),claude 杀掉任务后 background_tasks_changed 快照自动回流。 */
+              /* 停止单个后台任务:control_request stop_task(stdin 控制通道,零延迟直停,
+                 不产生对话消息)。任务消失后快照自动回流。 */
               <button
                 type="button"
                 title={t("claudepane.killTaskTitle")}
                 onMouseDown={(e) => e.stopPropagation()}
                 onClick={(e) => {
                   e.stopPropagation();
-                  onKillTask(task.taskId, task.description);
+                  onKillTask(task.taskId);
                 }}
                 className="shrink-0 rounded p-0.5 text-[var(--mx-faint)] opacity-0 transition-opacity hover:bg-[var(--mx-danger-bg)] hover:text-[var(--mx-danger-bright)] group-hover/task:opacity-100"
               >
@@ -309,7 +308,8 @@ function TaskListContent({
                     {done ? <path d="M20 6L9 17l-5-5" /> : <path d="M18 6L6 18M6 6l12 12" />}
                   </svg>
                 )}
-                <span className="min-w-0 flex-1 break-words text-[var(--mx-faint)]">
+                {/* summary 是 claude 原文,后台任务完成后常带长输出——限 3 行,超出内部滚动。 */}
+                <span className="mx-scroll-pretty max-h-12 min-w-0 flex-1 overflow-y-auto break-words text-[var(--mx-faint)]">
                   {stopped ? `${t("claudepane.bgTaskStoppedLabel")} ${n.summary}` : n.summary}
                 </span>
               </div>
@@ -465,6 +465,14 @@ export function ClaudePane(props: ClaudePaneProps) {
   const { fontSize, showPromptBanner } = useSettings();
   /** 输入框底部状态栏字号:随全局 fontSize 缩放(14→10,与原 text-[10px] 一致)。 */
   const statusFontPx = statusFontSize(fontSize);
+  // 驿站循环徽标:该 tab 被驿站定时投递时在输入区上方亮「停止循环」chip(按活动 tab 匹配)。
+  const repeatBadge = useConductorRepeatBadge(activeTabId);
+  // CLI 新版本提示(6h 节流,check_cli_update 本机 --version 对比 npm 最新版)。
+  const cliUpdate = useCliUpdateHint("claude");
+  // 指挥台代批判定级(P2b):confirm/deny 转人的审批卡按级强警示(deny 红边高危标)。
+  const conductorVerdicts = useConductorVerdicts(activeTabId);
+  // 宽限代批落定留痕:到点自动放行的请求在审批坞下方挂淡绿幽灵行(60s 淡出)。
+  const conductorAutoGhosts = useConductorAutoGhosts(activeTabId);
   const [state, setState] = useState<ClaudeStreamState | null>(null);
   /** state 的 ref 镜像:供回调读「最新 state」而不进 useCallback deps(state 每 token 变会让回调每 token 变、击穿 memo)。每次渲染同步更新。 */
   const stateRef = useRef(state);
@@ -661,6 +669,9 @@ export function ClaudePane(props: ClaudePaneProps) {
    *  无供应商配置时下拉回退 env+catalog 平铺(现状)。 */
   const [providers, setProviders] = useState<ClaudeProvider[]>([]);
   const [currentEnv, setCurrentEnv] = useState<Record<string, string> | null>(null);
+  /** 本 tab 的 per-tab 供应商 override(render 期从 transport 同步读;setProvider/clearProvider
+   *  都伴随 meta.model 乐观更新 → 订阅重渲染 → 此处读到新值;引用稳定,override 未变时同引用)。 */
+  const tabProviderEnv = getClaudeTransport(activeTabId)?.getProviderEnv?.() ?? null;
   const refreshProviders = useCallback(() => {
     setProviders(loadClaudeProviders());
     void readCurrentEnv().then((env) => setCurrentEnv(env));
@@ -684,12 +695,17 @@ export function ClaudePane(props: ClaudePaneProps) {
    *     同密钥的兜底条目不会两家都亮),组内勾选只看 env 的 ANTHROPIC_MODEL(切完供应商
    *     +模型后 meta.model 还是旧值,原来 alias/model 双来源各命中一个 → 两个都打勾)。 */
   // 同端点同密钥多条配置的打分去重(与设置中心徽标同一条规则,见 pickActiveProviderId)。
-  const activeProviderId = useMemo(() => pickActiveProviderId(providers, currentEnv), [providers, currentEnv]);
+  // 2026-11-12 起生效家按**本 tab 视角**判定:per-tab override 存在时用 override 匹配
+  // (本 tab 各用各的供应商),否则按全局 settings env(跟随全局的 tab)。
+  const activeProviderId = useMemo(
+    () => pickActiveProviderId(providers, tabProviderEnv ?? currentEnv),
+    [providers, tabProviderEnv, currentEnv],
+  );
   const providerGroups = useMemo(() => {
     const q = modelQuery.trim().toLowerCase();
-    // 生效家里把 env 的当前模型补进「已配置」头位:切换只写 settings.json,不回写
-    // localStorage 的 p.model,不补的话刚选中的勾选行会消失。
-    const envModel = (currentEnv?.ANTHROPIC_MODEL ?? "").trim();
+    // 生效家里把当前模型补进「已配置」头位(本 tab 视角):切换只写 override/全局 env,
+    // 不回写 localStorage 的 p.model,不补的话刚选中的勾选行会消失。
+    const envModel = ((tabProviderEnv ?? currentEnv)?.ANTHROPIC_MODEL ?? "").trim();
     return providers.map((p) => {
       const base = configuredModelsOf(p);
       const configured = p.id === activeProviderId && envModel && !base.includes(envModel) ? [envModel, ...base] : base;
@@ -703,7 +719,7 @@ export function ClaudePane(props: ClaudePaneProps) {
         visible: shown.length > 0 || (!q && configured.length === 0),
       };
     }).filter((g) => g.visible);
-  }, [providers, activeProviderId, currentEnv, modelQuery]);
+  }, [providers, activeProviderId, tabProviderEnv, currentEnv, modelQuery]);
   // /compact 走真 compact:transport.send("/compact") 写 stdin(local command),后端长进程执行,
   // 产出 compact_status/compact_boundary 事件 → applyEvent 归并成 boundary/summary 消息(见 MessageRow
   // compact 分支)。compaction 进行中由 state.compactRunning(busy)驱动,无需前端模拟编排。
@@ -726,6 +742,22 @@ export function ClaudePane(props: ClaudePaneProps) {
     (paneId: string, tabId: string) => onCloseTabRef.current?.(paneId, tabId),
     [],
   );
+  // 涌现代批落定即撤卡(2026-11-18 用户:「涌现批准后,消息流中的批准框就该消失」):
+  // 机器代批在后端直接回包,前端 transport 不经手,审批坞的 pending 卡要挂到轮末
+  // result 才清——直投大任务一跑几分钟,已批的卡全程挡视线。收 conductor-auto-approved
+  // 广播时乐观移除本地 pending(纯清卡不回包,后端已回)。按事件里的 tabId 直取
+  // transport(非活动 tab 也撤,轮末 result 前卡不悬空);多窗口实例重复调幂等
+  // (第二次已无该 id,直接返回)。codex 无此问题(approval_resolved 广播自带撤卡闭环)。
+  useEffect(() => {
+    const un = listen<{ tabId: string; requestId: string }>("conductor-auto-approved", (e) => {
+      getClaudeTransportRef.current(e.payload.tabId)?.dismissPermission(e.payload.requestId);
+    });
+    return () => {
+      void un.then((f) => f());
+    };
+    // getClaudeTransportRef 是稳定 ref(每次渲染同步镜像最新取值),不进依赖。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // 挂载时探测 claude CLI 是否安装(非 Tauri 环境静默放行,不挡 dev 浏览器兜底)。
   useEffect(() => {
@@ -1028,10 +1060,8 @@ export function ClaudePane(props: ClaudePaneProps) {
     loadPlugins();
   }, [loadPlugins]);
 
-  // 宽 pane 首次达标 → 自动开侧栏(默认 skills);缩小态是用户意图,不自动展开。
-  useEffect(() => {
-    if (paneWide && toolPanel === null) setToolPanel("skills");
-  }, [paneWide, toolPanel]);
+  // 工具侧栏默认隐藏,需要时经 ⋯ 菜单/slash 显式展开(showToolPanel);不再按 pane 宽度
+  // 自动打开(2026-11-12 用户定调)。缩小态(collapsed)仍是用户意图,不自动展开。
   // 侧栏面板切换/出现时拉数据(与弹窗打开同源,每次重读)。
   useEffect(() => {
     if (!toolPanel || !paneWide) return;
@@ -1078,6 +1108,17 @@ export function ClaudePane(props: ClaudePaneProps) {
       run: (arg) => (arg ? void addDirDirect(arg) : void pickAddDir()),
     },
     { name: "/rewind", labelKey: "claudepane.toolsRewind", group: "session", kind: "direct", glyph: "↺", run: () => setRewindOpen(true) },
+    {
+      // /init:CLI local command,扫描项目生成/更新 CLAUDE.md(引擎执行,同 /compact 通道)。
+      name: "/init",
+      labelKey: "claudepane.cmdInit",
+      group: "session",
+      kind: "stdin",
+      glyph: "✎",
+      run: () => {
+        void getClaudeTransportRef.current(activeTabId)?.send("/init");
+      },
+    },
     { name: "/model", labelKey: "claudepane.cmdModel", group: "session", kind: "direct", glyph: "✳", run: () => setMenuMode("model") },
     { name: "/effort", labelKey: "claudepane.cmdEffort", group: "session", kind: "direct", glyph: "≈", run: () => setMenuMode("effort") },
     { name: "/config", labelKey: "claudepane.toolsConfig", group: "session", kind: "direct", glyph: "⚙", run: () => window.dispatchEvent(new CustomEvent("mx-open-settings", {})) },
@@ -1121,6 +1162,9 @@ export function ClaudePane(props: ClaudePaneProps) {
       },
     },
     // —— 定位 ——
+    // cwd 三层兜底:meta.cwd(init 回填,要起会话才有)→ transport cwd(构造即有)→
+    // tab cwd(建 tab 即有,最稳)。此前只读 meta.cwd,pane 开着没发消息时 undefined
+    // → if 静默跳过,「点击无反应」(2026-11-16 用户报)。
     {
       name: "/memory",
       labelKey: "claudepane.toolsMemory",
@@ -1128,7 +1172,7 @@ export function ClaudePane(props: ClaudePaneProps) {
       kind: "direct",
       glyph: "⌖",
       run: () => {
-        const cwd = state?.meta?.cwd;
+        const cwd = state?.meta?.cwd ?? getClaudeTransportRef.current(activeTabId)?.getCwd() ?? sessions.find((s) => s.id === activeTabId)?.cwd;
         if (cwd) void invoke("reveal_in_folder", { path: `${cwd}/CLAUDE.md`, cwd }).catch(() => {});
       },
     },
@@ -1140,7 +1184,7 @@ export function ClaudePane(props: ClaudePaneProps) {
       glyph: "▤",
       // 项目根目录在资源管理器中打开(cwd 为目录 → explorer 直接打开)。
       run: () => {
-        const cwd = state?.meta?.cwd;
+        const cwd = state?.meta?.cwd ?? getClaudeTransportRef.current(activeTabId)?.getCwd() ?? sessions.find((s) => s.id === activeTabId)?.cwd;
         if (cwd) void invoke("reveal_in_folder", { path: cwd }).catch(() => {});
       },
     },
@@ -1526,24 +1570,20 @@ export function ClaudePane(props: ClaudePaneProps) {
     [activeTabId, busy],
   );
 
-  /** 点供应商下的模型:整体切换(端点+token+该模型写 env 的 *_MODEL)。当前会话乐观切换
-   *  (复用 applyModel:interrupt if busy + setModel 置 --model 并立即重启拾取新 env,
-   *  --resume 保留 session),状态栏即时反映;其余会话靠广播走 refreshIfSettingsChanged
-   *  慢路径(busy 不打断,下轮拾取)。2026-11-05 用户反馈:此前当前会话也要等重启后
-   *  init 回填才切换,观感是「选完没反应,发一条请求回来才变」。 */
+  /** 点供应商下的模型:**只切本 tab**(2026-11-12 用户定调,取代旧「整体切换」——旧路径
+   *  applyProvider 写全局 settings.json env + 广播所有 tab 重启拾取,「点一个全切」)。
+   *  实现:transport.setProvider 置 per-tab override(该供应商 env + 点选模型),重启进程
+   *  经 --settings '{"env":..}' 注入(优先级高于全局 settings,spike 实证)——其余 tab 与
+   *  全局配置零影响;不同 tab 可各用各的供应商/模型。busy 先 interrupt(同 applyModel)。 */
   const switchProviderModel = useCallback(
     async (p: ClaudeProvider, m: string) => {
-      const ok = await applyProvider({ ...p, model: m });
-      if (ok) {
-        await applyModel(m);
-        notifyProviderChanged();
-        // 写完立刻回读 env:下拉顶部「当前」与生效家标记不等会话重启的 init 回填
-        // (busy 会话会跳过 kill,meta.model 可能长时间还是旧值)。
-        void readCurrentEnv().then((env) => setCurrentEnv(env));
-        setMenuMode(null);
-      }
+      const transport = getClaudeTransportRef.current(activeTabId);
+      setMenuMode(null);
+      if (!transport) return;
+      if (busy) await transport.interrupt();
+      await transport.setProvider(providerEnv(p), m);
     },
-    [applyModel],
+    [activeTabId, busy],
   );
 
   // 应用选中的 effort:调 transport.setEffort("auto" -> undefined,不传 --effort flag)。
@@ -1878,13 +1918,16 @@ export function ClaudePane(props: ClaudePaneProps) {
     return undefined;
   })();
 
-  /** 分组下拉「生效中」的唯一真源:优先 env 的 ANTHROPIC_MODEL(点了应用即生效),
-   *  env 没配默认模型时退当前运行 model。绝不用 alias 与 model 双来源——切完
-   *  供应商+模型后 meta.model 还是旧值,双来源会让两个模型同时打勾。 */
+  /** 分组下拉「生效中」的唯一真源:优先本 tab 的 per-tab 供应商 override(2026-11-12 起
+   *  供应商切换只切本 tab,override 的 ANTHROPIC_MODEL 即本 tab 真实档),其次全局 env 的
+   *  ANTHROPIC_MODEL(点了应用即生效),最后当前运行 model。绝不用 alias 与 model 双来源——
+   *  切完供应商+模型后 meta.model 还是旧值,双来源会让两个模型同时打勾。 */
   const activeModelName = useMemo(() => {
+    const fromTab = (tabProviderEnv?.ANTHROPIC_MODEL ?? "").trim();
+    if (fromTab) return fromTab;
     const fromEnv = (currentEnv?.ANTHROPIC_MODEL ?? "").trim();
     return fromEnv || model || "";
-  }, [currentEnv, model]);
+  }, [tabProviderEnv, currentEnv, model]);
   /** 分组下拉里的一行模型:点 → 确认弹窗 → switchProviderModel 整体切换。 */
   const renderProviderModelRow = useCallback(
     (g: { p: ClaudeProvider; active: boolean }, m: string) => {
@@ -2113,69 +2156,33 @@ export function ClaudePane(props: ClaudePaneProps) {
             }
           : { label: t("claudepane.mainIdle"), color: "#475569", pulse: false };
   /**
-   * 排队的待停止后台任务(busy 期间点的):回 idle 后由下方 effect 合并成一条指令发送。
-   * 不能 busy 时 interrupt——interrupt 是 kill 整个 claude 进程树(taskkill /F /T),全部后台
-   * 任务都是它的子进程,会**全部连坐被杀**(实测「点一个停一个却全停」的根因)。
-   */
-  const [pendingKillTasks, setPendingKillTasks] = useState<
-    { taskId: string; description: string }[]
-  >([]);
-  /**
-   * 已发出停止指令、等快照确认的任务 id(idle 直发 + 排队合并发送都记)。
-   * TaskStop 借道模型层 ~数秒生效,期间任务仍在列表——标「停止中」,否则用户
-   * 「点了取消但还显示」以为没点上。任务从 backgroundTasks 快照消失即撤销。
+   * 已发出 stop_task 控制帧、等快照确认的任务 id。控制帧零延迟直停(不产生对话消息),
+   * 但任务从 backgroundTasks 快照消失仍需一次回流——期间标「停止中」,否则用户
+   * 「点了取消但还显示」以为没点上。任务消失即撤销。
    */
   const [killIssuedIds, setKillIssuedIds] = useState<Set<string>>(new Set());
   const [pendingModel, setPendingModel] = useState<string | null>(null);
   /** 供应商+模型整体切换的待确认项(分组下拉点模型 → 确认弹窗 → switchProviderModel)。 */
   const [pendingProviderModel, setPendingProviderModel] = useState<{ p: ClaudeProvider; m: string } | null>(null);
-  const pendingKillIds = useMemo(() => new Set(pendingKillTasks.map((t) => t.taskId)), [pendingKillTasks]);
   /**
-   * 停止单个后台任务。claude stdin 控制协议没有单任务 kill(实测二进制:REPL bridge 只认
-   * set_model/interrupt/… 十种 subtype,interrupt 会全停+打断当前轮),官方精确路径是模型层
-   * TaskStop 工具——故借道:发一条系统指令让 claude 调 TaskStop(taskId),实测 ~数秒生效,
-   * 任务被杀后 `background_tasks_changed` 快照自动回流(列表消失 + stopped notice)。
-   * idle 立即发;busy/compact 中不能发(后端拒)也不能 interrupt(连坐)→ 入队待 idle 合并发。
+   * 停止单个后台任务:stdin 写 control_request `stop_task`,CLI 内核直接停——零延迟、
+   * 不占轮、不产生对话消息、模型无感知。取代旧「借道模型层发 TaskStop 指令消息」
+   * (busy 排队 + 回 idle 合并 flush 的整套机制随之退役)。任务消失经
+   * background_tasks_changed 快照回流。spike 实测 2026-11-12(CLI 2.1.304,.work/spikes/
+   * stop-task-spike.mjs);start_claude_session 已发 initialize{perTaskStopAffordance},
+   * interrupt 不再连坐杀后台任务。
    */
   const handleKillBgTask = useCallback(
-    (taskId: string, description: string) => {
+    (taskId: string) => {
       const transport = getClaudeTransportRef.current(activeTabId);
       if (!transport) return;
       setMenuMode(null);
-      if (busy || compactRunning) {
-        setPendingKillTasks((prev) =>
-          prev.some((t) => t.taskId === taskId) ? prev : [...prev, { taskId, description }],
-        );
-        return;
-      }
-      void transport.send(t("claudepane.killTaskMsg", { id: taskId, desc: description || taskId }));
+      void transport.stopTask(taskId);
       setKillIssuedIds((prev) => (prev.has(taskId) ? prev : new Set(prev).add(taskId)));
     },
-    [busy, compactRunning, activeTabId, t],
+    [activeTabId],
   );
-  // 排队的停止指令:回 idle 后合并一条发送(一次 TaskStop 多任务,省轮次)。先清队再发防重入;
-  // 过滤掉排队期间已自然结束的任务(快照里已不在)。state 变化频繁(逐 token)但 guard 早退无害。
-  useEffect(() => {
-    if (busy || compactRunning || pendingKillTasks.length === 0) return;
-    const transport = getClaudeTransportRef.current(activeTabId);
-    if (!transport) {
-      setPendingKillTasks([]);
-      return;
-    }
-    const runningIds = new Set((state?.backgroundTasks ?? []).map((t) => t.taskId));
-    const due = pendingKillTasks.filter((t) => runningIds.has(t.taskId));
-    setPendingKillTasks([]);
-    if (due.length === 0) return;
-    const tasksStr = due.map((t) => `${t.description || t.taskId}(${t.taskId})`).join("、");
-    void transport.send(t("claudepane.killTaskQueuedMsg", { tasks: tasksStr }));
-    setKillIssuedIds((prev) => {
-      const next = new Set(prev);
-      for (const d of due) next.add(d.taskId);
-      return next;
-    });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [busy, compactRunning, pendingKillTasks, activeTabId]);
-  // 快照确认清理:任务从 backgroundTasks 消失(TaskStop 已生效/自然结束)即撤「停止中」。
+  // 快照确认清理:任务从 backgroundTasks 消失(stop_task 已生效/自然结束)即撤「停止中」。
   // state 逐 token 变化频繁,无删减时返回原引用,React bail out 不触发多余重渲染。
   useEffect(() => {
     setKillIssuedIds((prev) => {
@@ -2396,12 +2403,17 @@ export function ClaudePane(props: ClaudePaneProps) {
           relative 供缩小态悬浮小竖条定位。 */}
       <div className="relative flex min-h-0 min-w-0 flex-1">
       {/* 对话区:消息流(上,flex-1 滚动) + 底部浮动输入区(下)。 */}
-      <div className="relative grid min-h-0 min-w-0 flex-1 grid-rows-[1fr_auto]">
+      {/* flex 列(原 grid-rows-[1fr_auto]):审批坞爆量时底部 auto 行无上限,把消息区挤到 0、
+          输入框顶出可视区(用户实测十几张批准卡即没输入框)。flex + 底部区 max-h 后坞可被压缩
+          内部滚动,输入框钉在底部永不下沉。 */}
+      <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
         {/* overflow-x-hidden:消息流只纵向滚动。内含 markdown(压缩总结等)时,任何宽度计算
             意外(长路径串/代码块 min-content)都会让 overflow-x 被 UA 计算成 auto,底部冒横向
             滚动条;横向阅读需求由 pre/表格各自的内部滚动承担,故这里直接钳掉。 */}
-        <div ref={scrollRef} onScroll={handleScroll} className="mx-scroll-pretty relative min-h-0 overflow-y-auto overflow-x-hidden px-4 py-4" style={{ fontSize }}>
+        <div ref={scrollRef} onScroll={handleScroll} className="mx-scroll-pretty relative min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-4 py-4" style={{ fontSize }}>
           {state && (state.messages.length > 0 || (shellState?.messages.length ?? 0) > 0) ? (
+            /* 会话 cwd 注入:消息流深处 MdPreview/thinking 的本机路径候选按 cwd 解析(文件链接)。 */
+            <SessionCwdContext.Provider value={historyKey ?? ""}>
             <div ref={contentRef} className="mx-auto w-full max-w-[54.25rem] space-y-1">
               {/* C5 会话头:会话开端信息(品牌块 + 模型 + session 尾部 + 窗口),让会话有"开端感"。
                   本分支已在 hasMessages 守卫内(mergedMessages 必非空),只需 meta 有模型/会话 id 其一。
@@ -2512,6 +2524,7 @@ export function ClaudePane(props: ClaudePaneProps) {
                 );
               })}
             </div>
+            </SessionCwdContext.Provider>
           ) : (
             // 品牌化空状态(会话未开始):大品牌块 + 名称 + (已知时)模型 + 引导文案,
             // 替代原先一行灰字——AI 主体叙事从空状态开始;probe/加载中保持轻量占位。
@@ -2558,15 +2571,52 @@ export function ClaudePane(props: ClaudePaneProps) {
           />
         )}
 
-        {/* 底部浮动输入区:状态行 + textarea + 发送/中断按钮。 */}
-        <div className="shrink-0 px-4 pb-3 pt-1">
-          <div className="mx-auto w-full max-w-[54.25rem]">
+        {/* 底部浮动输入区:状态行 + textarea + 发送/中断按钮。max-h-[70%]:审批坞再多也只吃
+            底部七成(消息区至少留三成),内部由坞自己滚动,输入框恒可见。 */}
+        <div className="flex max-h-[70%] min-h-0 shrink-0 flex-col px-4 pb-3 pt-1">
+          <div className="mx-auto flex min-h-0 w-full max-w-[54.25rem] flex-1 flex-col">
             {/* 会话状态指示行:retrying(API error 自动重试,最高优先,橙色告警)> compactRunning >
                 thinkingNow 思考中 > busy 执行中(不显示具体工具名,只显「执行中…」)。悬浮在输入框上方,
                 busy 全程可见 -- 此前仅思考阶段显示,长工具运行中用户无从察觉会话仍在进行。
                 retrying 期间 status 被覆写 running 维持 busy,中断按钮可用;idle → 此条消失。
                 文字一律 muted(高饱和品牌色整行显示:深主题刺眼/亮主题对比不足看不清),
                 色彩语义由 ThinkingDots 呼吸点承载;仅 retrying 保留 warning 橙(短暂告警态)。 */}
+            {/* 驿站循环 chip:该 tab 被驿站定时投递(2026-11-13),pane 内一键关循环,
+                不用回指挥窗;TTL 熄灭见 domain/conductor.ts useConductorRepeatBadge。 */}
+            {cliUpdate.info && (
+              /* CLI 新版本提示:只提示不代跑(升级命令人在终端敲);按版本忽略,升级后新版本号自然重现。 */
+              <div className="mb-1.5 flex items-center gap-2 px-1 text-[#3b82f6]" style={{ fontSize: statusFontPx }}>
+                <span>
+                  {t("claudepane.cliUpdate", {
+                    latest: cliUpdate.info.latest,
+                    current: cliUpdate.info.current,
+                    cmd: "claude update",
+                  })}
+                </span>
+                <button
+                  type="button"
+                  onMouseDown={(e) => e.stopPropagation()}
+                  onClick={cliUpdate.dismiss}
+                  className="rounded bg-[var(--mx-border)] px-1.5 py-0.5 text-[10px] transition-colors hover:bg-[var(--mx-hover-bg)]"
+                >
+                  {t("claudepane.cliUpdateDismiss")}
+                </button>
+              </div>
+            )}
+            {repeatBadge.active && (
+              <div className="mb-1.5 flex items-center gap-2 px-1 text-[#fbbf24]" style={{ fontSize: statusFontPx }}>
+                <span aria-hidden className="h-1.5 w-1.5 animate-pulse rounded-full bg-[#fbbf24]" />
+                <span>{t("claudepane.repeatLoopActive")}</span>
+                <button
+                  type="button"
+                  onMouseDown={(e) => e.stopPropagation()}
+                  onClick={repeatBadge.stop}
+                  className="rounded bg-[var(--mx-border)] px-1.5 py-0.5 text-[10px] transition-colors hover:bg-[var(--mx-hover-bg)]"
+                >
+                  {t("claudepane.repeatLoopStop")}
+                </button>
+              </div>
+            )}
             {(retrying || busy || compactRunning) && !hasPendingPlan && !hasPendingApproval && (
               <div
                 className={`mb-1.5 flex items-center gap-2 px-1 ${
@@ -2607,9 +2657,9 @@ export function ClaudePane(props: ClaudePaneProps) {
                         align="end"
                         sideOffset={4}
                         onOpenAutoFocus={(e) => e.preventDefault()}
-                        className="mx-menu w-[340px] max-w-[calc(100vw-2rem)] border border-[var(--mx-border)] bg-[var(--mx-surface)] p-1 shadow-xl"
+                        className="mx-menu mx-scroll-pretty max-h-[70vh] w-[340px] max-w-[calc(100vw-2rem)] overflow-y-auto border border-[var(--mx-border)] bg-[var(--mx-surface)] p-1 shadow-xl"
                       >
-                        <TaskListContent t={t} main={mainTask} bgTasks={state?.backgroundTasks ?? []} doneNotices={bgDoneNotices} onKillTask={handleKillBgTask} pendingKillIds={pendingKillIds} killIssuedIds={killIssuedIds} />
+                        <TaskListContent t={t} main={mainTask} bgTasks={state?.backgroundTasks ?? []} doneNotices={bgDoneNotices} onKillTask={handleKillBgTask} killIssuedIds={killIssuedIds} />
                       </PopoverContent>
                     )}
                   </Popover>
@@ -2640,9 +2690,9 @@ export function ClaudePane(props: ClaudePaneProps) {
                     align="start"
                     sideOffset={4}
                     onOpenAutoFocus={(e) => e.preventDefault()}
-                    className="mx-menu w-[340px] max-w-[calc(100vw-2rem)] border border-[var(--mx-border)] bg-[var(--mx-surface)] p-1 shadow-xl"
+                    className="mx-menu mx-scroll-pretty max-h-[70vh] w-[340px] max-w-[calc(100vw-2rem)] overflow-y-auto border border-[var(--mx-border)] bg-[var(--mx-surface)] p-1 shadow-xl"
                   >
-                    <TaskListContent t={t} main={mainTask} bgTasks={state?.backgroundTasks ?? []} doneNotices={bgDoneNotices} onKillTask={handleKillBgTask} pendingKillIds={pendingKillIds} killIssuedIds={killIssuedIds} />
+                    <TaskListContent t={t} main={mainTask} bgTasks={state?.backgroundTasks ?? []} doneNotices={bgDoneNotices} onKillTask={handleKillBgTask} killIssuedIds={killIssuedIds} />
                   </PopoverContent>
                 )}
               </Popover>
@@ -2652,11 +2702,21 @@ export function ClaudePane(props: ClaudePaneProps) {
                 requestId 回包,连 tool_use_id 与 block 的配对都不依赖;待批期间折叠整体暂停
                 (foldMap live 合成),消息流保持展开。决策后 transport 乐观移除 pending,坞自动消失。 */}
             {state != null && state.pendingPermissions.length > 0 && (
-              <div className="mb-1.5 flex min-w-0 flex-col gap-1.5">
+              <div className="mx-scroll-pretty mb-1.5 flex min-h-0 min-w-0 flex-1 flex-col gap-1.5 overflow-y-auto">
+                {state.pendingPermissions.length > 1 && (
+                  /* 计数条(sticky 顶住):坞内部滚动时可滚区还有多少卡一眼可辨。 */
+                  <div className="sticky top-0 z-10 -mx-0.5 mb-0.5 bg-[var(--mx-editor-bg)] px-0.5 pb-0.5 text-[10px] text-[var(--mx-faint)]">
+                    {t("claudepane.approvalCount", { n: state.pendingPermissions.length })}
+                  </div>
+                )}
                 {state.pendingPermissions.map((p, permIdx) => {
                   const config = getToolConfig(p.toolName);
                   const title = config.label ?? p.displayName ?? p.toolName;
                   const cmdValue = config.getValue?.(p.input) ?? "";
+                  // 指挥台代批判定级(P2b):deny 红边+高危徽标,confirm 琥珀徽标;
+                  // 判定 10min TTL 自然过期,人处理卡无需回收。
+                  const verdict = conductorVerdicts.get(p.requestId);
+                  const danger = verdict?.level === "deny";
                   const detail = cmdValue ? (
                     <pre className="mx-scroll max-h-24 min-w-0 overflow-auto break-all rounded bg-[var(--mx-bg-soft)] px-2 py-1 text-[11px] text-[var(--mx-muted)]">
                       <code>{cmdValue}</code>
@@ -2680,7 +2740,40 @@ export function ClaudePane(props: ClaudePaneProps) {
                     ],
                   };
                   return (
-                    <div key={p.requestId} className="mx-dock-in" style={{ animationDelay: `${permIdx * 45}ms` }}>
+                    <div
+                      key={p.requestId}
+                      className={`mx-dock-in rounded-[var(--mx-radius)] ${
+                        danger ? "border border-[#ef444466]" : ""
+                      }`}
+                      style={{ animationDelay: `${permIdx * 45}ms` }}
+                    >
+                    {verdict && verdict.level !== "auto" && (
+                      <div
+                        className={`mx-chip mb-1 px-2 py-1 text-[11px] ${
+                          danger
+                            ? "bg-[#ef44441a] text-[#ef4444]"
+                            : "bg-[#f59e0b1a] text-[#f59e0b]"
+                        }`}
+                      >
+                        {danger ? t("claudepane.conductorDanger") : t("claudepane.conductorConfirm")}
+                        {verdict.reason ? ` · ${verdict.reason}` : ""}
+                      </div>
+                    )}
+                    {verdict?.level === "auto" && (
+                      /* 宽限倒计时(2026-11-17「先弹卡再自动选」;2026-11-18 改活秒递减):
+                        receivedAt + delayMs 算剩余,hook 500ms 心跳驱动重渲染实时走;
+                        到点后端已放行,短暂显示「已自动批准」等卡被流冲走。 */
+                      (() => {
+                        const remainMs = verdict.receivedAt + (verdict.delayMs ?? 5_000) - Date.now();
+                        return (
+                          <div className="mx-chip mb-1 px-2 py-1 text-[11px] bg-[#3b82f61a] text-[#3b82f6] tabular-nums">
+                            {remainMs > 0
+                              ? t("claudepane.conductorAuto", { s: Math.ceil(remainMs / 1000) })
+                              : t("claudepane.conductorAutoDone")}
+                          </div>
+                        );
+                      })()
+                    )}
                     <InteractivePanel
                       request={approvalRequest}
                       t={t}
@@ -2691,6 +2784,11 @@ export function ClaudePane(props: ClaudePaneProps) {
                       noAutoFocus
                       onAnswer={(ans) => {
                         if (ans.kind !== "approval") return;
+                        // 人手动接管:撤销指挥台 auto 宽限代批(confirm/deny 不在
+                        // auto_pending,调用无害返回 false)。fire-and-forget。
+                        if (verdict) {
+                          void invoke("conductor_auto_approve_cancel", { requestId: p.requestId }).catch(() => {});
+                        }
                         const transport = getClaudeTransportRef.current(activeTabId);
                         if (ans.decision === "allow") {
                           void transport.respondPermission(p.requestId, "allow", { input: p.input });
@@ -2706,6 +2804,27 @@ export function ClaudePane(props: ClaudePaneProps) {
                     </div>
                   );
                 })}
+              </div>
+            )}
+            {/* 宽限代批落定留痕(2026-11-18 用户:「自动批准后消息流中的批准卡消失」):
+                到点自动放行的请求挂淡绿幽灵行(后端 conductor-auto-approved 驱动),
+                卡消失后仍能看到批了什么工具/命令,60s 淡出、上限 5 条。 */}
+            {conductorAutoGhosts.length > 0 && (
+              <div className="mb-1.5 flex flex-col gap-1">
+                {conductorAutoGhosts.map((g) => (
+                  <div
+                    key={g.requestId}
+                    className="mx-chip mx-dock-in flex items-center gap-1.5 border border-[#22c55e2e] bg-[#22c55e0d] px-2 py-1 text-[11px] text-[var(--mx-muted)]"
+                    title={g.summary}
+                  >
+                    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#22c55e" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden className="shrink-0">
+                      <path d="M20 6 9 17l-5-5" />
+                    </svg>
+                    <span className="shrink-0">{t("claudepane.conductorAutoDone")}</span>
+                    <span className="shrink-0 font-medium text-[var(--mx-text)]">{g.toolName}</span>
+                    {g.summary && <span className="min-w-0 flex-1 truncate">{g.summary}</span>}
+                  </div>
+                ))}
               </div>
             )}
             {claudeMissing ? (
@@ -3069,6 +3188,31 @@ export function ClaudePane(props: ClaudePaneProps) {
                                   />
                                 )}
                                 <div className="mx-scroll-pretty max-h-[min(50vh,360px)] overflow-y-auto">
+                                  {/* 本 tab 有 per-tab override 时提供回「跟随全局」出口:清 override
+                                      + 模型回 default,重启走全局 settings env。 */}
+                                  {tabProviderEnv && (
+                                    <button
+                                      type="button"
+                                      onMouseDown={(e) => e.stopPropagation()}
+                                      onClick={() => {
+                                        setMenuMode(null);
+                                        const transport = getClaudeTransportRef.current(activeTabId);
+                                        if (!transport) return;
+                                        // busy 先 interrupt(同 switchProviderModel),再清 override。
+                                        void (async () => {
+                                          if (busy) await transport.interrupt();
+                                          await transport.clearProvider();
+                                        })();
+                                      }}
+                                      className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[var(--mx-muted)] transition-colors hover:bg-[var(--mx-hover-bg)] hover:text-[var(--mx-text)]"
+                                    >
+                                      <span className="flex-1 truncate text-[11px]">{t("claudepane.providerFollowGlobal")}</span>
+                                      <svg className="h-3 w-3 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" aria-hidden>
+                                        <path d="M3 12a9 9 0 1015.5-6.4L21 8" />
+                                        <path d="M21 3v5h-5" />
+                                      </svg>
+                                    </button>
+                                  )}
                                   {providerGroups.map((g) => (
                                     <div key={g.p.id}>
                                       <div
@@ -3954,7 +4098,9 @@ const MessageRow = memo(function MessageRow({
             </svg>
           )}
           <span className="shrink-0" style={{ color: tone }}>{label}</span>
-          {suffix && <span className="min-w-0 [overflow-wrap:anywhere]">{suffix}</span>}
+          {/* summary 限 3 行内部滚动(claude 原文,后台任务输出常巨长,全量渲染把居中通知行
+              撑成大块,淹没消息流)。 */}
+          {suffix && <span className="mx-scroll-pretty max-h-12 min-w-0 overflow-y-auto [overflow-wrap:anywhere]">{suffix}</span>}
         </span>
         <div className="h-px flex-1" style={{ borderTop: "1px dashed rgba(148,163,184,0.32)", background: "transparent" }} />
       </div>
@@ -4172,7 +4318,7 @@ function ThinkingBlock({ text, streaming, t }: { text: string; streaming: boolea
             }}
             className="mx-scroll-pretty max-h-[min(40vh,320px)] overflow-y-auto whitespace-pre-wrap break-words px-3 py-2.5 text-[12px] italic leading-relaxed text-(color:--mx-muted)"
           >
-            {text || "…"}
+            <PathAwareText text={text || "…"} />
           </div>
         </div>
       )}
