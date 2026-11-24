@@ -707,7 +707,13 @@ class _ChatPageState extends State<ChatPage> {
     final lastIdx = _stream.messages.length - 1;
     final currentPrompt = _currentPromptMessage;
     final n = _stream.messages.length + _stream.permissions.length;
-    if (n == 0) {
+    // 后台任务标签槽(2026-11-23,用户:「当有后台运行任务,在消息列表也要有标签」):
+    // 视觉最底部(最新内容之下)一枚可点标签 → 任务弹层。AppBar 的 _bgPill 在
+    // 深层堆栈里不可见/被挤掉,列表内标签保证「有后台活」在对话流里必然可感知。
+    final bgTasks = _stream.backgroundTasks;
+    final hasBg = bgTasks.isNotEmpty;
+    final total = n + (hasBg ? 1 : 0);
+    if (total == 0) {
       return const Center(
         child: Padding(
           padding: EdgeInsets.all(32),
@@ -721,10 +727,11 @@ class _ChatPageState extends State<ChatPage> {
       controller: _scroll,
       reverse: true,
       padding: const EdgeInsets.fromLTRB(12, 12, 12, 12),
-      itemCount: n,
+      itemCount: total,
       itemBuilder: (context, i) {
-        // 倒序索引:i=0 是最底部(最新的)。
-        final fromEnd = n - 1 - i;
+        // 倒序索引:i=0 是最底部(最新的);fromEnd == n 的槽位是后台任务标签。
+        final fromEnd = total - 1 - i;
+        if (hasBg && fromEnd == n) return _bgListTag(bgTasks);
         if (fromEnd >= _stream.messages.length) {
           return _permissionCard(_stream.permissions[fromEnd - _stream.messages.length]);
         }
@@ -741,6 +748,38 @@ class _ChatPageState extends State<ChatPage> {
           ],
         );
       },
+    );
+  }
+
+  /// 消息列表底部的后台任务标签(点开任务弹层,与 AppBar _bgPill 同一入口):
+  /// 紫系 chip + 图标 + 计数,有「停止中」在途指令时附带提示文字。
+  Widget _bgListTag(List<Map<String, String>> tasks) {
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: Padding(
+        padding: const EdgeInsets.only(bottom: 8),
+        child: GestureDetector(
+          onTap: _showBackgroundTasks,
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+            decoration: BoxDecoration(
+              color: Mx.violetSoft,
+              borderRadius: BorderRadius.circular(Mx.radiusSm),
+              border: Border.all(color: Mx.borderSoft),
+            ),
+            child: Row(mainAxisSize: MainAxisSize.min, children: [
+              const Icon(Icons.work_history_outlined, size: 12, color: Mx.violet),
+              const SizedBox(width: 4),
+              Text("后台任务 ×${tasks.length}",
+                  style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: Mx.violet)),
+              if (_killIssued.isNotEmpty) ...[
+                const SizedBox(width: 5),
+                const Text("停止中", style: TextStyle(fontSize: 10, color: Mx.warning)),
+              ],
+            ]),
+          ),
+        ),
+      ),
     );
   }
 

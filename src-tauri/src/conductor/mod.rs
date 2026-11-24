@@ -129,6 +129,12 @@ pub struct ConductorConfig {
     /// false = 旧行为(降级建议卡留人)。循环条目不排队(有自己的节奏)。
     /// 默认 true。见 pipeline::dispatch_queued。
     pub queue_when_occupied: bool,
+    /// 项目级建议开关·白名单(2026-11-23 用户:「对涌现的建议,针对项目级别加开关,
+    /// 不要动不动就给建议」):**空 = 默认全部项目安静不出常规建议**,列内项目才允许
+    /// Brain 源建议(5min 兜底轮 + 终态钩子);Manual「测试大脑」豁免(人主动点就是
+    /// 要看)。与 muted_projects(感知链全量黑名单)正交:静音管「听不听得到该项目
+    /// 的动静」,白名单管「副官对它说不说话」。serde default 零迁移(老盘空表安静)。
+    pub suggest_projects: Vec<String>,
     /// 权限分级表(自动驾驶二期 P2a):自定义 auto/confirm/deny 规则(工具名 + Bash
     /// 模式)。空表 = 一期默认行为;判定顺序见 `permissions::judge`。
     pub permission_rules: permissions::PermissionRules,
@@ -152,6 +158,7 @@ impl Default for ConductorConfig {
             auto_execute_suggestions: true,
             pipeline: false,
             queue_when_occupied: true,
+            suggest_projects: Vec::new(),
             permission_rules: permissions::PermissionRules::default(),
         }
     }

@@ -65,6 +65,8 @@ export function SettingsPanel({
   const [pipeline, setPipeline] = useState(false);
   /** 投递占用排队(2026-11-17):被占用锁全拦 → 排队等空闲终态自动补投(默认开)。 */
   const [queueWhenOccupied, setQueueWhenOccupied] = useState(true);
+  /** 项目建议白名单(2026-11-23):列内项目才出常规建议,默认空 = 全安静。 */
+  const [suggestOn, setSuggestOn] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
   const [savedAt, setSavedAt] = useState(0);
   const [testing, setTesting] = useState(false);
@@ -94,6 +96,7 @@ export function SettingsPanel({
       setAutoExecute(v.config.autoExecuteSuggestions);
       setPipeline(v.config.pipeline ?? false);
       setQueueWhenOccupied(v.config.queueWhenOccupied ?? true);
+      setSuggestOn(v.config.suggestProjects ?? []);
     } catch (e) {
       setMessage(String(e).replace(/^Error\b:?\s*/i, ""));
     }
@@ -256,6 +259,22 @@ export function SettingsPanel({
     try {
       await invoke("conductor_project_mute", { projectId, muted: !enable });
       await load();
+      onChanged();
+    } catch (e) {
+      setMessage(String(e).replace(/^Error\b:?\s*/i, ""));
+    }
+  };
+
+  /** 项目建议开关(2026-11-23 用户:「不要动不动就给建议」):白名单口径,即点即生效
+   *  (config patch 落盘,不走 dirty/save)。enable = 加入白名单(该项目允许出常规
+   *  建议);取消 = 安静(感知链照常,副官只是不说话)。 */
+  const toggleSuggest = async (projectId: string, enable: boolean) => {
+    const next = enable
+      ? [...suggestOn, projectId]
+      : suggestOn.filter((p) => p !== projectId);
+    try {
+      await invoke("conductor_config_set", { patch: { suggestProjects: next } });
+      setSuggestOn(next);
       onChanged();
     } catch (e) {
       setMessage(String(e).replace(/^Error\b:?\s*/i, ""));
@@ -643,6 +662,41 @@ export function SettingsPanel({
                   >
                     <span className="max-w-40 truncate">{p.name}</span>
                     {muted && <span className="text-[10px] opacity-80">{t("conductor.settings.projectMuted")}</span>}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </section>
+
+        {/* 项目建议白名单(2026-11-23 用户:「对涌现的建议,针对项目级别加开关,不要
+            动不动就给建议」):亮 = 该项目允许常规建议,暗 = 安静(默认;感知链照常,
+            副官只是不说话);chips 即点即生效不走保存。 */}
+        <section className="flex flex-col gap-1.5">
+          <div className="text-xs font-medium text-[var(--mx-text)]">{t("conductor.settings.suggestSection")}</div>
+          <div className="text-[11px] leading-snug text-[var(--mx-muted)]">
+            {t("conductor.settings.suggestHint")}
+          </div>
+          {projects.length === 0 ? (
+            <div className="text-[11px] text-[var(--mx-muted)]">{t("conductor.settings.projectsEmpty")}</div>
+          ) : (
+            <div className="flex flex-wrap gap-1">
+              {projects.map((p) => {
+                const on = suggestOn.includes(p.id);
+                return (
+                  <button
+                    key={p.id}
+                    type="button"
+                    onClick={() => void toggleSuggest(p.id, !on)}
+                    title={on ? t("conductor.settings.suggestOffTitle") : t("conductor.settings.suggestOnTitle")}
+                    className={`mx-chip flex cursor-pointer items-center gap-1 px-2 py-1 text-[11px] ${
+                      on
+                        ? "bg-[var(--mx-accent-soft)] text-[var(--mx-accent)]"
+                        : "bg-[var(--mx-hover-bg)] text-[var(--mx-muted)] hover:text-[var(--mx-text)]"
+                    }`}
+                  >
+                    <span className="max-w-40 truncate">{p.name}</span>
+                    {!on && <span className="text-[10px] opacity-80">{t("conductor.settings.suggestOff")}</span>}
                   </button>
                 );
               })}

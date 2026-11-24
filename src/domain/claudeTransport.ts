@@ -123,6 +123,11 @@ export class ClaudeTransport {
    * (is_error=true、error=null),不拦会进重试分流且 isRetryableApiError(null)=true →
    * **自动重发被中断的 prompt**(spike 实测 2026-10-21)。 */
   private softInterrupting = false;
+  /** 程序化中断在途(sendToolResult busy 自愈/approveTool 重启):CLI abort 后会补发一条
+   *  「[Request interrupted by user]」合成 user 消息——真人 ESC 中断显示它是对的,但批准
+   *  注入链显示它就成了用户反馈的「批准后显示我自己手动中断了」。置位期间 handleEvent
+   *  把这条合成消息丢弃(2026-11-23)。 */
+  private autoInterrupting = false;
   /** API error 自动重试状态。非 null=重试中。核心不变量:「timer 已武装(等待期)」与
    *  「sendingPromise 在途(重发中)」必居其一——否则 status 被覆写 running 会 busy 死锁。 */
   private retryState: {
@@ -686,10 +691,16 @@ export class ClaudeTransport {
           const msg = typeof err === "string" ? err : String(err);
           if (!msg.includes("busy")) throw err;
           // busy:被拒后 claude 还在跑。kill + --resume 重启后重试(见方法注释)。
+          // autoInterrupting:丢弃 CLI abort 补发的合成中断消息(这是批准注入,不是用户手滑)。
           console.warn("[ClaudeTransport] sendToolResult busy, kill+resume+retry:", msg);
-          await this.interrupt();
-          await this.ensureStarted();
-          await write();
+          this.autoInterrupting = true;
+          try {
+            await this.interrupt();
+            await this.ensureStarted();
+            await write();
+          } finally {
+            this.autoInterrupting = false;
+          }
         }
       } catch (err) {
         this.handleEvent({
@@ -1208,6 +1219,15 @@ export class ClaudeTransport {
   }
 
   private handleEvent(payload: ClaudeEventPayload) {
+    // 程序化中断在途:丢弃 CLI 补发的「[Request interrupted by user]」合成 user 消息
+    // (批准注入/重启链的中断不是用户手滑,显示它就是假「我自己中断了」,2026-11-23)。
+    if (payload.kind === "user" && this.autoInterrupting) {
+      const raw = JSON.stringify(payload.message ?? "");
+      if (raw.includes("Request interrupted by user")) {
+        console.info("[ClaudeTransport] drop synthetic interrupt marker (auto-interrupting)");
+        return;
+      }
+    }
     // 长进程生命周期联动:init → started;terminated → dead(下次 send 重启)。
     if (payload.kind === "init") {
       console.log("[ClaudeTransport] init event", { model: payload.model, listeners: this.listeners.size, tabId: this.tabId });
@@ -1235,6 +1255,14 @@ export class ClaudeTransport {
         payload = { ...payload, success: true, error: null };
       } else if (payload.success) {
         this.cancelRetry();
+      } else if (payload.error == null) {
+        // 无错误文本的失败 result = CLI abort 产物(用户中断,2026-11-23):软中断标志在
+        // 1.2s 轮询超时后已清,迟到的 error_during_execution result 会漏进这里——不拦就进
+        // 重试分流,isRetryableApiError(null)=true → 假报「API 错误,正在重试」并自动重发
+        // 被中断的 prompt(用户:「两次 ESC 后弹 API 中断重连报错,其实完全没有」)。
+        // 真实 API 错误恒带错误文本("API Error: ..."),error=null 一律按中断产物处理。
+        this.cancelRetry();
+        payload = { ...payload, success: true, error: null };
       } else {
         this.scheduleRetry(this.lastPrompt, payload.error ?? null);
       }

@@ -1244,6 +1244,9 @@ export function ClaudePane(props: ClaudePaneProps) {
   // API error 自动重试状态(非 null=重试中)。重试期间 status 被覆写 running 维持 busy(中断按钮可用),
   // 此状态驱动状态行「API 错误,正在重试 (n/max)」(最高优先,盖住 thinkingNow)。
   const retrying = state?.retry ?? null;
+  // CLI 同轮 API 闪断自动重试(api_error 事件,2026-11-24):轮次未终,CLI 自己退避重试,
+  // 重试成功照常出内容(assistant 到达即清)。轻提示非错误样式;transport retry 横幅优先。
+  const apiRetry = state?.apiRetry ?? null;
   // 后台任务运行数(`background_tasks_changed` 快照)。本轮可能已结束(idle),驱动输入框上方
   // 琥珀状态行「后台任务 ×N」;busy/等待确认时被上方状态行盖住,不影响 busy 与发送。
   const bgCount = state?.backgroundTasks.length ?? 0;
@@ -2615,6 +2618,18 @@ export function ClaudePane(props: ClaudePaneProps) {
                 >
                   {t("claudepane.repeatLoopStop")}
                 </button>
+              </div>
+            )}
+            {/* CLI 同轮 API 闪断弱提示(api_error 透传,2026-11-24):CLI 自己退避重试中,轮次未终
+                ——区别于 retrying(transport 重发整条 prompt,橙色告警)。muted 弱样式,任何轮次
+                进展(assistant/user/result)即清。retrying 优先时本条不显(两者互斥场景)。 */}
+            {apiRetry && !retrying && (
+              <div className="mb-1.5 flex items-center gap-2 px-1 text-[var(--mx-muted)]" style={{ fontSize: statusFontPx }}>
+                <span aria-hidden className="h-1.5 w-1.5 animate-pulse rounded-full bg-[var(--mx-muted)]" />
+                <span>
+                  {t("claudepane.apiRetry", { n: apiRetry.attempt })}
+                  {apiRetry.message ? <span className="text-[var(--mx-faint)]"> · {apiRetry.message}</span> : null}
+                </span>
               </div>
             )}
             {(retrying || busy || compactRunning) && !hasPendingPlan && !hasPendingApproval && (

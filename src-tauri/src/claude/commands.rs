@@ -1357,6 +1357,29 @@ fn run_read_loop(app: AppHandle, project_id: String, tab_id: String, stdout: std
                             payload: ClaudeEventPayload::CompactBoundary { metadata },
                         },
                     );
+                } else if subtype == "api_error" {
+                    // API 闪断(529/503 等):CLI 同轮内自动退避重试,轮次未终。此前静默丢弃
+                    // 导致 CLI 自愈期间 UI 无感;透传给前端做轻量「自动重试中」提示(2026-11-24)。
+                    let message = v
+                        .get("error")
+                        .and_then(|e| {
+                            e.get("formatted")
+                                .or_else(|| e.get("message"))
+                                .and_then(|m| m.as_str())
+                        })
+                        .map(str::to_string);
+                    let _ = app.emit(
+                        "claude-event",
+                        ClaudeEvent {
+                            project_id: project_id.clone(),
+                            tab_id: tab_id.clone(),
+                            payload: ClaudeEventPayload::ApiRetry {
+                                attempt: v.get("retryAttempt").and_then(|a| a.as_u64()).unwrap_or(0) as u32,
+                                retry_in_ms: v.get("retryInMs").and_then(|a| a.as_u64()).unwrap_or(0),
+                                message,
+                            },
+                        },
+                    );
                 } else if subtype == "background_tasks_changed" {
                     // 后台任务列表权威快照(任务启动/完成/变化时推,含 result 之后的空闲期)。
                     // 前端据此显示「后台任务 ×N」,快照清空即回 idle。字段缺失容错:无 task_id 的项跳过。

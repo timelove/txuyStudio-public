@@ -103,6 +103,22 @@ import { SliderItem, SliderToggleGroup } from "./ui/SegmentSlider";
 
 /** 公开仓库地址(私有 origin 不暴露,此处指向公开 mirror)。 */
 const GITHUB_URL = "https://github.com/timelove/txuyStudio-public";
+/** 反馈 issue 快捷入口(2026-11-24 用户:「方便使用提交问题」):预填版本/平台,
+ * 公开仓无 ISSUE_TEMPLATE,query 预填直接生效。 */
+const ISSUE_URL = `${GITHUB_URL}/issues/new?${new URLSearchParams({
+  title: "[反馈] ",
+  body: [
+    "**环境**",
+    `- 版本: v${__APP_VERSION__}`,
+    "- 平台: Windows",
+    "",
+    "**问题描述**",
+    "",
+    "",
+    "**复现步骤**",
+    "",
+  ].join("\n"),
+}).toString()}`;
 
 /**
  * 应用更新器(设置 → 关于 tab)。基于 tauri-plugin-updater:check() 拉 endpoints 的
@@ -610,20 +626,39 @@ export function SettingsPage({ initialTab, onClose, onTitlePointerDown, onTitleD
               {/* 应用更新:检查/下载/安装/重启 + 新版本更新日志(见 AppUpdater 注释) */}
               <AppUpdater t={t} />
 
-              {/* GitHub 仓库链接:外部地址,target=_blank 由 Tauri 转给系统浏览器(无需 opener 依赖)。 */}
-              <a
-                href={GITHUB_URL}
-                target="_blank"
-                rel="noopener noreferrer"
-                aria-label={t("about.viewOnGithub")}
-                className="mx-chip mb-3 flex items-center gap-2 bg-[var(--mx-surface-soft)] px-3 py-2 text-[12px] text-[var(--mx-text)] transition-colors hover:bg-[var(--mx-hover-bg)]"
-              >
-                <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden className="shrink-0">
-                  <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z" />
-                </svg>
-                <span className="min-w-0 truncate">{GITHUB_URL.replace("https://", "")}</span>
-                <span aria-hidden className="ml-auto shrink-0 text-[var(--mx-muted)]">↗</span>
-              </a>
+              {/* 仓库 + 反馈 issue 双入口(外部地址,target=_blank 由 Tauri 拦截后转系统
+                  浏览器;issue 预填版本/平台,降低报问题描述成本)。 */}
+              <div className="mb-3 grid grid-cols-2 gap-2">
+                <a
+                  href={GITHUB_URL}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  aria-label={t("about.viewOnGithub")}
+                  className="mx-chip flex items-center gap-2 bg-[var(--mx-surface-soft)] px-3 py-2 text-[12px] text-[var(--mx-text)] transition-colors hover:bg-[var(--mx-hover-bg)]"
+                >
+                  <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden className="shrink-0">
+                    <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z" />
+                  </svg>
+                  <span className="min-w-0 truncate">{GITHUB_URL.replace("https://", "")}</span>
+                  <span aria-hidden className="ml-auto shrink-0 text-[var(--mx-muted)]">↗</span>
+                </a>
+                <a
+                  href={ISSUE_URL}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  aria-label={t("about.reportIssue")}
+                  title={t("about.reportIssueHint")}
+                  className="mx-chip flex items-center gap-2 bg-[var(--mx-surface-soft)] px-3 py-2 text-[12px] text-[var(--mx-text)] transition-colors hover:bg-[var(--mx-hover-bg)]"
+                >
+                  <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.2" aria-hidden className="shrink-0">
+                    <circle cx="8" cy="8" r="6.4" />
+                    <line x1="8" y1="7" x2="8" y2="11" strokeLinecap="round" />
+                    <circle cx="8" cy="4.8" r="0.9" fill="currentColor" stroke="none" />
+                  </svg>
+                  <span className="min-w-0 truncate">{t("about.reportIssue")}</span>
+                  <span aria-hidden className="ml-auto shrink-0 text-[var(--mx-muted)]">↗</span>
+                </a>
+              </div>
 
               {/* 协议 + 技术栈(固定英文,不译) */}
               <div className="text-[11px] leading-relaxed text-[var(--mx-faint)]">

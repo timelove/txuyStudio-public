@@ -173,6 +173,17 @@ pub enum ClaudeEventPayload {
     /// `cumulative_dropped_tokens`/`duration_ms`/`preserved_segment`/`preserved_messages`),
     /// 前端据此渲染「已压缩 pre→post tokens」分隔线。后端不解析内部结构(透传 Value)。
     CompactBoundary { metadata: serde_json::Value },
+    /// `system subtype=api_error`(2026-11-24 用户:「529 后又好了,其实是正常思考的,
+    /// 但消息框上还是出现 api 重连信息」):CLI 在**同一轮内**遇 API 闪断(529/503 等)
+    /// 自己按指数退避重试(retryAttempt/retryInMs),**轮次未终**——重试成功后照常出内容。
+    /// 此前该事件被静默丢弃,CLI 自愈期间 UI 无从感知;CLI 真放弃后的 error result 走
+    /// transport 的 retry 横幅(那是另一条路径)。透传 attempt/延时/错误摘要,前端做
+    /// **轻量非错误样式**提示;任何轮次进展(assistant/user/result)到达即清除。
+    ApiRetry {
+        attempt: u32,
+        retry_in_ms: u64,
+        message: Option<String>,
+    },
     /// `system subtype=background_tasks_changed`:后台任务列表**权威快照**(任务启动/完成/列表
     /// 变化时推,含 `result` 之后的空闲期)。tasks = 当前运行中的全部后台任务(local_bash/
     /// subagent 等),前端据此显示「后台任务 ×N」状态,快照清空即回 idle。

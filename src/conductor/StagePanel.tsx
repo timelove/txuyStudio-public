@@ -19,73 +19,23 @@
  * 美学:像素字(Pixelify Sans)上数字、crispEdges 方点刻度、阶梯描边仪表件;
  * 分隔语言是排版层级(标签行/大数/正文),不是盒子套盒子。
  */
-import { useEffect, useRef, useState, type CSSProperties } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { InboxTarget, ToolBeat } from "../domain/conductor";
 import { relativeTime } from "./ui";
+import {
+  CAT_COLORS,
+  beatWeight,
+  sessionColor,
+  toolCat,
+  toolColor,
+  type ToolCat,
+} from "./stageColors";
+import { EngineCore } from "./EngineCore";
 
-/** 会话色签(hash 稳定取色;柔和降饱和色板——玫红/粉两色原 #e11d48/#ec4899 太亮
- *  刺眼,2026-11-19 用户反馈压暗为灰玫/灰粉;一群会话混流也一眼分得清)。 */
-const SESSION_COLORS = [
-  "#c96f85",
-  "#d9a03f",
-  "#3f9d78",
-  "#4f83c4",
-  "#8f7cc9",
-  "#4aa3b5",
-  "#bd7aa6",
-  "#7fa04a",
-];
-
-export function sessionColor(key: string): string {
-  let h = 0;
-  for (let i = 0; i < key.length; i++) h = (h * 31 + key.charCodeAt(i)) >>> 0;
-  return SESSION_COLORS[h % SESSION_COLORS.length];
-}
-
-type ToolCat = "read" | "write" | "exec" | "spawn" | "other";
-
-/** 工具分类(图表/XP 权重/EDITS 计数共用一套口径):
- *  读=青 / 写=accent 金 / 执行=紫(mcp 归执行) / 派生=绿 / 其他=灰。 */
-function toolCat(tool: string): ToolCat {
-  const t = tool.toLowerCase();
-  const is = (...names: string[]) =>
-    names.some((n) => t === n || t.startsWith(n + "(") || t.startsWith(n + ":"));
-  if (is("read", "grep", "glob", "ls", "view", "search", "todowrite", "todoread", "websearch", "webfetch"))
-    return "read";
-  if (is("edit", "write", "multiedit", "notebookedit", "apply_patch", "patch", "save", "create"))
-    return "write";
-  if (is("bash", "shell", "powershell", "cmd", "exec") || t.startsWith("mcp:")) return "exec";
-  if (is("task", "agent", "dispatch", "fork")) return "spawn";
-  return "other";
-}
-
-const CAT_COLORS: Record<ToolCat, string> = {
-  read: "#06b6d4",
-  write: "var(--mx-accent)",
-  exec: "#8b5cf6",
-  spawn: "#10b981",
-  other: "var(--mx-muted)",
-};
-
-/** 工具名分色(微条/拍流/图表共口径)。 */
-export function toolColor(tool: string): string {
-  return CAT_COLORS[toolCat(tool)];
-}
-
-/** XP 权重:动手比动眼值钱,派生(子任务)最值钱。 */
-function beatWeight(tool: string): number {
-  switch (toolCat(tool)) {
-    case "write":
-      return 2;
-    case "exec":
-      return 2;
-    case "spawn":
-      return 3;
-    default:
-      return 1;
-  }
-}
+// 分色/分类/XP 权重口径收在 stageColors.ts(2026-11-23,EngineCore 与本件共用,
+// 防 StagePanel ↔ EngineCore 循环 import);此处转发导出保住既有消费面。
+export { sessionColor, toolColor } from "./stageColors";
 
 /** 连击窗口:相邻两拍间隔 ≤20s 算连招延续。 */
 const COMBO_MS = 20_000;
@@ -106,16 +56,6 @@ function levelOf(xp: number): { lv: number; into: number; span: number } {
   let i = 0;
   while (i + 1 < LEVEL_BASE.length && xp >= LEVEL_BASE[i + 1]) i++;
   return { lv: i + 1, into: xp - LEVEL_BASE[i], span: LEVEL_BASE[i + 1] - LEVEL_BASE[i] };
-}
-
-/** 圆弧路径(0° = 12 点方向,顺时针;a1-a0 恒 <180,largeArc 恒 0)。 */
-function arcPath(cx: number, cy: number, r: number, a0: number, a1: number): string {
-  const rad = (a: number) => ((a - 90) * Math.PI) / 180;
-  const x0 = cx + r * Math.cos(rad(a0));
-  const y0 = cy + r * Math.sin(rad(a0));
-  const x1 = cx + r * Math.cos(rad(a1));
-  const y1 = cy + r * Math.sin(rad(a1));
-  return `M ${x0.toFixed(2)} ${y0.toFixed(2)} A ${r} ${r} 0 0 1 ${x1.toFixed(2)} ${y1.toFixed(2)}`;
 }
 
 /** 拍流行(大屏 full 两行式 / 窄栏 compact 单行,由 `showSession` 切换):
@@ -193,11 +133,6 @@ export function BeatRow({
   );
 }
 
-/** 一枚飞进引擎的像素火箭:id = 拍 seq;起点由 CSS 变量 --sx/--sy 驱动(终点恒为
- *  引擎中心 = translate 0),--rot = 机头朝向(沿飞行方向,atan2 反解);
- *  播完 onAnimationEnd 自清并触发命中脉冲。 */
-type Spark = { id: number; color: string; sx: number; sy: number; rot: number };
-
 /** XP 总账 hook(引擎与底部等级条共用,2026-11-19 等级条下沉到整窗底):ref 按
  *  seq 去重(拍列 80 条封顶,老拍出窗不回吐);冷启动 baseXp>0 = 后端总账起步
  *  (窗口内拍已含,只记 lastSeq 供增量起步),否则退回窗口内播种(旧后端/无记录
@@ -266,15 +201,10 @@ export function useStageXp(beats: ToolBeat[], baseXp?: number): StageXpState {
   return { xp: stats.xp, lv, into, span, flash, burst };
 }
 
-/** 引擎舞台(大屏中央执行状态,cromma Game View 同构;等级条已下沉整窗底,
- *  本件只管「引擎在干活」的演出):
- * - 反应核(同心三方块):中环 8 段弧活动期旋转,内核 accent 呼吸;
- * - **子 agent 轨道**(2026-11-19 中景丰富):虚线轨道环 + 最多 6 枚会话圆点
- *   (色签)24s 反向公转,最新拍所属会话的轨道点放大加环——「一群 agent 绕核运转」;
- * - 每次工具调用 = 一枚光点(分类色方点)从右翼飞进反应核,740ms 命中——
- *   内核 brightness 脉冲一次(.mx-engine-hit);
- * - 核上是最新拍 chip(工具·摘要·时间),升级横幅在核区爆发;
- * - 静默期(60s 无拍)环停核暗,整台引擎待机。 */
+/** 引擎舞台外壳(2026-11-23 重构:引擎本体移交 [`EngineCore`] canvas 组件——
+ *  用户「中间的动态效果感觉很low,就一个圈里面几个点」,旧 SVG 逐拍才动、静默期
+ *  整台死机;新引擎 rAF 连续运转,见 EngineCore.tsx 头注)。本件只保留:1s 心跳
+ *  (combo 衰减/相对时间新鲜度)、最新拍 chip(引擎下方出料口)与连击挂件。 */
 export function StageConsole({
   beats,
   xp,
@@ -283,9 +213,7 @@ export function StageConsole({
   beats: ToolBeat[];
   /** XP 演出状态(useStageXp;升级横幅在核区爆发)。 */
   xp: StageXpState;
-  /** 运行中会话键(`projectId/tabId`;2026-11-19 用户:「输入个消息实况没变化」
-   *  ——拍只来自工具调用,纯文字轮次零拍引擎不动,缺「发消息就有反馈」。
-   *  会话 running/waiting 期间引擎照转、对应轨道点脉冲)。 */
+  /** 运行中会话键(`projectId/tabId`)。 */
   runningKeys?: string[];
 }) {
   const { t } = useTranslation();
@@ -299,36 +227,6 @@ export function StageConsole({
     return () => clearInterval(id);
   }, [alive]);
 
-  // 光点:新拍 → 一枚 spark 从右翼随机高度飞向核;动画播完(onAnimationEnd)
-  // 自清并触发命中脉冲(hitKey 变化让内核重放 .mx-engine-hit)。并发上限 8 防御。
-  const [sparks, setSparks] = useState<Spark[]>();
-  const [hitKey, setHitKey] = useState(0);
-  const lastSparkSeq = useRef(0);
-  useEffect(() => {
-    const latest = beats[0];
-    if (!latest || latest.seq === lastSparkSeq.current) return;
-    // 一次帧可能带来多拍,逐枚起飞(错开起点高度)。
-    const fresh = beats.filter((b) => b.seq > lastSparkSeq.current);
-    lastSparkSeq.current = latest.seq;
-    setSparks((prev) => {
-      const next = [...(prev ?? [])];
-      for (const b of fresh) {
-        const sx = 150 + Math.round(Math.random() * 46);
-        const sy = -84 + Math.round(Math.random() * 168);
-        // 机头朝向:飞行向量 = 起点→核心(-sx,-sy),局部坐标机头朝上(-90°),
-        // rotate = 飞向角 + 90°。
-        next.push({
-          id: b.seq,
-          color: CAT_COLORS[toolCat(b.tool)],
-          sx,
-          sy,
-          rot: (Math.atan2(-sy, -sx) * 180) / Math.PI + 90,
-        });
-      }
-      return next.slice(-8);
-    });
-  }, [beats]);
-
   if (!alive) return null;
 
   const latest = beats[0];
@@ -339,155 +237,13 @@ export function StageConsole({
     for (let i = 0; i + 1 < beats.length && beats[i].ms - beats[i + 1].ms <= COMBO_MS; i++) combo += 1;
   }
   const active = Date.now() - latest.ms <= 60_000 || (runningKeys?.length ?? 0) > 0;
-  // 轨道会话:窗口 48 拍去重前 6(按首见序,稳定不跳)。
-  const orbitKeys: string[] = [];
-  for (const b of beats.slice(0, 48)) {
-    const key = `${b.projectId}/${b.tabId}`;
-    if (!orbitKeys.includes(key)) orbitKeys.push(key);
-    if (orbitKeys.length >= 6) break;
-  }
-  const latestKey = `${latest.projectId}/${latest.tabId}`;
 
   return (
-    <div className="flex flex-col items-center gap-2.5">
-      {/* 引擎本体:外环刻度 + 旋转中环 + 轨道环(会话圆点)+ 反应核;光点层覆在其上。
-          最新拍 chip 移到引擎**下方**(2026-11-20,用户:「动态描述换个地方放,不想
-          放最中间的上面」——上方压引擎顶,下方读起来自然)。 */}
-      <div className="relative" style={{ width: 216, height: 216 }}>
-        <svg
-          width="216"
-          height="216"
-          viewBox="0 0 210 210"
-          shapeRendering="crispEdges"
-          role="img"
-          aria-label={t("conductor.stage.engineLabel")}
-          style={{ opacity: active ? 1 : 0.62, transition: "opacity 400ms" }}
-        >
-          {/* 外环:48 方点刻度(静态仪器感)。 */}
-          {Array.from({ length: 48 }, (_, i) => {
-            const a = (i * 7.5 * Math.PI) / 180 - Math.PI / 2;
-            return (
-              <rect
-                key={i}
-                x={(105 + 100 * Math.cos(a) - 1).toFixed(2)}
-                y={(105 + 100 * Math.sin(a) - 1).toFixed(2)}
-                width="2"
-                height="2"
-                fill="var(--mx-border)"
-              />
-            );
-          })}
-          {/* 中环:8 段弧,活动期缓慢旋转(引擎在吞拍的感觉)。 */}
-          <g
-            className={active ? "mx-engine-spin" : undefined}
-            style={{ transformOrigin: "105px 105px" }}
-          >
-            {Array.from({ length: 8 }, (_, i) => (
-              <path
-                key={i}
-                d={arcPath(105, 105, 84, i * 45 + 6, i * 45 + 39)}
-                fill="none"
-                stroke="var(--mx-border)"
-                strokeWidth="8"
-              />
-            ))}
-          </g>
-          {/* 子 agent 轨道:虚线环 + 会话圆点(色签)反向公转;最新拍所属会话
-              的点放大——「谁在喂引擎」一眼可辨。 */}
-          <circle
-            cx="105"
-            cy="105"
-            r="62"
-            fill="none"
-            stroke="var(--mx-border)"
-            strokeWidth="1"
-            strokeDasharray="3 5"
-            opacity="0.7"
-          />
-          <g
-            className={active ? "mx-engine-orbit" : undefined}
-            style={{ transformOrigin: "105px 105px" }}
-          >
-            {orbitKeys.map((key, i) => {
-              const a = ((i / Math.max(1, orbitKeys.length)) * 360 * Math.PI) / 180 - Math.PI / 2;
-              const hit = key === latestKey;
-              const running = runningKeys?.includes(key) ?? false;
-              const r = 62;
-              return (
-                <g key={key}>
-                  <title>{key.split("/")[1]}</title>
-                  <rect
-                    x={(105 + r * Math.cos(a) - (hit ? 4 : 3)).toFixed(2)}
-                    y={(105 + r * Math.sin(a) - (hit ? 4 : 3)).toFixed(2)}
-                    width={hit ? 8 : 6}
-                    height={hit ? 8 : 6}
-                    fill={sessionColor(key)}
-                    opacity={hit ? 1 : 0.8}
-                    className={running ? "animate-pulse" : undefined}
-                  />
-                  {hit && (
-                    <rect
-                      x={(105 + r * Math.cos(a) - 7).toFixed(2)}
-                      y={(105 + r * Math.sin(a) - 7).toFixed(2)}
-                      width="14"
-                      height="14"
-                      fill="none"
-                      stroke="var(--mx-accent)"
-                      strokeWidth="1.5"
-                    />
-                  )}
-                </g>
-              );
-            })}
-          </g>
-          {/* 反应核:同心三方块(容器/衬层/燃料芯)。 */}
-          <rect x="82" y="82" width="46" height="46" fill="var(--mx-card-bg)" stroke="var(--mx-border)" strokeWidth="2" />
-          <rect x="90" y="90" width="30" height="30" fill="var(--mx-border)" />
-          <rect
-            key={hitKey}
-            x="97"
-            y="97"
-            width="16"
-            height="16"
-            fill="var(--mx-accent)"
-            className={`mx-engine-hit${active ? " animate-pulse" : ""}`}
-          />
-        </svg>
-        {/* 火箭层(2026-11-19,用户:「飞入引擎搞个火箭样式,比较炫酷」):每拍一枚
-            像素小火箭,机身按工具分类着色,尾焰 accent 闪烁,机头沿飞行方向直插
-            反应核;飞完自清 + 命中脉冲。 */}
-        {(sparks ?? []).map((s) => (
-          <div
-            key={s.id}
-            className="mx-spark"
-            style={{ "--sx": `${s.sx}px`, "--sy": `${s.sy}px` } as CSSProperties}
-            onAnimationEnd={(e) => {
-              if (e.animationName !== "mx-spark-fly") return;
-              setSparks((prev) => (prev ?? []).filter((x) => x.id !== s.id));
-              setHitKey((k) => k + 1);
-            }}
-          >
-            <svg
-              className="mx-spark-rocket"
-              width="14"
-              height="20"
-              viewBox="0 0 7 10"
-              shapeRendering="crispEdges"
-              style={{ "--rot": `${s.rot}deg` } as CSSProperties}
-              aria-hidden
-            >
-              {/* 机身+鼻锥+尾翼:分类色。 */}
-              <rect x="3" y="0" width="1" height="2" fill={s.color} />
-              <rect x="2" y="2" width="3" height="5" fill={s.color} />
-              <rect x="1" y="5" width="1" height="2" fill={s.color} />
-              <rect x="5" y="5" width="1" height="2" fill={s.color} />
-              {/* 舷窗:卡底色挖窗。 */}
-              <rect x="3" y="3" width="1" height="1" fill="var(--mx-card-bg)" />
-              {/* 尾焰:accent,steps 闪烁。 */}
-              <rect x="3" y="7" width="1" height="3" fill="var(--mx-accent)" className="mx-spark-flame" />
-            </svg>
-          </div>
-        ))}
+    <div className="flex h-full w-full flex-col items-center justify-center gap-2.5">
+      {/* 引擎本体:canvas 反应炉(EngineCore rAF 连续渲染——扫描扇/三层反向旋转环/
+          环境粒子/燃料彗星坠核/冲击波,能量随会话活跃度呼吸);升级横幅仍覆在其上。 */}
+      <div className="relative min-h-0 w-full flex-1">
+        <EngineCore beats={beats} active={active} runningKeys={runningKeys ?? []} />
         {xp.burst && (
           <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center">
             <div
@@ -506,7 +262,7 @@ export function StageConsole({
           限 320px 截断,全文 hover title)。 */}
       <div
         key={latest.seq}
-        className="mx-px-chip mx-px-pop flex max-w-[320px] items-center gap-1 px-1.5 py-0.5 text-[11px] leading-none"
+        className="mx-px-chip mx-px-pop flex max-w-[320px] shrink-0 items-center gap-1 px-1.5 py-0.5 text-[11px] leading-none"
       >
         <span className="shrink-0 font-semibold" style={{ color: toolColor(latest.tool) }}>
           {latest.tool}

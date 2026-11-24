@@ -1159,50 +1159,8 @@ body.mx-dragging-split.dragging-vertical * {
     2px 0 0 0 var(--mx-accent),
     3px 4px 0 0 color-mix(in srgb, var(--mx-accent) 55%, #000);
 }
-/* 引擎火箭(2026-11-19,用户:「飞入引擎搞个火箭样式」;前身=像素方点):外层容器
- * 负责 translate 飞行轨迹(--sx/--sy → 引擎中心),内层 .mx-spark-rocket 按 --rot
- * 转动机头朝向飞行方向,尾焰 steps 闪烁。播完 onAnimationEnd 自清 + 命中脉冲。 */
-.mx-spark {
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  width: 14px;
-  height: 20px;
-  margin: -10px 0 0 -7px;
-  pointer-events: none;
-  animation: mx-spark-fly 740ms cubic-bezier(0.25, 0.6, 0.35, 1) forwards;
-}
-.mx-spark-rocket {
-  width: 100%;
-  height: 100%;
-  transform: rotate(var(--rot, 0deg));
-}
-.mx-spark-flame {
-  animation: mx-spark-flame 180ms steps(2, jump-none) infinite;
-}
-@keyframes mx-spark-flame {
-  0% { opacity: 1; }
-  50% { opacity: 0.35; }
-  100% { opacity: 1; }
-}
-@keyframes mx-spark-fly {
-  0% { transform: translate(var(--sx), var(--sy)) scale(1.15); opacity: 0; }
-  12% { opacity: 1; }
-  80% { opacity: 1; }
-  100% { transform: translate(0, 0) scale(0.55); opacity: 0; }
-}
-/* 引擎中环旋转(活动期吞拍感)、命中脉冲(光点进核闪一下)与子 agent 轨道
- * 公转(2026-11-19:会话圆点 24s 反向绕核,「一群 agent 绕核运转」)。 */
-.mx-engine-spin { animation: mx-engine-spin 10s linear infinite; }
-@keyframes mx-engine-spin { to { transform: rotate(360deg); } }
-.mx-engine-orbit { animation: mx-engine-orbit 24s linear infinite reverse; }
-@keyframes mx-engine-orbit { to { transform: rotate(360deg); } }
-.mx-engine-hit { animation: mx-engine-hit 320ms ease-out; }
-@keyframes mx-engine-hit {
-  0% { filter: brightness(1); }
-  25% { filter: brightness(2); }
-  100% { filter: brightness(1); }
-}
+/* 引擎中央动效已移交 canvas 组件 EngineCore(2026-11-23,rAF 连续渲染:扫描扇/
+ * 三层反向旋转环/环境粒子/燃料彗星/冲击波;旧 CSS 火箭与 SVG 环动画随之移除)。 */
 /* 数值变化 pop(cromma cb-pop 同款过冲;配合 key={value} 重挂载重触发)。 */
 @keyframes mx-px-pop {
   0% { transform: scale(1); }
@@ -1237,12 +1195,7 @@ body.mx-dragging-split.dragging-vertical * {
   .mx-beat-in,
   .mx-level-up,
   .mx-px-pop,
-  .mx-level-burst,
-  .mx-spark,
-  .mx-spark-flame,
-  .mx-engine-spin,
-  .mx-engine-orbit,
-  .mx-engine-hit {
+  .mx-level-burst {
     animation: none;
   }
 }

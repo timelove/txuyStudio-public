@@ -1719,14 +1719,26 @@ pub async fn auto_suggest(
         // 到 active 项目或仍有 AI 进程,见 project_is_open):窗口关了/多项目窗口切走了,
         // pane tree 与 sessions 行都残留(进程已 kill,事件不再来,懒 GC 用的也是 tree
         // 口径剪不掉)——候选统一只认当前打开的项目。
+        // 项目建议白名单(2026-11-23 用户:「对涌现的建议,针对项目级别加开关,不要
+        // 动不动就给建议」):Brain 源常规轮(5min 兜底 + 终态钩子)只对白名单内项目
+        // 出建议,空表 = 默认全安静;Manual「测试大脑」豁免——人主动点就是要看。
+        let gate_suggest = source == DecisionSource::Brain;
+        let suggest_on = |pid: &str| data.config.suggest_projects.iter().any(|p| p == pid);
         let mut rows: Vec<SessionStatus> = data
             .sessions
             .values()
-            .filter(|s| open_projects.contains(&s.project_id) && !super::is_muted(&data, &s.project_id))
+            .filter(|s| {
+                open_projects.contains(&s.project_id)
+                    && !super::is_muted(&data, &s.project_id)
+                    && (!gate_suggest || suggest_on(&s.project_id))
+            })
             .cloned()
             .collect();
         for (tab_id, shell_kind, project_id, _title) in &tree_tabs {
             if super::is_muted(&data, project_id) {
+                continue;
+            }
+            if gate_suggest && !suggest_on(project_id) {
                 continue;
             }
             if !data.sessions.contains_key(&super::skey(project_id, tab_id)) {
@@ -1758,7 +1770,7 @@ pub async fn auto_suggest(
                 .map(|s| (t.to_string(), s.clone()))
         });
         if target.is_none() && target_tab.is_some() {
-            return Err("目标会话不在候选(项目窗口未开或被静音),不出建议".to_string());
+            return Err("目标会话不在候选(项目窗口未开/被静音/项目建议未开),不出建议".to_string());
         }
         let target = target
             .or_else(|| {
@@ -2467,6 +2479,8 @@ pub fn conductor_config_get(conductor: State<'_, ConductorState>) -> Result<Valu
             "pipeline": cfg.pipeline,
             // 投递占用排队(被占全拦 → Queued 等空闲终态自动补投;false = 降级建议卡)。
             "queueWhenOccupied": cfg.queue_when_occupied,
+            // 项目级建议开关·白名单(空 = 全部项目安静不出常规建议;列内才出)。
+            "suggestProjects": cfg.suggest_projects,
             // 权限分级表(P2a;P2b 设置编辑器消费,空表 = 默认行为)。
             "permissionRules": serde_json::to_value(&cfg.permission_rules).unwrap_or_default(),
         },
@@ -2585,6 +2599,19 @@ pub fn conductor_config_set(
             if let Some(v) = patch.get("queueWhenOccupied") {
                 if let Some(b) = v.as_bool() {
                     cfg.queue_when_occupied = b;
+                }
+            }
+            // 项目建议白名单(2026-11-23):数组整体替换,逐个 trim 去空去重。
+            if let Some(v) = patch.get("suggestProjects") {
+                if let Some(arr) = v.as_array() {
+                    let mut seen = std::collections::HashSet::new();
+                    cfg.suggest_projects = arr
+                        .iter()
+                        .filter_map(|x| x.as_str())
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty() && seen.insert(s.to_string()))
+                        .map(str::to_string)
+                        .collect();
                 }
             }
             // 权限分级表(P2b):整表替换(编辑器整体序列化下发,不做字段级 merge——

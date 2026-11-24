@@ -38,6 +38,7 @@ export type ClaudeEventPayload =
   | { kind: "terminated"; reason: string }
   | { kind: "compact_status"; status: string | null; result: string | null; error: string | null }
   | { kind: "compact_boundary"; metadata: CompactMetadata }
+  | { kind: "api_retry"; attempt: number; retryInMs: number; message: string | null }
   | { kind: "background_tasks_changed"; tasks: BackgroundTaskInfo[] }
   | { kind: "task_notification"; taskId: string; toolUseId?: string; status: string; summary: string }
   | { kind: "context_usage"; data: Record<string, unknown> }
@@ -296,6 +297,10 @@ export type ClaudeStreamState = {
   /** API error 自动重试状态(非 null=重试中,含第几次/上限/下次重试时刻)。非 applyEvent 事件驱动,
    *  由 ClaudeTransport.scheduleRetry/cancelRetry 维护,emit 时覆写。null=不在重试。 */
   retry: { attempt: number; maxAttempts: number; nextRetryAt: number } | null;
+  /** CLI 同轮 API 闪断自动重试(`api_error` 事件,2026-11-24):轮次未终,CLI 自己退避重试,
+   *  重试成功照常出内容。与 retry(transport 重发整条 prompt)语义不同——这是轮内自愈,
+   *  轻提示即可。任何轮次进展(assistant/user/result)即清。 */
+  apiRetry: { attempt: number; retryInMs: number; message: string | null } | null;
   /** 待用户决策的 CLI 权限请求(can_use_tool;CLI 正阻塞等待答复)。result/terminated 清空。 */
   pendingPermissions: PendingPermission[];
 };
@@ -312,6 +317,7 @@ export const initialClaudeState: ClaudeStreamState = {
   expectingCompactSummary: false,
   backgroundTasks: [],
   retry: null,
+  apiRetry: null,
   pendingPermissions: [],
 };
 
@@ -473,6 +479,8 @@ export function applyEvent(state: ClaudeStreamState, payload: ClaudeEventPayload
     case "assistant": {
       next.status = "running";
       next.terminatedReason = null;
+      // 轮次有进展(模型出内容)= 已从 API 闪断恢复,清同轮重试提示。
+      next.apiRetry = null;
       const msg = payload.message;
       // 真实 assistant 消息的 model 回填 meta.model(每轮校正):setModel 乐观更新 meta.model 后,
       // 下一轮真实 assistant 事件把实际跑的 model 写回 meta.model--切换成功则落到新值,失败则自动
@@ -540,6 +548,8 @@ export function applyEvent(state: ClaudeStreamState, payload: ClaudeEventPayload
       // user 消息通常含 tool_result(claude 把工具结果包在 user role 里)。
       // compact summary 的 user message.content 可能是裸 string(claude 把压缩总结作为新起点的
       // user 消息,content 直接是总结文本而非 block 数组),先归一化成 block 数组。
+      // 轮次有进展 → CLI 已从 API 闪断恢复,清同轮重试提示。
+      next.apiRetry = null;
       const msg = payload.message;
       const rawContent = msg.content;
       const normalizedContent: ClaudeRawBlock[] = Array.isArray(rawContent)
@@ -678,6 +688,8 @@ export function applyEvent(state: ClaudeStreamState, payload: ClaudeEventPayload
       next.status = payload.success ? "done" : "error";
       // 轮次结束:CLI 已不再阻塞等待,任何残留的权限请求作废(否则卡片永挂)。
       if (next.pendingPermissions.length > 0) next.pendingPermissions = [];
+      // 轮次终态 → 同轮 API 闪断重试提示一并清除(成功=已自愈;失败=转 error 样式)。
+      next.apiRetry = null;
       next.lastResult = {
         success: payload.success,
         durationMs: payload.durationMs ?? 0,
@@ -814,6 +826,17 @@ export function applyEvent(state: ClaudeStreamState, payload: ClaudeEventPayload
       next.compactRunning = false;
       next.compactError = null;
       next.expectingCompactSummary = true;
+      return next;
+    }
+    case "api_retry": {
+      // CLI 同轮 API 闪断自动重试(2026-11-24):轻记录,不动 status/busy(轮次未终,
+      // 重试成功后 assistant/result 照常到达并顺带清掉本状态)。多次重试各成一条事件,
+      // 后到的覆盖前到的(attempt 递增)。
+      next.apiRetry = {
+        attempt: payload.attempt ?? 0,
+        retryInMs: payload.retryInMs ?? 0,
+        message: payload.message ?? null,
+      };
       return next;
     }
     case "background_tasks_changed": {

@@ -450,6 +450,8 @@ const en = {
     description: "An AI CLI terminal workspace for Windows developers. Run claude, codex, regular shells, test commands and project tasks in parallel.",
     version: "Version",
     viewOnGithub: "View on GitHub",
+    reportIssue: "Report an issue",
+    reportIssueHint: "Open a prefilled GitHub issue (version & platform attached)",
   },
   statusbar: {
     updateAvailable: "Update available",
@@ -792,6 +794,11 @@ const en = {
       projectsEmpty: "No projects yet",
       projectMuted: "Muted",
       projectMuteTitle: "Click to toggle participate / mute",
+      suggestSection: "Project suggestions",
+      suggestHint: "All projects stay quiet by default — only lit ones produce regular suggestion cards (5-min patrol and end-of-run suggestions); \"Test brain\" is unaffected. Session pulse and badges stay on; the adjutant simply stays silent (takes effect immediately).",
+      suggestOff: "quiet",
+      suggestOnTitle: "Click to quiet this project (no suggestions)",
+      suggestOffTitle: "Click to allow suggestions for this project",
       promptSection: "Prompt skills",
       promptHint:
         "Plan-steps & verify system prompts live in editable files: open, edit, save — the next plan or verdict picks it up, no restart needed. An empty or deleted file falls back to the built-in default; \"Reset\" restores it anytime.",
@@ -1025,6 +1032,7 @@ const en = {
     shellInterrupted: "Interrupted",
     shellOutputTruncated: "Output too long, showing only the last {{n}} lines",
     retrying: "API error, retrying ({{n}}/{{max}})…",
+    apiRetry: "API hiccup, auto-retrying (attempt {{n}})…",
     retryFailed: "Failed after {{max}} retries{{error}}",
 modelSwitchTitle: "Switch model",
     modelSwitchDesc: "Switch to {model}? The current session will continue with the new model (sent messages keep their context).",

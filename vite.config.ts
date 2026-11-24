@@ -1,12 +1,15 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
-import { version } from "./package.json";
+import { version } from "./src-tauri/tauri.conf.json";
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
-  // 注入 package.json 版本号为全局常量,SettingsModal 等处直接引用,
-  // 版本号单一真相源在 package.json,发版无需再改前端代码。
+  // 注入版本号为全局常量,SettingsModal(关于页/issue 预填)/PerfPanel 等直接引用。
+  // 真源 = src-tauri/tauri.conf.json 的 version —— 与 NSIS 安装包、updater 版本同一来源,
+  // 关于页显示恒等于「实际安装的版本」(2026-11-24 修复:此前读 package.json,发版只 bump
+  // tauri.conf.json,导致关于页 v0.2.21 vs 安装 0.2.25 对不上)。发版只需改 tauri.conf.json
+  // 一处;package.json / Cargo.toml 仅元数据,随动即可(不进安装包、不参与 updater 比较)。
   define: {
     __APP_VERSION__: JSON.stringify(version),
   },

@@ -441,6 +441,8 @@ const zh = {
     description: "面向 Windows 开发者的 AI CLI 终端工作台。并行管理 claude、codex、常规 shell、测试命令与项目任务。",
     version: "版本",
     viewOnGithub: "在 GitHub 查看",
+    reportIssue: "提交问题",
+    reportIssueHint: "打开 GitHub issue 编辑页(自动预填版本与平台)",
   },
   statusbar: {
     updateAvailable: "新版本可用",
@@ -784,6 +786,11 @@ const zh = {
       projectsEmpty: "暂无项目",
       projectMuted: "已静音",
       projectMuteTitle: "点击切换参与/静音",
+      suggestSection: "项目建议",
+      suggestHint: "默认全部安静——只有点亮的项目才出常规建议卡(5 分钟巡检与会话跑完的终态建议);「测试大脑」不受影响。会话动态/徽标等感知照常,副官只是不说话(即点即生效)。",
+      suggestOff: "安静",
+      suggestOnTitle: "点击转为安静(不出建议)",
+      suggestOffTitle: "点击允许该项目出建议",
       promptSection: "Prompt 技艺",
       promptHint:
         "拆步/验收的系统提示词外置为可编辑文件:打开改完保存,下一次拆步或验收即生效,无需重启;清空内容或删除文件 = 回退应用内置默认,「重置默认」随时拉回。",
@@ -1020,6 +1027,7 @@ const zh = {
     shellInterrupted: "已中断",
     shellOutputTruncated: "输出过长,仅保留最后 {{n}} 行",
     retrying: "API 错误,正在重试({{n}}/{{max}})…",
+    apiRetry: "上游闪断,自动重试中(第 {{n}} 次)…",
     retryFailed: "重试 {{max}} 次仍失败{{error}}",
 modelSwitchTitle: "切换模型确认",
     modelSwitchDesc: "切到 {model}?当前会话将用新 model 继续(已发送的消息保留上下文)。",
