@@ -301,8 +301,33 @@ export type ClaudeStreamState = {
    *  重试成功照常出内容。与 retry(transport 重发整条 prompt)语义不同——这是轮内自愈,
    *  轻提示即可。任何轮次进展(assistant/user/result)即清。 */
   apiRetry: { attempt: number; retryInMs: number; message: string | null } | null;
+  /** AI 提问待选择(`AskUserQuestion` 工具,2026-11-25):AI 在消息流里给了选项等用户
+   *  回答——不是审批框(那是 can_use_tool 权限链),是「AI 等你选」。assistant 帧出现该
+   *  工具时置位(携带问题与选项);**轮次水位清除**(CLI 不回显桌面手输,user 帧不可靠):
+   *  turnSeq 在每 result +1,提问记录所在轮号,新轮首帧(turnSeq 更大)= 用户已回复 → 清。
+   *  success result 不清(轮终恰是等待时刻);失败 result(中断/出错)清。null=无等待。 */
+  pendingQuestion: ClaudePendingQuestion | null;
+  /** 轮次水位(每 result 帧 +1):pendingQuestion 的「已过轮」判定基准。 */
+  turnSeq: number;
   /** 待用户决策的 CLI 权限请求(can_use_tool;CLI 正阻塞等待答复)。result/terminated 清空。 */
   pendingPermissions: PendingPermission[];
+};
+
+/** AskUserQuestion 的结构化提问(宽松解析自 tool_use input)。 */
+export type ClaudePendingQuestion = {
+  /** tool_use block id(问题卡「当前激活」判定用:pendingQuestion.id === block.id);
+   *  文本启发式形态为 `${msgId}:text`(不匹配任何 block,流内无问题卡,只有提示行/徽标)。 */
+  id: string;
+  question: string;
+  options: { label: string; description: string }[];
+  /** 提问所在轮号(轮次水位,内部判定用;UI 不消费)。 */
+  turnSeq: number;
+  /** 来源:"tool" = AskUserQuestion 结构化(流内问题卡+可点选项);"text" = 末段问句启发式
+   *  (轮终门控判定,选项提不出结构,打字回复即可)。 */
+  source: "tool" | "text";
+  /** 置信分(tool 恒 99;text = 分组共证 1~4):≥2 高置信;text 1 分仅 pane 内提示行,
+   *  不进指挥台全局触达(主观内容阈值控制,2026-11-25)。 */
+  score: number;
 };
 
 export const initialClaudeState: ClaudeStreamState = {
@@ -318,6 +343,8 @@ export const initialClaudeState: ClaudeStreamState = {
   backgroundTasks: [],
   retry: null,
   apiRetry: null,
+  pendingQuestion: null,
+  turnSeq: 0,
   pendingPermissions: [],
 };
 
@@ -343,6 +370,83 @@ function flattenToolResultContent(content: string | unknown): string {
   } catch {
     return String(content).slice(0, 4000);
   }
+}
+
+/** 宽松解析 AskUserQuestion 的 tool_use input({questions:[{question,options:[{label,description}]}]})。
+ *  字段缺失/形态漂移一律容忍:解析不出问题文本返回 null(渲染层退回普通工具卡)。 */
+export function parseAskUserQuestionInput(
+  input: unknown,
+): { question: string; options: { label: string; description: string }[] } | null {
+  if (!input || typeof input !== "object") return null;
+  const questions = (input as { questions?: unknown }).questions;
+  if (!Array.isArray(questions) || questions.length === 0) return null;
+  const q0 = questions[0] as { question?: unknown; options?: unknown };
+  const question = typeof q0.question === "string" ? q0.question.trim() : "";
+  if (!question) return null;
+  const options = Array.isArray(q0.options)
+    ? q0.options
+        .map((o) => {
+          const opt = (o ?? {}) as { label?: unknown; description?: unknown };
+          return {
+            label: typeof opt.label === "string" ? opt.label : "",
+            description: typeof opt.description === "string" ? opt.description : "",
+          };
+        })
+        .filter((o) => o.label !== "")
+    : [];
+  return { question, options };
+}
+
+/** 等待关键字(2026-11-25 用户实测反馈补:「要不要恢复你拍板」「等你看完源项目再告诉我:
+ *  是…还是…还是…」这类祈使等待常**不带问号**)。**三组互斥计分**(组内多词不重复计,
+ *  防「你来定」+「你定」子串虚高):拍板组/回复组/确认组各 1 分,与问号组/枚举组/
+ *  英文组(并入确认组)共证——≥2 分才算高置信(指挥台徽标口径)。 */
+const WAITING_KEYWORDS_DECIDE = [
+  "你拍板", "你来定", "你定", "你决定", "你定夺", "你来选", "你选", "你挑", "任选", "听你的", "看你的", "由你决定", "你选择",
+];
+const WAITING_KEYWORDS_REPLY = ["告诉我", "回复我", "跟我说", "说一声", "回个话"];
+const WAITING_KEYWORDS_CONFIRM = ["要不要", "需不需要", "是否需要", "请确认", "请选择", "请指示", "等你确认", "等你决定", "等你指示"];
+const WAITING_KEYWORDS_EN = ["let me know", "your call", "you decide", "should i", "do you want", "which one"];
+
+/** 文本提问启发式(2026-11-25,纯文本「A 还是 B?」场景):判定 assistant 末段是否在等
+ *  用户回答。**轮终门控**(只在 result 到达时调用)+ **末段锚定**(只看最后一条 assistant
+ *  的末段)双保险压误报——轮次在跑时的问句是自问自答修辞,长文中间的问号不是提问;
+ *  轮终后 AI 结尾是问句,语义上就是「在等你说话」(「这样可以吗/要继续吗」也算,本该提醒)。
+ *  判据(任一命中即「疑似等待」):①问号(末段以 ？/? 收尾或末句含问号);②~④等待关键字
+ *  三类(拍板/回复/确认,覆盖无问号的祈使等待;英文小写);⑤「还是」≥2 次枚举句式。
+ *  **分组共证计分**:问号/拍板/回复/确认/英文/枚举六组各 1 分(组内多词不重复计,防
+ *  「你来定」+「你定」子串虚高)。≥2 分=高置信(指挥台徽标口径,Rust 侧同门槛);
+ *  1 分=低置信(pane 内提示行可见,不进全局触达)。结构化 AskUserQuestion 不走此判。 */
+export function detectTextQuestion(fullText: string): { text: string; score: number } | null {
+  // 剥 ``` 围栏代码块(问号在代码里不是提问;跨行非贪婪)与行内 `code`。
+  const stripped = fullText
+    .replace(/```[\s\S]*?```/g, "")
+    .replace(/`[^`\n]*`/g, "");
+  // 末段 = 最后一个非空段落(按空行分段;无空行则整段)。
+  const paragraphs = stripped.split(/\n\s*\n/).map((p) => p.trim()).filter(Boolean);
+  const tail = paragraphs[paragraphs.length - 1];
+  if (!tail || tail.length < 2) return null;
+  const probe = tail.length > 400 ? tail.slice(-400) : tail;
+  const trimmed = probe.trim();
+  let score = 0;
+  // ①问号组:收尾或末句。
+  if (trimmed.endsWith("？") || trimmed.endsWith("?")) {
+    score += 1;
+  } else {
+    const sentences = trimmed.split(/[。！.!?？;;\n]+/).filter(Boolean);
+    const last = sentences[sentences.length - 1];
+    if (last && /[?？]/.test(last)) score += 1;
+  }
+  // ②拍板组 / ③回复组 / ④确认组+英文:组内任一关键字命中即 1 分(互斥分组)。
+  const lower = trimmed.toLowerCase();
+  const hitAny = (words: string[], hay: string) => words.some((k) => hay.includes(k));
+  if (hitAny(WAITING_KEYWORDS_DECIDE, trimmed)) score += 1;
+  if (hitAny(WAITING_KEYWORDS_REPLY, trimmed)) score += 1;
+  if (hitAny(WAITING_KEYWORDS_CONFIRM, trimmed) || hitAny(WAITING_KEYWORDS_EN, lower)) score += 1;
+  if (score === 0) return null; // 零分组命中:不是等待,连提示行都不出。
+  // ⑤枚举组:「还是」≥2 次(「是 A 还是 B,还是 C」,句号收尾也在等)。
+  if ((trimmed.split("还是").length - 1) >= 2) score += 1;
+  return { text: trimmed, score };
 }
 
 /** 把 tool_use input 压成展示用 brief(截断)。 */
@@ -481,7 +585,23 @@ export function applyEvent(state: ClaudeStreamState, payload: ClaudeEventPayload
       next.terminatedReason = null;
       // 轮次有进展(模型出内容)= 已从 API 闪断恢复,清同轮重试提示。
       next.apiRetry = null;
+      // AI 提问待选择·轮次水位清除:本帧已是提问所在轮之后的新轮(用户已回复开新轮)→
+      // 旧提问作废;随后本帧若带新 AskUserQuestion 再置位(新问覆盖)。
+      if (next.pendingQuestion && next.turnSeq > next.pendingQuestion.turnSeq) {
+        next.pendingQuestion = null;
+      }
       const msg = payload.message;
+      // 本帧含 AskUserQuestion tool_use → 置位等选择(增量帧只有带该 block 的那帧命中,
+      // 同轮后续帧不含 → 维持;问题/选项从 input 宽松解析,解析失败退回普通工具卡)。
+      for (const b of msg.content) {
+        if (b.type === "tool_use" && b.name === "AskUserQuestion") {
+          const parsed = parseAskUserQuestionInput(b.input);
+          next.pendingQuestion = parsed
+            ? { id: b.id, ...parsed, turnSeq: next.turnSeq, source: "tool", score: 99 }
+            : null;
+          break;
+        }
+      }
       // 真实 assistant 消息的 model 回填 meta.model(每轮校正):setModel 乐观更新 meta.model 后,
       // 下一轮真实 assistant 事件把实际跑的 model 写回 meta.model--切换成功则落到新值,失败则自动
       // 纠正回旧值。synthetic 消息(model="<synthetic>",已被 transport settingModel flag 吞掉)跳过。
@@ -646,6 +766,8 @@ export function applyEvent(state: ClaudeStreamState, payload: ClaudeEventPayload
         .filter((b) => b.type === "text")
         .map((b) => (b as { type: "text"; text: string }).text);
       if (textParts.length > 0) {
+        // 用户说话了(手机回复路径;桌面打字不回显,靠轮次水位清)→ AI 提问已被回答。
+        next.pendingQuestion = null;
         const id = msg.id ?? genId("user");
         // 幂等:同一 id 重复到达(重连补发/手机侧与后端同时推)不能插两条。
         // 本分支此前没做去重——桌面端靠乐观插入,回显只在手机来源时出现,那时才需要。
@@ -698,6 +820,38 @@ export function applyEvent(state: ClaudeStreamState, payload: ClaudeEventPayload
         totalCostUsd: typeof payload.totalCostUsd === "number" ? payload.totalCostUsd : 0,
         error: payload.error ?? null,
       };
+      // 文本提问启发式(轮终门控,2026-11-25「A 还是 B?」纯文本场景):success 且无结构化
+      // 提问(AskUserQuestion)时,看最后一条 assistant 的末段——剥代码块后以问号收尾 =
+      // 在等用户回答。只看最后一条(无 text 的纯工具轮也不回溯,旧问句已被后续轮消费),
+      // turnSeq 记本轮号(+1 前),新轮首帧即清。问题摘要留尾部(问句在尾)。
+      if (payload.success && !next.pendingQuestion) {
+        for (let i = next.messages.length - 1; i >= 0; i--) {
+          const m = next.messages[i];
+          if (m.role !== "assistant") continue;
+          const texts = m.blocks
+            .filter((b) => b.type === "text")
+            .map((b) => (b as { type: "text"; text: string }).text)
+            .join("\n\n");
+          const q = texts.trim() ? detectTextQuestion(texts) : null;
+          if (q) {
+            next.pendingQuestion = {
+              id: `${m.id}:text`,
+              question: q.text.length > 200 ? q.text.slice(-200) : q.text,
+              options: [],
+              turnSeq: next.turnSeq,
+              source: "text",
+              // 分组共证分:≥2 高置信;1 低置信(仅 pane 内提示行,不进指挥台徽标——
+              // 徽标门槛在 Rust 感知链同口径控制)。
+              score: q.score,
+            };
+          }
+          break;
+        }
+      }
+      // 轮次水位 +1(后续新轮首帧据此判定「用户已回复」清 AI 提问待选择)。失败 result
+      // (中断/出错)= 当前等待作废,直接清;success 不清——轮终恰是「等你选」的时刻。
+      next.turnSeq += 1;
+      if (!payload.success) next.pendingQuestion = null;
       // 记录上下文窗口上限(glm result.modelUsage.<model>.contextWindow,200k 或 1m),供 ctx 显示 + 占用百分比。
       if (payload.contextWindow) {
         next.meta = { ...next.meta, contextWindow: payload.contextWindow };

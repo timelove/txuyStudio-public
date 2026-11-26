@@ -29,6 +29,9 @@ export type ConductorSession = {
   kind: ConductorSessionKind;
   /** 终态附言(出错原因 / 等待审批的工具名),常规态为 null。 */
   detail: string | null;
+  /** AI 提问待选择(AskUserQuestion,2026-11-25):非审批框——AI 在消息流里给了选项等
+   *  用户回答。非 null(问题摘要) = 等待中;kind 与轮终(Finished)正交。 */
+  waitingChoice: string | null;
   lastEventMs: number;
 };
 

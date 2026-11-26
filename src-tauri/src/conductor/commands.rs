@@ -1750,6 +1750,7 @@ pub async fn auto_suggest(
                     tab_title: String::new(),
                     kind: super::SessionKind::Idle,
                     detail: Some("tab 已打开,尚无会话".to_string()),
+                    waiting_choice: None,
                     last_event_ms: 0,
                 });
             }

@@ -326,6 +326,7 @@ function LiveNode({
   const detail = [
     session.tabTitle || session.tabId,
     t(`conductor.kind.${session.kind}`),
+    session.waitingChoice ?? "",
     session.detail ?? "",
     relativeTime(session.lastEventMs, t),
   ]
@@ -344,6 +345,14 @@ function LiveNode({
         style={{ background: color }}
       />
       <span className="truncate text-[var(--mx-text)]">{session.tabTitle || session.tabId}</span>
+      {session.waitingChoice && (
+        <span
+          className="shrink-0 rounded-full bg-[var(--mx-accent-soft)] px-1 text-[9px] font-semibold leading-3.5 text-[var(--mx-accent)]"
+          title={`${t("conductor.pulse.waitingChoiceHint")}: ${session.waitingChoice}`}
+        >
+          ？
+        </span>
+      )}
       {planBadge && (
         <span
           className="shrink-0 rounded-full bg-[var(--mx-accent-soft)] px-1 text-[9px] leading-3.5 tabular-nums text-[var(--mx-accent)]"

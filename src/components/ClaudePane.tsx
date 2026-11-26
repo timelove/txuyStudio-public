@@ -28,7 +28,7 @@ import type { ClaudeTransport } from "../domain/claudeTransport";
 import type { ShellRunTransport } from "../domain/shellRunTransport";
 import { SHELL_MAX_OUTPUT_LINES, type ShellMessage, type ShellRunState } from "../domain/shellRun";
 import type { BackgroundTaskInfo, ClaudeBlock, ClaudeMessage, ClaudeSessionKind, ClaudeStreamState, ClaudeUsage, CompactMeta, PendingPermission } from "../domain/claudeStream";
-import { claudeInputTokens, computeContextInfo, hasPendingApproval as hasPendingApprovalFn, hasPendingPlan as hasPendingPlanFn, hasUsage, inferContextWindow, summarize } from "../domain/claudeStream";
+import { claudeInputTokens, computeContextInfo, hasPendingApproval as hasPendingApprovalFn, hasPendingPlan as hasPendingPlanFn, hasUsage, inferContextWindow, parseAskUserQuestionInput, summarize } from "../domain/claudeStream";
 import {
   PROVIDER_CHANGED_EVENT,
   configuredModelsOf,
@@ -1250,6 +1250,27 @@ export function ClaudePane(props: ClaudePaneProps) {
   // 后台任务运行数(`background_tasks_changed` 快照)。本轮可能已结束(idle),驱动输入框上方
   // 琥珀状态行「后台任务 ×N」;busy/等待确认时被上方状态行盖住,不影响 busy 与发送。
   const bgCount = state?.backgroundTasks.length ?? 0;
+  // 轮次静默 watchdog(2026-11-25 用户实测:模型走 VPN/代理,VPN 未开时请求挂在 TCP/SDK
+  // 超时上,CLI 一个事件都不发——连 api_error 闪断心跳都没有,轮内重试提示也是盲区,UI
+  // 完全静默像「假思考」):busy 且超过 3 分钟无任何流事件 → 显性警示查网络。正常长任务
+  // 不误报——工具调用/思考 token/闪断心跳都是事件,持续刷新水位(applyEvent 恒新引用,
+  // emit 无去重,thinking 纯计数心跳也会触发 state 引用变化)。
+  const STALL_WARN_MS = 180_000;
+  const lastStateAtRef = useRef(Date.now());
+  const [stalled, setStalled] = useState(false);
+  useEffect(() => {
+    lastStateAtRef.current = Date.now();
+  }, [state]);
+  useEffect(() => {
+    if (!busy) {
+      setStalled(false);
+      return;
+    }
+    const id = window.setInterval(() => {
+      setStalled(Date.now() - lastStateAtRef.current > STALL_WARN_MS);
+    }, 5_000);
+    return () => window.clearInterval(id);
+  }, [busy]);
 
   // 当前是否处于「思考中」:busy 且当前轮的 assistant 消息尚无可见文本/工具内容。
   // - 新轮发起后、纯 thinking 阶段(只有 thinking block)→ thinkingNow=true,显「思考中…」。
@@ -1530,6 +1551,22 @@ export function ClaudePane(props: ClaudePaneProps) {
     scrollToBottom();
     void transport.send(text);
   }, [activeTabId, input, busy, shellRunning, scrollToBottom, runSlash]);
+
+  // AskUserQuestion 问题卡点选项直答(2026-11-25):点击选项 = 把 label 作为消息发出,与用户
+  // 手动打字回复完全同一条链(busy 先中断再发,--resume 续接上下文),零新协议。经 busyRef
+  // 读 busy(不进 deps,问题卡深层组件 memo 不被每轮 busy 翻转击穿)。
+  const answerQuestion = useCallback(
+    async (text: string) => {
+      const trimmed = text.trim();
+      if (!trimmed) return;
+      const transport = getClaudeTransportRef.current(activeTabId);
+      if (!transport) return;
+      if (busyRef.current) await transport.interrupt();
+      scrollToBottom();
+      void transport.send(trimmed);
+    },
+    [activeTabId, scrollToBottom],
+  );
 
   // C6 重新发送:user 消息 ↻ 重跑同一轮。busy 时**先 await interrupt 再 send**(与 handleSend
   // 同语义:后端 busy 会拒新轮,不 await 会竞速丢消息);经 busyRef 读 busy(不进 deps——
@@ -2503,6 +2540,8 @@ export function ClaudePane(props: ClaudePaneProps) {
                           onRejectTool={handleRejectTool}
                           onFeedback={handleFeedback}
                           onResend={resendText}
+                          onAnswerQuestion={answerQuestion}
+                          activeQuestionId={state?.pendingQuestion?.id ?? null}
                           approvalActiveId={activeApprovalId}
                           approvalActiveIdx={
                             activeApprovalId !== null &&
@@ -2630,6 +2669,27 @@ export function ClaudePane(props: ClaudePaneProps) {
                   {t("claudepane.apiRetry", { n: apiRetry.attempt })}
                   {apiRetry.message ? <span className="text-[var(--mx-faint)]"> · {apiRetry.message}</span> : null}
                 </span>
+              </div>
+            )}
+            {/* AI 提问待选择(AskUserQuestion,2026-11-25):accent 呼吸点 + 一行提示,切走再
+                回来也能立刻知道「这个会话停在等你选」。tool 形态问题本体是流内问题卡(选项
+                可点直答);text 形态(末段问句启发式)无卡,提示打字回复即可。busy/重试期间
+                不显(那时轮次还在走,不是等待态)。 */}
+            {state?.pendingQuestion && !retrying && !busy && (
+              <div className="mb-1.5 flex items-center gap-2 px-1 text-[var(--mx-accent)]" style={{ fontSize: statusFontPx }}>
+                <span aria-hidden className="h-1.5 w-1.5 animate-pulse rounded-full bg-[var(--mx-accent)]" />
+                <span className="truncate">
+                  {t(state.pendingQuestion.source === "text" ? "claudepane.waitingChoiceText" : "claudepane.waitingChoice")}
+                </span>
+              </div>
+            )}
+            {/* 轮次静默警示(2026-11-25):busy 但 3 分钟无任何流事件——典型为模型代理/VPN
+                不通,请求挂在底层超时上(CLI 静默重试中,一个事件都不发)。警示不阻断:事件
+                恢复(水位刷新)自动消失;不打断 CLI 的自愈重试。 */}
+            {stalled && (
+              <div className="mb-1.5 flex items-center gap-2 px-1 text-[var(--mx-warning)]" style={{ fontSize: statusFontPx }}>
+                <span aria-hidden>⚠</span>
+                <span className="truncate">{t("claudepane.stalled")}</span>
               </div>
             )}
             {(retrying || busy || compactRunning) && !hasPendingPlan && !hasPendingApproval && (
@@ -4019,6 +4079,8 @@ const MessageRow = memo(function MessageRow({
   onRejectTool,
   onFeedback,
   onResend,
+  onAnswerQuestion,
+  activeQuestionId,
   approvalActiveId,
   approvalActiveIdx,
   contextWindow,
@@ -4041,6 +4103,12 @@ const MessageRow = memo(function MessageRow({
   onFeedback?: () => void;
   /** user 消息 hover「重新发送」(C6):重跑同一轮。 */
   onResend?: (text: string) => void;
+  /** AskUserQuestion 问题卡点选项直答(把选项 label 作为消息发出,与打字回复同链)。 */
+  onAnswerQuestion?: (text: string) => void;
+  /** 当前「AI 等你选」的提问 block id(见 state.pendingQuestion);null=无。问题卡据此
+   *  区分「等待中(选项可点)」与「已回复(muted 灰化)」——CLI 不回填 tool_result,
+   *  已答判定只能靠这个单一真源。 */
+  activeQuestionId: string | null;
   /** 键盘流当前待确认 block 的 id(见 ClaudePane activeApproval);null=无待确认。 */
   approvalActiveId: string | null;
   /** 本消息内待确认 block 的键盘高亮索引(0-3);消息不含 active block 时恒 -1(memo 稳定)。 */
@@ -4201,6 +4269,8 @@ const MessageRow = memo(function MessageRow({
                     onApproveTool={onApproveTool}
                     onRejectTool={onRejectTool}
                     onFeedback={onFeedback}
+                    onAnswerQuestion={onAnswerQuestion}
+                    activeQuestionId={activeQuestionId}
                     approvalActiveId={approvalActiveId}
                     approvalActiveIdx={-1}
                     bashCommandOpen
@@ -4227,6 +4297,8 @@ const MessageRow = memo(function MessageRow({
               onApproveTool={onApproveTool}
               onRejectTool={onRejectTool}
               onFeedback={onFeedback}
+              onAnswerQuestion={onAnswerQuestion}
+              activeQuestionId={activeQuestionId}
               approvalActiveId={approvalActiveId}
               approvalActiveIdx={approvalActiveIdx}
               bashCommandOpen={bashCommandOpen}
@@ -4352,6 +4424,8 @@ function BlockView({
   onApproveTool,
   onRejectTool,
   onFeedback,
+  onAnswerQuestion,
+  activeQuestionId,
   approvalActiveId,
   approvalActiveIdx,
   bashCommandOpen,
@@ -4365,6 +4439,10 @@ function BlockView({
   onApproveTool?: (block: Extract<ClaudeBlock, { type: "tool_use" }>, persist: boolean) => void;
   onRejectTool?: (block: Extract<ClaudeBlock, { type: "tool_use" }>, reason?: string) => void;
   onFeedback?: () => void;
+  /** AskUserQuestion 问题卡点选项直答。 */
+  onAnswerQuestion?: (text: string) => void;
+  /** 当前「AI 等你选」的提问 block id;null=无(见 MessageRow 同名 prop)。 */
+  activeQuestionId: string | null;
   /** 键盘流当前待确认 block 的 id;null=无待确认(见 ClaudePane activeApproval)。 */
   approvalActiveId: string | null;
   /** 本消息内待确认 block 的键盘高亮索引;非 active block 恒 -1(memo 稳定)。 */
@@ -4437,6 +4515,22 @@ function BlockView({
   if (block.type === "thinking") {
     return <ThinkingBlock text={block.text} streaming={streaming} t={t} />;
   }
+  // AI 提问(AskUserQuestion,2026-11-25):不走普通工具卡,渲染为问题卡(问题 + 可点选项)。
+  // 解析不出问题结构(形态漂移)时退回普通工具卡,不硬造空卡。
+  if (
+    block.type === "tool_use" &&
+    block.name === "AskUserQuestion" &&
+    parseAskUserQuestionInput(block.input)
+  ) {
+    return (
+      <QuestionCard
+        block={block}
+        t={t}
+        active={activeQuestionId === block.id}
+        onAnswer={onAnswerQuestion}
+      />
+    );
+  }
   // tool_use
   return (
     <ToolCard
@@ -4451,6 +4545,65 @@ function BlockView({
       approvalActiveIdx={block.id === approvalActiveId ? approvalActiveIdx : -1}
       bashCommandOpen={bashCommandOpen}
     />
+  );
+}
+
+/** AskUserQuestion 问题卡(2026-11-25):AI 在消息流里给用户选项等回答——非审批框(那是
+ *  can_use_tool 权限链)。等待中(active):问题原文 + 选项 chips 可点,点击 = 把 label 作为
+ *  消息发出(与手动打字回复完全同链,零新协议);已回复/作废:整卡 muted + 「已回复」标注。
+ *  active 判定来自 state.pendingQuestion(单一真源;CLI 不回填 tool_result,轮次水位清除)。 */
+function QuestionCard({
+  block,
+  t,
+  active,
+  onAnswer,
+}: {
+  block: Extract<ClaudeBlock, { type: "tool_use" }>;
+  t: (k: string) => string;
+  active: boolean;
+  onAnswer?: (text: string) => void;
+}) {
+  const parsed = parseAskUserQuestionInput(block.input);
+  if (!parsed) return null;
+  return (
+    <div
+      className={`mx-fade-in my-1.5 rounded-md border bg-[var(--mx-card-bg)] px-2.5 py-2 ${
+        active ? "border-[var(--mx-accent)]" : "border-[var(--mx-border)] opacity-60"
+      }`}
+    >
+      <div className="mb-1.5 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wide text-[var(--mx-accent)]">
+        <span aria-hidden>❓</span>
+        <span>{t("claudepane.questionTitle")}</span>
+        {!active && (
+          <span className="font-normal normal-case text-[var(--mx-faint)]">
+            · {t("claudepane.questionAnswered")}
+          </span>
+        )}
+      </div>
+      <div dir="auto" className="text-xs leading-relaxed text-[var(--mx-text)]">
+        {parsed.question}
+      </div>
+      <div className="mt-2 flex flex-col gap-1">
+        {parsed.options.map((o, i) => (
+          <button
+            key={i}
+            type="button"
+            disabled={!active || !onAnswer}
+            onClick={() => onAnswer?.(o.label)}
+            className={`flex flex-col items-start rounded border px-2 py-1.5 text-left transition-colors ${
+              active && onAnswer
+                ? "cursor-pointer border-[var(--mx-border)] hover:border-[var(--mx-accent)] hover:bg-[var(--mx-card-inner)]"
+                : "cursor-default border-[var(--mx-border)]"
+            }`}
+          >
+            <span className="text-xs font-medium text-[var(--mx-text)]">{o.label}</span>
+            {o.description && (
+              <span className="mt-0.5 text-[10px] leading-snug text-[var(--mx-muted)]">{o.description}</span>
+            )}
+          </button>
+        ))}
+      </div>
+    </div>
   );
 }
 

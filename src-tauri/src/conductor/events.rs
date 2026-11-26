@@ -85,6 +85,45 @@ fn process_frame(app: &AppHandle, frame: &Value) {
         // Agent 实况拍提取(2026-11-19):同一段锁内顺手完成。工具调用帧(claude
         // assistant / codex item_started)恒过 classify 白名单,此处必然可达。
         let new_beats = collect_beats(&mut data, provider, project_id, tab_id, payload);
+        // 文本提问启发式原料(2026-11-25):claude assistant 帧的 text block 合并存尾部
+        // 500 字符(增量顺序输出,最新 text 帧即末段;纯工具帧不更新)。result 判定用。
+        if provider == "claude"
+            && payload.get("kind").and_then(|v| v.as_str()) == Some("assistant")
+        {
+            let text = payload
+                .get("message")
+                .and_then(|m| m.get("content"))
+                .and_then(|c| c.as_array())
+                .map(|blocks| {
+                    blocks
+                        .iter()
+                        .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("text"))
+                        .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+                        .collect::<Vec<_>>()
+                        .join("\n\n")
+                })
+                .unwrap_or_default();
+            if !text.trim().is_empty() {
+                let chars: Vec<char> = text.chars().collect();
+                let start = chars.len().saturating_sub(500);
+                let tail: String = chars[start..].iter().collect();
+                data.last_text_tail.insert(super::skey(project_id, tab_id), tail);
+            }
+        }
+        // 文本提问启发式(轮终门控):success result 时预取末段问句判定(≥2 分高置信)——
+        // **在 entry 借用前完成**(MutexGuard Deref 不支持字段级拆分,与 sessions 的
+        // &mut 并存会 E0502)。
+        let heuristic_q: Option<String> = if provider == "claude"
+            && payload.get("kind").and_then(|v| v.as_str()) == Some("result")
+            && payload.get("success").and_then(|v| v.as_bool()) == Some(true)
+        {
+            data.last_text_tail
+                .get(&super::skey(project_id, tab_id))
+                .and_then(|t| detect_text_question(t))
+                .map(|(q, _score)| q)
+        } else {
+            None
+        };
         let existed = data.sessions.contains_key(&super::skey(project_id, tab_id));
         let entry = data.sessions.entry(super::skey(project_id, tab_id)).or_insert_with(|| SessionStatus {
             tab_id: tab_id.to_string(),
@@ -94,9 +133,27 @@ fn process_frame(app: &AppHandle, frame: &Value) {
             tab_title: String::new(),
             kind,
             detail: detail.clone(),
+            waiting_choice: None,
             last_event_ms: now_ms(),
         });
         let changed = if existed { entry.kind != kind } else { true };
+        // AI 提问待选择(AskUserQuestion,2026-11-25):assistant 帧带该工具 → 置位(问题摘要);
+        // kind 流转且非 Finished(用户回复开新轮 Running/中断 Idle/出错 Error/新审批)→ 清除;
+        // Finished 保持——轮次结束恰是「等你选」的时刻。本帧带新问时先清后设(覆盖)。
+        let asked = ask_user_question_summary(provider, payload);
+        if existed && changed && kind != SessionKind::Finished && asked.is_none() {
+            entry.waiting_choice = None;
+        }
+        if let Some(q) = asked {
+            entry.waiting_choice = Some(q);
+        }
+        // 文本提问启发式(轮终门控,2026-11-25):success result(→ Finished)且无结构化等待
+        // 时,末段问句判定 → waiting_choice。清除走既有 kind 流转(下一轮首帧 Finished→Running)。
+        if kind == SessionKind::Finished && entry.waiting_choice.is_none() {
+            if let Some(q) = heuristic_q {
+                entry.waiting_choice = Some(q);
+            }
+        }
         entry.kind = kind;
         entry.detail = detail;
         entry.last_event_ms = now_ms();
@@ -385,6 +442,140 @@ fn collect_beats(
         );
     }
     out
+}
+
+/// AskUserQuestion 等「非审批的用户判断」信号提取(2026-11-25):assistant 帧带该工具的
+/// tool_use → Some(问题摘要,input.questions[].question 宽松提取);其余帧 None。
+/// claude 专属(codex 无此工具)。增量帧只有含该 block 的那帧命中。
+fn ask_user_question_summary(provider: &str, payload: &Value) -> Option<String> {
+    if provider != "claude" {
+        return None;
+    }
+    if payload.get("kind").and_then(|v| v.as_str()) != Some("assistant") {
+        return None;
+    }
+    let blocks = payload.get("message")?.get("content")?.as_array()?;
+    for b in blocks {
+        if b.get("type").and_then(|t| t.as_str()) != Some("tool_use") {
+            continue;
+        }
+        if b.get("name").and_then(|n| n.as_str()) != Some("AskUserQuestion") {
+            continue;
+        }
+        let q = b
+            .get("input")
+            .and_then(|i| i.get("questions"))
+            .and_then(|q| q.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|q| q.get("question"))
+            .and_then(|q| q.as_str())
+            .unwrap_or("AI 提问");
+        return Some(truncate_chars(q.trim(), 120).to_string());
+    }
+    None
+}
+
+/// 等待关键字(2026-11-25 用户实测反馈:祈使等待「要不要恢复你拍板」「等你看完…再告诉我:
+/// 是…还是…还是…」常**不带问号**)。**三组互斥计分**(组内多词不重复计,防「你来定」+
+/// 「你定」子串虚高),与前端 `claudeStream.ts` 同口径。分组共证 ≥2 分才进 waiting_choice
+/// (指挥台徽标高置信门槛);1 分仅前端 pane 内提示行,不进全局触达。
+const WAITING_KEYWORDS_DECIDE: &[&str] = &[
+    "你拍板", "你来定", "你定", "你决定", "你定夺", "你来选", "你选", "你挑", "任选", "听你的", "看你的", "由你决定", "你选择",
+];
+const WAITING_KEYWORDS_REPLY: &[&str] = &["告诉我", "回复我", "跟我说", "说一声", "回个话"];
+const WAITING_KEYWORDS_CONFIRM: &[&str] = &[
+    "要不要", "需不需要", "是否需要", "请确认", "请选择", "请指示", "等你确认", "等你决定", "等你指示",
+];
+const WAITING_KEYWORDS_EN: &[&str] = &[
+    "let me know", "your call", "you decide", "should i", "do you want", "which one",
+];
+
+/// 文本提问启发式(与前端 `claudeStream.ts detectTextQuestion` 同口径,2026-11-25):剥 ```
+/// 围栏代码块后,末段(最后非空段落,尾部 400 字符)**分组共证计分**:①问号组(以 ？/?
+/// 收尾或末句含问号);②拍板组;③回复组;④确认组+英文(小写);⑤枚举组(「还是」≥2 次)。
+/// 每组 1 分(互斥,防子串虚高)。返回 (末段摘要, 分数):**≥2 分才判等待**(主观内容阈值
+/// 控制,2026-11-25 用户:「非常主观性的内容,判断的阈值得控制」——指挥台全局触达要高
+/// 置信;1 分的低置信仅前端 pane 内提示行可见)。**轮终门控由调用方保证**。
+fn detect_text_question(full: &str) -> Option<(String, u32)> {
+    // 剥 ``` 围栏(行状态机;行内 `code` 不剥——行内问号后通常还有正文,末段锚定下无影响)。
+    let mut stripped = String::with_capacity(full.len());
+    let mut in_fence = false;
+    for line in full.lines() {
+        if line.trim_start().starts_with("```") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if !in_fence {
+            stripped.push_str(line);
+            stripped.push('\n');
+        }
+    }
+    // 末段 = 最后一个非空段落(空行分段,段内连续非空行合并)。
+    let mut paras: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    for line in stripped.lines() {
+        if line.trim().is_empty() {
+            if !cur.trim().is_empty() {
+                paras.push(std::mem::take(&mut cur));
+            } else {
+                cur.clear();
+            }
+        } else {
+            cur.push_str(line);
+            cur.push('\n');
+        }
+    }
+    if !cur.trim().is_empty() {
+        paras.push(cur);
+    }
+    let tail_para = paras.last()?;
+    // 尾部 400 字符(问句在尾;chars 切防劈开 UTF-8)。
+    let chars: Vec<char> = tail_para.chars().collect();
+    let start = chars.len().saturating_sub(400);
+    let trimmed: String = chars[start..].iter().collect();
+    let trimmed = trimmed.trim();
+    if trimmed.chars().count() < 2 {
+        return None;
+    }
+    let summary = || truncate_chars(trimmed, 120).to_string();
+    let mut score: u32 = 0;
+    // ①问号组:收尾或末句(「……可以吗?谢谢」类按句读切分取最后一句)。
+    if trimmed.ends_with('？') || trimmed.ends_with('?') {
+        score += 1;
+    } else {
+        let last_sentence = trimmed
+            .split(|c: char| "。！.!?？;;\n".contains(c))
+            .filter(|s| !s.trim().is_empty())
+            .last();
+        if last_sentence.is_some_and(|s| s.contains('?') || s.contains('？')) {
+            score += 1;
+        }
+    }
+    // ②拍板组 / ③回复组 / ④确认组+英文(小写):组内任一命中即 1 分(互斥分组)。
+    if WAITING_KEYWORDS_DECIDE.iter().any(|k| trimmed.contains(k)) {
+        score += 1;
+    }
+    if WAITING_KEYWORDS_REPLY.iter().any(|k| trimmed.contains(k)) {
+        score += 1;
+    }
+    let lower = trimmed.to_lowercase();
+    if WAITING_KEYWORDS_CONFIRM.iter().any(|k| trimmed.contains(k))
+        || WAITING_KEYWORDS_EN.iter().any(|k| lower.contains(k))
+    {
+        score += 1;
+    }
+    if score == 0 {
+        return None; // 零分组命中:不是等待。
+    }
+    // ⑤枚举组:「还是」≥2 次(「是 A 还是 B,还是 C」,句号收尾也在等)。
+    if trimmed.split("还是").count() - 1 >= 2 {
+        score += 1;
+    }
+    // 主观内容阈值:≥2 分才进 waiting_choice(指挥台徽标);1 分留给前端 pane 内提示。
+    if score < 2 {
+        return None;
+    }
+    Some((summary(), score))
 }
 
 fn classify(provider: &str, payload: &Value) -> Option<(SessionKind, Option<String>)> {

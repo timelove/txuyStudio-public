@@ -16,9 +16,11 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-# 版本跟随桌面端(package.json/tauri.conf.json)同步 bump——AppUpdateService 以 release
-# tag(v0.2.x)与本字段比对判断更新,口径必须同源;build number(+N)仅在同名版本内递增。
-version: 0.2.24+1
+# 版本跟随桌面端**真源 tauri.conf.json**同步 bump(2026-11-25 事故教训:v0.2.25/0.2.26
+# 两次发版漏改本字段,APK versionName 停在 0.2.24——应用内更新比较 latest>本值恒真,
+# 装完还提示更新,观感「一个版本一个版本升」永无尽头)——AppUpdateService 以 release
+# tag(v0.2.x)与本字段比对判断更新,口径必须同源;build number(+N)单调递增。
+version: 0.2.27+3
 
 environment:
   sdk: ^3.13.5

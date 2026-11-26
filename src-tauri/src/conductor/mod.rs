@@ -268,6 +268,11 @@ pub struct SessionStatus {
     pub kind: SessionKind,
     /// 终态附言(出错原因 / 等待审批的工具名),常规态为 None。
     pub detail: Option<String>,
+    /// AI 提问待选择(2026-11-25,AskUserQuestion):非审批框——AI 在消息流里给了选项
+    /// 等用户回答。Some(问题摘要) = 等待中;kind 流转出 Finished(用户回复开新轮/中断/
+    /// 出错/新审批)时清除,Finished(轮终)保持——轮次结束恰是等待时刻。与 kind 正交
+    /// (kind 照常 Idle/Finished 流转),快照透出驱动指挥台「等你选择」徽标。
+    pub waiting_choice: Option<String>,
     pub last_event_ms: i64,
 }
 
@@ -336,6 +341,10 @@ pub struct ConductorData {
     /// 按 id 去重,每会话环形 [`SEEN_TOOL_IDS`] 条)。codex item.started 恰发一次,
     /// 不需要。key = `projectId/tabId` 复合键([`skey`])。
     pub seen_tool_ids: HashMap<String, VecDeque<String>>,
+    /// 文本提问启发式原料(2026-11-25,「A 还是 B?」纯文本场景):每会话最近一帧 claude
+    /// assistant 的 text block 合并(尾部 500 字符;增量顺序输出,最新 text 帧即末段),
+    /// result(success)到达时做末段问句判定 → waiting_choice。key = [`skey`]。
+    pub last_text_tail: HashMap<String, String>,
 }
 
 /// Agent 实况单拍(2026-11-19,指挥台「Agent 实况」面板,参考 CrommaCode Game View
@@ -610,6 +619,7 @@ pub fn install(app: &AppHandle) {
         stage_xp: disk.stage_xp,
         stage_dirty: false,
         seen_tool_ids: HashMap::new(),
+        last_text_tail: HashMap::new(),
     };
     app.manage(ConductorState(Mutex::new(data)));
     // prompt 技艺文件播种(2026-11-18):拆步/验收 system prompt 外置为可编辑 md,
